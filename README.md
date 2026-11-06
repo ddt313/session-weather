@@ -1,7 +1,7 @@
 # Claude Code mods
 
 Mods for Claude Code: plugins of function hooks that change Claude Code's own
-interface. This folder is a plugin marketplace, `local-mods`, holding one mod
+interface. This folder is a plugin marketplace, `ddt313-mods`, holding one mod
 so far.
 
 | Mod | What it does |
@@ -47,7 +47,7 @@ The pane opens beside the conversation when a session starts.
 
 ```
 claude plugin marketplace add <path to this folder>
-claude plugin install session-weather@local-mods
+claude plugin install session-weather@ddt313-mods
 ```
 
 A marketplace that is a folder is read from that folder: edit a mod, then

@@ -14,7 +14,7 @@ drops the trailer: here it stays.
 
 ## Working on a mod
 
-- This folder is the `local-mods` marketplace, and Claude Code reads each
+- This folder is the `ddt313-mods` marketplace, and Claude Code reads each
   installed mod straight from its folder here. After an edit, `/reload-plugins`
   in a session loads it, with no version bump and no reinstall.
 - Before a commit, run `claude plugin test <mod>` and
