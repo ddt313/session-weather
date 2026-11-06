@@ -29,13 +29,20 @@ The pane opens beside the conversation when a session starts.
 - Reads the main loop's thinking blocks as they stream (subagents left out)
   and has Claude Haiku 5.5 sum them up in a few lines: what Claude is doing,
   the decisions it settled on (★), and what it says comes next (→).
-- At most one update every 15 seconds while new notes arrive. A long
+- At most one Haiku request every 15 seconds while new notes arrive. A long
   stretch of thinking does not wait for its end: what it wrote since the
-  last update (200 characters or more, cut at a sentence's end) is
-  summarized while it goes on. The prompt's
-  earlier updates stay, newest first, in their own window under the weather.
-  A recap closes a turn that had two updates or more. A new prompt starts the
-  list over.
+  last request (200 characters or more, cut at a sentence's end) is read
+  while it goes on. Each request also carries the last thousand characters
+  or so of what the previous update read, so Haiku can follow where the new
+  notes pick up.
+- Haiku gives an update only when the notes say something new: what Claude
+  sets out to do, what it found, a choice it settled on, a change of plan.
+  Otherwise it replies WAIT: the pane says what it waits for
+  (`Đợi thêm: …`), and those notes go again with the next ones. After 45
+  seconds without an update, and for the turn's recap, WAIT is not allowed.
+- The prompt's earlier updates stay, newest first, in their own window under
+  the weather. A recap closes a turn that had two updates or more, or that
+  ended with notes no update read. A new prompt starts the list over.
 - To scroll the updates and nothing else, click ▲ ▼: each click moves about
   half the window, and a line scrolled part-way shows from there, marked `…`.
   The mouse wheel does not reach the updates (the desktop scrolls the pane
@@ -61,8 +68,8 @@ The pane opens beside the conversation when a session starts.
 - The mod cannot delete files (its file API has no delete), so the logs stay
   until you remove them; a turn takes a kilobyte or two.
 - The summary is written in Vietnamese (fixed for now).
-- Each update is one Haiku request on the session's own account, about
-  $0.001; the pane shows what the summaries cost this session. The request
+- Each update or WAIT is one Haiku request on the session's own account,
+  about $0.001; the pane shows what the summaries cost this session. The request
   carries your prompt and Claude's thinking notes. **Turn summary off** stops
   the requests, and the choice is kept across sessions.
 
