@@ -26,9 +26,12 @@ export type ThinkingEntry = { at: number; gist: string; decisions: string[]; nex
 
 // The main loop's current or last turn, as the summary follows it. `notes`
 // are its thinking blocks that carried text, oldest first; `summarized`
-// counts the ones an update has read; `entries` are the updates, oldest
-// first. `durationMs` is set once the turn ended; `failure` says why the
-// latest request gave no update.
+// counts the ones an update has read, and `seen` the ones Haiku has read,
+// an update or a WAIT (`summarized` when absent); `entries` are the
+// updates, oldest first. `durationMs` is set once the turn ended; `failure`
+// says why the latest request gave no update; `waitingFor` is what Haiku
+// said it waits for at its last WAIT ('' when it did not say), until an
+// update comes.
 export type Thinking = {
   turnId: string
   request: string
@@ -37,9 +40,11 @@ export type Thinking = {
   isAborted?: boolean
   notes: string[]
   summarized: number
+  seen?: number
   entries: ThinkingEntry[]
   isSummarizing: boolean
   failure?: string
+  waitingFor?: string
 }
 
 declare module 'claude-code' {

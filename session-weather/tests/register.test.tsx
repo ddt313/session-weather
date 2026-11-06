@@ -250,6 +250,18 @@ const USAGE = { input_tokens: 10_000, output_tokens: 2_000, cache_read_input_tok
 const answer = (text: string) => ({ isAnswered: true, text, usage: USAGE })
 const PLAIN = 'GIST: Claude đang sửa lỗi.'
 
+// The line that ends a request where Haiku may not reply WAIT.
+const NO_WAIT = 'WAIT is not allowed this time.'
+
+// What a prompt holds between <tag> and </tag>, or '' where it has none.
+const tagged = (prompt: string | undefined, tag: string) => {
+  const text = prompt ?? ''
+  const open = text.indexOf(`<${tag}>\n`)
+  const close = text.indexOf(`\n</${tag}>`, open)
+
+  return open === -1 || close === -1 ? '' : text.slice(open + tag.length + 3, close)
+}
+
 // Pieces of one streamed response.
 const thought = (index: number, text: string) => ({ kind: 'thinking', index, text })
 const toolStart = (index: number) => ({ kind: 'tool', index, id: `toolu_${index}`, name: 'Read' })
@@ -621,12 +633,14 @@ test('updates keep 15 seconds apart, stay newest first, and the end adds a recap
   await clock.advance(10 * SECOND)
   expect(asks.length).toBe(1)
 
-  // The second update reads the new note alone, and what the first said.
+  // The second update reads the new note, the one the first read as its
+  // context, and what the first said.
   await clock.advance(5 * SECOND)
   expect(asks.length).toBe(2)
-  expect(asks[1]?.prompt).toContain('Second note.')
-  expect(asks[1]?.prompt).not.toContain('First note.')
+  expect(tagged(asks[1]?.prompt, 'notes')).toBe('<note>\nSecond note.\n</note>')
+  expect(tagged(asks[1]?.prompt, 'context')).toBe('<note>\nFirst note.\n</note>')
   expect(asks[1]?.prompt).toContain('<update>\nGIST: Một.\nDECISION: Chỉ sửa file A\n</update>')
+  expect(asks[1]?.prompt).not.toContain(NO_WAIT)
 
   // The first update stays, under the second.
   expect(await thoughts($)).toEqual([
@@ -642,13 +656,14 @@ test('updates keep 15 seconds apart, stay newest first, and the end adds a recap
   await clock.advance(20 * SECOND)
   expect(asks.length).toBe(2)
 
-  // The recap reads the whole turn, and stands on top.
+  // The recap reads the whole turn, may not wait, and stands on top.
   await $.turn.complete(turnDone({ durationMs: 40_000 }) as never)
   await clock.settle()
   expect(asks.length).toBe(3)
   expect(asks[2]?.prompt).toContain('The turn has ended')
-  expect(asks[2]?.prompt).toContain('First note.')
-  expect(asks[2]?.prompt).toContain('Second note.')
+  expect(tagged(asks[2]?.prompt, 'notes')).toBe('<note>\nFirst note.\n</note>\n<note>\nSecond note.\n</note>')
+  expect(asks[2]?.prompt).not.toContain('<context>')
+  expect(asks[2]?.prompt.endsWith(`\n\n${NO_WAIT}`)).toBe(true)
   expect(await thoughts($)).toEqual([
     '🧭 Thinking · 40s · done',
     'Recap · Tổng kết.',
@@ -943,11 +958,12 @@ test('a long stretch of thinking is summarized a part at a time while it streams
   expect(asks[0]?.prompt).toContain(`<note>\n${sentences(1)} …\n</note>`)
   expect(asks[0]?.system).toContain('was cut while Claude was still writing it')
 
-  // Its second, after the gap and once written: the new part alone.
+  // Its second, after the gap and once written: the new part, the first one
+  // as its context.
   await clock.advance(20 * SECOND)
   expect(asks.length).toBe(2)
-  expect(asks[1]?.prompt).toContain(`<note>\n… ${sentences(2)} …\n</note>`)
-  expect(asks[1]?.prompt).not.toContain('step 1')
+  expect(tagged(asks[1]?.prompt, 'notes')).toBe(`<note>\n… ${sentences(2)} …\n</note>`)
+  expect(tagged(asks[1]?.prompt, 'context')).toBe(`<note>\n${sentences(1)} …\n</note>`)
 
   // The block ends: its rest is the last part, summarized in its turn; the
   // turn's recap then reads all three.
@@ -995,6 +1011,119 @@ test('a long note keeps its opening and its end, where the reasoning lands', asy
   const prompt = asks[0]?.prompt ?? ''
   expect(prompt).toContain(`<note>\n${'A'.repeat(2_000)}\n[…]\n${'B'.repeat(1_000)}${'C'.repeat(3_000)}\n</note>`)
   expect(prompt).not.toContain('A'.repeat(2_001))
+})
+
+test('the next request carries the end of what the last update read, from a sentence on', async ($, on) => {
+  const { asks, steps, clock } = engine(on)
+  const plan = Array.from({ length: 30 }, (_, at) => `Sentence ${at} of the plan, said at some length.`).join(' ')
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, plan), stop])
+  await clock.advance(SECOND)
+  await runStep($, steps, 't1', [thought(0, 'Next part.'), stop])
+  await clock.advance(15 * SECOND)
+  expect(asks.length).toBe(2)
+
+  // About a thousand characters of the plan's end, from the first sentence
+  // that starts in them, marked as cut.
+  const context = tagged(asks[1]?.prompt, 'context')
+  expect(context).toMatch(/^<note>\n… Sentence \d+ of the plan/)
+  expect(context.endsWith('Sentence 29 of the plan, said at some length.\n</note>')).toBe(true)
+  expect(context).not.toContain('Sentence 0 ')
+  expect(context.length).toBeLessThanOrEqual('<note>\n… \n</note>'.length + 1_000)
+  expect(tagged(asks[1]?.prompt, 'notes')).toBe('<note>\nNext part.\n</note>')
+})
+
+test('Haiku may wait for more notes: the pane says what for, and the notes come back with the next', async ($, on) => {
+  const { asks, replies, steps, clock } = engine(on)
+  replies.push(answer('WAIT: Claude chưa chốt dùng A hay B'), answer('GIST: Claude chọn B.\nDECISION: Dùng B'))
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, 'Option A is quick. Option B is safe.'), stop])
+  await clock.advance(SECOND)
+  expect(asks.length).toBe(1)
+  expect(asks[0]?.system).toContain('Reply WAIT when')
+  expect(await thoughts($)).toEqual([
+    '🧭 Thinking · 1s',
+    'Đợi thêm: Claude chưa chốt dùng A hay B',
+    'Summary cost $0.002 - Haiku 5.5',
+  ])
+
+  // Nothing new since the WAIT: no request, however long the gap.
+  await clock.advance(20 * SECOND)
+  expect(asks.length).toBe(1)
+
+  // A new note: the one Haiku waited on goes again, first.
+  await runStep($, steps, 't1', [thought(0, 'B it is.'), stop])
+  await clock.advance(SECOND)
+  expect(asks.length).toBe(2)
+  expect(tagged(asks[1]?.prompt, 'notes')).toBe(
+    '<note>\nOption A is quick. Option B is safe.\n</note>\n<note>\nB it is.\n</note>',
+  )
+  expect(asks[1]?.prompt).not.toContain('<context>')
+  expect(asks[1]?.prompt).not.toContain(NO_WAIT)
+  expect(await thoughts($)).toEqual([
+    '🧭 Thinking · 22s',
+    '22s · Claude chọn B.',
+    '★ Dùng B',
+    'Summary cost $0.004 - Haiku 5.5',
+  ])
+})
+
+test('after 45 seconds without an update WAIT is not allowed, and a WAIT then gives what it waits for', async ($, on) => {
+  const { asks, replies, steps, clock } = engine(on)
+  replies.push(answer('WAIT'), answer('WAIT: chưa rõ Claude định làm gì'), answer('WAIT: Claude vẫn đang đọc code'))
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, 'Let me read the code.'), stop])
+  await clock.advance(SECOND)
+  // A bare WAIT does not say what for.
+  expect((await thoughts($))[1]).toBe('Đợi thêm…')
+
+  await runStep($, steps, 't1', [thought(0, 'Reading more of it.'), stop])
+  await clock.advance(15 * SECOND)
+  expect(asks.length).toBe(2)
+  expect(asks[1]?.prompt).not.toContain(NO_WAIT)
+  expect((await thoughts($))[1]).toBe('Đợi thêm: chưa rõ Claude định làm gì')
+
+  // A long tool call: no new note, until the pane has had no update for 45
+  // seconds. Then the notes that waited go once more, with WAIT taken away.
+  await clock.advance(28 * SECOND)
+  expect(asks.length).toBe(2)
+  await clock.advance(SECOND)
+  expect(asks.length).toBe(3)
+  expect(asks[2]?.prompt.endsWith(`\n\n${NO_WAIT}`)).toBe(true)
+  expect(tagged(asks[2]?.prompt, 'notes')).toBe('<note>\nLet me read the code.\n</note>\n<note>\nReading more of it.\n</note>')
+
+  // Haiku waited all the same: what it waits for becomes the update.
+  expect(await thoughts($)).toEqual([
+    '🧭 Thinking · 45s',
+    '45s · Claude vẫn đang đọc code',
+    'Summary cost $0.006 - Haiku 5.5',
+  ])
+})
+
+test('a turn that ends while Haiku waits gets its recap, WAIT not allowed', async ($, on) => {
+  const { asks, replies, steps, clock } = engine(on)
+  replies.push(answer('WAIT: chưa rõ Claude định làm gì'), answer('GIST: Claude đã đọc code và dừng ở đó.'))
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, 'Let me read the code.'), stop])
+  await clock.advance(SECOND)
+  await $.turn.complete(turnDone({ durationMs: 5_000 }) as never)
+  await clock.settle()
+  expect(asks.length).toBe(2)
+  expect(asks[1]?.prompt).toContain('The turn has ended')
+  expect(asks[1]?.prompt.endsWith(`\n\n${NO_WAIT}`)).toBe(true)
+  expect(await thoughts($)).toEqual([
+    '🧭 Thinking · 5s · done',
+    'Recap · Claude đã đọc code và dừng ở đó.',
+    'Summary cost $0.004 - Haiku 5.5',
+  ])
 })
 
 // The session's log, under the home directory the engine's process has.
