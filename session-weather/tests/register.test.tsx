@@ -200,6 +200,7 @@ const press = async ($: Test$, key: string, columns?: number) => {
   await ui.unmount()
 }
 
+
 // Haiku's answer; 10k tokens in and 2k out cost $0.002.
 const USAGE = { input_tokens: 10_000, output_tokens: 2_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 const answer = (text: string) => ({ isAnswered: true, text, usage: USAGE })
@@ -782,20 +783,7 @@ test('a reply that ignores the format still shows, and the cost adds up', async 
   expect(await thoughts($)).toContain('Summary cost $0.004 - Haiku 5.5')
 })
 
-// The person's wheel over the pane: `by` rows, negative up, on a body of
-// `bodyRows` (the test pane's 30 unless given).
-const wheel = ($: { ui: { scroll: (e: never) => Promise<unknown> } }, by: number, bodyRows = 30) =>
-  $.ui.scroll({
-    component: 'Pane',
-    requestId: 'session-weather',
-    offset: 0,
-    by,
-    bodyRows,
-    contentRows: bodyRows,
-    origin: { kind: 'person' },
-  } as never)
-
-test('the updates scroll in their own window, the weather stays, and a new update keeps the place', async ($, on) => {
+test('the arrows move the updates in their own window, half of it a click; the weather stays', async ($, on) => {
   const { replies, steps, clock } = engine(on, { cost: 1.234 })
   replies.push(answer('GIST: Một.\nDECISION: Chỉ sửa file A'), answer('GIST: Hai.\nNEXT: Chạy test'), answer('GIST: Ba.'))
 
@@ -806,46 +794,37 @@ test('the updates scroll in their own window, the weather stays, and a new updat
   await runStep($, steps, 't1', [thought(0, 'Second note.'), stop])
   await clock.advance(15 * SECOND)
 
-  // Newest first: "16s · Hai.", "→ Chạy test", then "1s · Một.".
-  expect(await wheel($, 2)).toEqual({})
+  // Newest first, a row each: "16s · Hai.", "→ Chạy test", "1s · Một.",
+  // "★ Chỉ sửa file A". A click moves half the window, five rows in a body
+  // of thirty, and stops at the last row.
+  await press($, 'older')
   expect(await pane($)).toContain('Session cost $1.23')
-  expect(await thoughts($)).toEqual([
-    '🧭 Thinking · 16s',
-    '1s · Một.',
-    '★ Chỉ sửa file A',
-    'Summary cost $0.004 - Haiku 5.5',
-  ])
-  expect(await buttons($)).toEqual(['↑ 1 newer update', 'Turn summary off', '▲', '▼'])
-
-  // A new update lands on top, and the window keeps showing the same lines.
-  await runStep($, steps, 't1', [thought(0, 'Third note.'), stop])
-  await clock.advance(15 * SECOND)
-  expect((await thoughts($)).slice(1, 3)).toEqual(['1s · Một.', '★ Chỉ sửa file A'])
+  expect(await thoughts($)).toEqual(['🧭 Thinking · 16s', '★ Chỉ sửa file A', 'Summary cost $0.004 - Haiku 5.5'])
   expect(await buttons($)).toEqual(['↑ 2 newer updates', 'Turn summary off', '▲', '▼'])
 
-  // The arrows step three rows at a time.
-  await press($, 'newer')
-  expect((await thoughts($)).slice(1, 2)).toEqual(['31s · Ba.'])
-  await press($, 'older')
-  expect((await thoughts($)).slice(1, 2)).toEqual(['1s · Một.'])
+  // A new update lands on top, and the window keeps showing the same row.
+  await runStep($, steps, 't1', [thought(0, 'Third note.'), stop])
+  await clock.advance(15 * SECOND)
+  expect((await thoughts($))[1]).toBe('★ Chỉ sửa file A')
+  expect(await buttons($)).toEqual(['↑ 3 newer updates', 'Turn summary off', '▲', '▼'])
 
-  // The window stops at either end, and the button goes back to the newest.
-  await wheel($, -100)
+  // ▲ goes back as far, stopping at the newest; ↑ goes straight there.
+  await press($, 'newer')
   expect((await thoughts($))[1]).toBe('31s · Ba.')
-  await wheel($, 100)
-  expect((await thoughts($)).slice(1)).toEqual(['★ Chỉ sửa file A', 'Summary cost $0.006 - Haiku 5.5'])
+  await press($, 'older')
+  expect((await thoughts($))[1]).toBe('★ Chỉ sửa file A')
   await press($, 'newest')
   expect((await thoughts($))[1]).toBe('31s · Ba.')
 
-  // A new prompt starts at the top.
-  await wheel($, 2)
+  // A new prompt starts at the top, with nothing to scroll.
+  await press($, 'older')
   await $.turn.start({ text: 'next', turnId: 't2' })
   expect(await buttons($)).toEqual(['Turn summary off'])
 })
 
-test('in a narrow pane a key steps a row and an arrow about three, the lines wrapping as the surface wraps them', async ($, on) => {
+test('in a narrow pane the lines wrap as the surface wraps them, and a click on ▼ passes a long line', async ($, on) => {
   const { replies, steps, clock } = engine(on)
-  replies.push(answer('GIST: Claude đang đọc file cấu hình rồi chạy lại toàn bộ test\nNEXT: Chạy lại test'), answer('GIST: Mới.'))
+  replies.push(answer('GIST: Claude đang đọc file cấu hình rồi chạy lại toàn bộ test\nNEXT: Chạy lại test'))
 
   await $.session.start(start)
   await $.turn.start({ text: 'fix it', turnId: 't1' })
@@ -854,7 +833,7 @@ test('in a narrow pane a key steps a row and an arrow about three, the lines wra
 
   // One Text a line, for the surface to wrap at its full width. At 21
   // columns a desktop row holds about 23 characters: the long line is three
-  // rows, starting at its 1st, 22nd and 45th characters.
+  // rows, the next step a fourth.
   expect(await thoughts($, 'desktop', 21)).toEqual([
     '🧭 Thinking · 1s',
     '1s · Claude đang đọc file cấu hình rồi chạy lại toàn bộ test',
@@ -862,45 +841,38 @@ test('in a narrow pane a key steps a row and an arrow about three, the lines wra
     'Summary cost $0.002 - Haiku 5.5',
   ])
 
-  // A key moves a row: the long line shows from its second row, marked.
-  await wheel($, 1)
-  expect((await thoughts($, 'desktop', 21)).slice(1, -1)).toEqual([
-    '… file cấu hình rồi chạy lại toàn bộ test',
-    '→ Chạy lại test',
-  ])
-
-  // An update lands on top, and the window keeps its place.
-  await runStep($, steps, 't1', [thought(0, 'Another note.'), stop])
-  await clock.advance(15 * SECOND)
-  expect((await thoughts($, 'desktop', 21)).slice(1, -1)).toEqual([
-    '… file cấu hình rồi chạy lại toàn bộ test',
-    '→ Chạy lại test',
-  ])
-
-  // An arrow moves three rows: past the long line, to its next step; and
-  // back, to the long line's first row.
   await press($, 'older', 21)
   expect((await thoughts($, 'desktop', 21)).slice(1, -1)).toEqual(['→ Chạy lại test'])
   await press($, 'newer', 21)
   expect((await thoughts($, 'desktop', 21))[1]).toBe('1s · Claude đang đọc file cấu hình rồi chạy lại toàn bộ test')
 })
 
-test('a short pane body, or the summary off, scrolls whole as the engine does', async ($, on) => {
-  engine(on)
-  let moves = 0
-  on('ui.scroll', () => {
-    moves += 1
-
-    return {}
-  })
+test('a click on ▼ shows a long line from part-way, marked, and a new update keeps that place', async ($, on) => {
+  const { replies, steps, clock } = engine(on)
+  const words = Array.from({ length: 60 }, (_, at) => `từ${at}`).join(' ')
+  replies.push(answer(`GIST: ${words}`), answer('GIST: Mới.'))
 
   await $.session.start(start)
-  await wheel($, 3, 12)
-  expect(moves).toBe(1)
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, 'A note.'), stop])
+  await clock.advance(SECOND)
 
-  await press($, 'summary-toggle')
-  await wheel($, 3)
-  expect(moves).toBe(2)
+  // About 23 characters a row at 21 columns: the line is a score of rows,
+  // and a click passes five of them.
+  await press($, 'older', 21)
+  const moved = (await thoughts($, 'desktop', 21))[1] ?? ''
+  expect(moved.startsWith('… ')).toBe(true)
+  expect(moved.length).toBeLessThan(`1s · ${words}`.length - 100)
+  expect(moved.length).toBeGreaterThan(`1s · ${words}`.length - 130)
+
+  // An update lands on top: the line still shows from the same word.
+  await runStep($, steps, 't1', [thought(0, 'Another note.'), stop])
+  await clock.advance(15 * SECOND)
+  expect((await thoughts($, 'desktop', 21))[1]).toBe(moved)
+
+  // ▲ goes back five rows, to the start of the long line, under the new one.
+  await press($, 'newer', 21)
+  expect((await thoughts($, 'desktop', 21))[1]).toBe(`1s · ${words}`)
 })
 
 test('a long note keeps its opening and its end, where the reasoning lands', async ($, on) => {

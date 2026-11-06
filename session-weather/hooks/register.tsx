@@ -16,8 +16,7 @@ const cost = atom({ plugin: 'session-weather', key: 'cost' } as const, null)
 const thinking = atom({ plugin: 'session-weather', key: 'thinking' } as const, null, { shape: 'thinking-entries-1' })
 const isSummaryOn = atom({ plugin: 'session-weather', key: 'isSummaryOn' } as const, true)
 const summaryCost = atom({ plugin: 'session-weather', key: 'summaryCost' } as const, 0)
-const summaryScroll = atom({ plugin: 'session-weather', key: 'summaryScroll' } as const, 0)
-const summaryRow = atom({ plugin: 'session-weather', key: 'summaryRow' } as const, 0)
+const summaryPlace = atom({ plugin: 'session-weather', key: 'summaryPlace' } as const, { line: 0, row: 0 })
 
 const COMMAND = 'session-weather'
 const PANE = 'session-weather'
@@ -275,15 +274,21 @@ const updateRows = (lines: readonly UpdateLine[], width: number) => {
 
 // How many characters a row of the pane holds, roughly: its cells less one,
 // and on the desktop a seventh more, its face being narrower than the cells
-// the pane is measured in. What the arrows and the keys step through.
+// the pane is measured in. What the arrows step through.
 const DESKTOP_FACE = 1.15
 let rowWidth = 45
 
 const widthOf = (columns: number, surface: string) =>
   Math.max(10, Math.round((columns - 1) * (surface === 'terminal' ? 1 : DESKTOP_FACE)))
 
-// Rows an arrow press moves the window: a few at a time, not a whole line.
+// Rows a click on an arrow moves the window: about half of it, so a long
+// history reads in a few clicks. The window is the body less what the
+// weather, the summary's header and its footer take, about PANE_OVERHEAD
+// rows; never less than ROW_STEP.
 const ROW_STEP = 3
+const PANE_OVERHEAD = 20
+
+const pageStep = (bodyRows: number) => Math.max(ROW_STEP, Math.floor((bodyRows - PANE_OVERHEAD) / 2))
 
 // The row standing at the top of the window: the line it is in, and how many
 // of that line's rows are above it.
@@ -307,18 +312,21 @@ const moveUpdates = async ($: EngineInterface, by: number) => {
 
   if (rows.length === 0) return
 
-  const line = Math.min(await read($, summaryScroll), lines.length - 1)
-  const from = topRow(starts, rows.length, line, await read($, summaryRow))
+  const place = await read($, summaryPlace)
+  const from = topRow(starts, rows.length, Math.min(place.line, lines.length - 1), place.row)
   const to = Math.max(0, Math.min(rows.length - 1, from + by))
-  const at = rows[to]?.line ?? 0
 
-  await update($, summaryScroll, () => at)
-  await update($, summaryRow, () => to - (starts[at] ?? 0))
+  // At either end a held arrow keeps asking: nothing to write, nothing to draw.
+  if (to === from) return
+
+  const line = rows[to]?.line ?? 0
+  await update($, summaryPlace, () => ({ line, row: to - (starts[line] ?? 0) }))
 }
 
 const toNewest = async ($: EngineInterface) => {
-  await update($, summaryScroll, () => 0)
-  await update($, summaryRow, () => 0)
+  const place = await read($, summaryPlace)
+
+  if (place.line !== 0 || place.row !== 0) await update($, summaryPlace, () => ({ line: 0, row: 0 }))
 }
 
 // Claude Haiku 5.5 in US dollars per million tokens, for prompts of 100K
@@ -556,8 +564,9 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
   // were reading where they were.
   if (said !== null) {
     const added = linesAdded(said)
-    const within = await read($, summaryRow)
-    await update($, summaryScroll, at => (at > 0 || within > 0 ? at + added : 0))
+    await update($, summaryPlace, place =>
+      place.line > 0 || place.row > 0 ? { line: place.line + added, row: place.row } : place,
+    )
   }
 
   const after = await read($, thinking)
@@ -866,19 +875,6 @@ export const register: Register = on => {
     return done
   })
 
-  // In a body tall enough to pin the weather, the scroll keys (and the wheel,
-  // where a surface hands it over) move the updates a row at a time inside
-  // their own window, and leave the pane where it is.
-  on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
-    if (e.bodyRows < MIN_PINNED_ROWS || !(await read($, isSummaryOn))) {
-      return next(e)
-    }
-
-    await moveUpdates($, e.by)
-
-    return {}
-  })
-
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
     const at = await $.clock.now()
@@ -972,19 +968,19 @@ export const register: Register = on => {
               : `Summarizing ${turnNow.notes.length} note${turnNow.notes.length === 1 ? '' : 's'}…`
 
     // A body tall enough pins the weather on top and the summary's cost at
-    // the bottom; the turn's updates scroll in the window between (the
-    // `ui.scroll` hook moves them). A new prompt starts them over.
+    // the bottom; the turn's updates scroll in the window between, moved by
+    // the arrows. A new prompt starts them over.
     const rows = e.props.scroll?.bodyRows
     const isPinned = isOn && rows !== undefined && rows >= MIN_PINNED_ROWS
     const lines = turnNow === null ? [] : updateLines(turnNow)
     // The lines measured in rows at the body's width, the measure the arrows
-    // and the keys then step through.
+    // then step through.
     rowWidth = widthOf(e.props.bodyColumns, e.surface)
     const laid = updateRows(lines, rowWidth)
-    const line = Math.min(await read($, summaryScroll), Math.max(0, lines.length - 1))
+    const place = await read($, summaryPlace)
     const top =
       isPinned && laid.rows.length > 0
-        ? topRow(laid.starts, laid.rows.length, line, await read($, summaryRow))
+        ? topRow(laid.starts, laid.rows.length, Math.min(place.line, Math.max(0, lines.length - 1)), place.row)
         : 0
     const topLine = laid.rows[top]?.line ?? 0
     const topChar = laid.rows[top]?.start ?? 0
@@ -1040,11 +1036,13 @@ export const register: Register = on => {
       </Box>
     )
 
-    // The arrows step the window ROW_STEP rows at a time. The desktop's wheel
-    // scrolls the pane itself, natively, and a pinned pane has nothing to
-    // scroll; the keys reach the `ui.scroll` hook while the pane holds the
-    // focus.
+    // A click on an arrow steps the window about half its height: the one
+    // way to scroll it. Holding an arrow cannot scroll, as the desktop draws
+    // the pane again only when the press ends; its wheel scrolls the pane
+    // itself, which, pinned, has nothing to scroll; and its keys do not
+    // reach the pane.
     const canScroll = isPinned && laid.rows.length > 1
+    const step = pageStep(rows ?? MIN_PINNED_ROWS)
 
     return (
       <Box flexDirection="column" gap={1} {...(isPinned ? { height: rows } : {})}>
@@ -1079,10 +1077,10 @@ export const register: Register = on => {
               onPress={() => setSummary($, !isOn).catch(() => {})}
             />
             {canScroll && (
-              <Button key="newer" plain dimColor label="▲" onPress={() => moveUpdates($, -ROW_STEP).catch(() => {})} />
+              <Button key="newer" plain dimColor label="▲" onPress={() => moveUpdates($, -step).catch(() => {})} />
             )}
             {canScroll && (
-              <Button key="older" plain dimColor label="▼" onPress={() => moveUpdates($, ROW_STEP).catch(() => {})} />
+              <Button key="older" plain dimColor label="▼" onPress={() => moveUpdates($, step).catch(() => {})} />
             )}
           </Box>
         </Box>

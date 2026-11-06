@@ -72,8 +72,7 @@ declare module 'claude-code' {
       summaryCost: number
       // Where the updates' window stands, the newest at 0: the line on top
       // (lines scrolled past), and how many rows of it are above the window.
-      summaryScroll: number
-      summaryRow: number
+      summaryPlace: { line: number; row: number }
     }
   }
 }
