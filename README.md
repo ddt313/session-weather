@@ -29,7 +29,10 @@ The pane opens beside the conversation when a session starts.
 - Reads the main loop's thinking blocks as they stream (subagents left out)
   and has Claude Haiku 5.5 sum them up in a few lines: what Claude is doing,
   the decisions it settled on (★), and what it says comes next (→).
-- At most one update every 15 seconds while new notes arrive. The prompt's
+- At most one update every 15 seconds while new notes arrive. A long
+  stretch of thinking does not wait for its end: what it wrote since the
+  last update (200 characters or more, cut at a sentence's end) is
+  summarized while it goes on. The prompt's
   earlier updates stay, newest first, in their own window under the weather.
   A recap closes a turn that had two updates or more. A new prompt starts the
   list over.

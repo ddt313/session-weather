@@ -68,7 +68,8 @@ const engine = (
   const opens: unknown[] = []
   const toasts: string[] = []
   const writes: { key: string; value: unknown }[] = []
-  // What each `$.turn.step` streams, in turn; what Haiku was asked, and the
+  // What each `$.turn.step` streams, in turn (a `{ wait }` holds the stream
+  // that many milliseconds of the clock); what Haiku was asked, and the
   // replies it gives, in turn (a plain summary once they run out).
   const steps: unknown[][] = []
   const asks: { model: string; prompt: string; system?: string; effort?: string }[] = []
@@ -80,6 +81,13 @@ const engine = (
 
   on('turn.step', async function* ($, e) {
     for (const chunk of steps.shift() ?? []) {
+      const wait = (chunk as { wait?: number }).wait
+
+      if (wait !== undefined) {
+        await clock.sleep(wait)
+        continue
+      }
+
       yield chunk as never
     }
 
@@ -873,6 +881,70 @@ test('a click on ▼ shows a long line from part-way, marked, and a new update k
   // ▲ goes back five rows, to the start of the long line, under the new one.
   await press($, 'newer', 21)
   expect((await thoughts($, 'desktop', 21))[1]).toBe(`1s · ${words}`)
+})
+
+test('a long stretch of thinking is summarized a part at a time while it streams', async ($, on) => {
+  const { asks, steps, clock } = engine(on)
+  const sentences = (step: number) =>
+    Array.from({ length: 5 }, (_, at) => `Claude weighs step ${step}, point ${at}, at some length.`).join(' ')
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+
+  // One block of thinking, written over forty seconds.
+  const running = runStep($, steps, 't1', [
+    thought(0, `${sentences(1)} `),
+    { wait: 20 * SECOND },
+    thought(0, `${sentences(2)} `),
+    { wait: 20 * SECOND },
+    thought(0, 'And so it is settled.'),
+    stop,
+  ])
+
+  // Its first part is summarized while the block goes on.
+  await clock.advance(SECOND)
+  expect(asks.length).toBe(1)
+  expect(asks[0]?.prompt).toContain(`<note>\n${sentences(1)} …\n</note>`)
+  expect(asks[0]?.system).toContain('was cut while Claude was still writing it')
+
+  // Its second, after the gap and once written: the new part alone.
+  await clock.advance(20 * SECOND)
+  expect(asks.length).toBe(2)
+  expect(asks[1]?.prompt).toContain(`<note>\n… ${sentences(2)} …\n</note>`)
+  expect(asks[1]?.prompt).not.toContain('step 1')
+
+  // The block ends: its rest is the last part, summarized in its turn; the
+  // turn's recap then reads all three.
+  await clock.advance(20 * SECOND)
+  await running
+  expect(asks.length).toBe(3)
+  expect(asks[2]?.prompt).toContain('<note>\n… And so it is settled.\n</note>')
+
+  await $.turn.complete(turnDone({ durationMs: 41_000 }) as never)
+  await clock.settle()
+  expect(asks.length).toBe(4)
+  expect(asks[3]?.prompt).toContain('The turn has ended')
+  expect(asks[3]?.prompt).toContain('step 1')
+  expect(asks[3]?.prompt).toContain('step 2')
+  expect(asks[3]?.prompt).toContain('And so it is settled.')
+})
+
+test('a short block is one note, kept whole when it ends', async ($, on) => {
+  const { asks, steps, clock } = engine(on)
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+
+  // Under the least a part holds: nothing is cut while it streams.
+  const running = runStep($, steps, 't1', [thought(0, 'A short thought. '), { wait: 5 * SECOND }, thought(0, 'Done.'), stop])
+  await clock.advance(2 * SECOND)
+  expect(asks).toEqual([])
+
+  await clock.advance(4 * SECOND)
+  await running
+  await clock.advance(SECOND)
+  expect(asks.length).toBe(1)
+  expect(asks[0]?.prompt).toContain('<note>\nA short thought. Done.\n</note>')
 })
 
 test('a long note keeps its opening and its end, where the reasoning lands', async ($, on) => {
