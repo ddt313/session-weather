@@ -1,0 +1,11 @@
+{
+  "name": "local-mods",
+  "owner": { "name": "Thanh Dang" },
+  "plugins": [
+    {
+      "name": "session-weather",
+      "source": "./session-weather",
+      "description": "A pane with the session's weather: context fill and auto-compact point, the last turn, the 5-hour and weekly limits, the cost, and a Haiku summary of what Claude is thinking"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "name": "session-weather",
+  "version": "0.2.0",
+  "description": "A pane with the session's weather: context fill and auto-compact point, the last turn, the 5-hour and weekly limits, the cost, and a Haiku summary of what Claude is thinking",
+  "types": "./types/index.d.ts"
+}

@@ -1,0 +1,7 @@
+# Type declarations Claude Code writes into each mod it loads.
+**/.claude-plugin/types/
+
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
