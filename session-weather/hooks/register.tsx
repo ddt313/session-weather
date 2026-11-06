@@ -17,8 +17,11 @@ const thinking = atom({ plugin: 'session-weather', key: 'thinking' } as const, n
 const isSummaryOn = atom({ plugin: 'session-weather', key: 'isSummaryOn' } as const, true)
 const summaryCost = atom({ plugin: 'session-weather', key: 'summaryCost' } as const, 0)
 const summaryPlace = atom({ plugin: 'session-weather', key: 'summaryPlace' } as const, { line: 0, row: 0 })
+const isDebugOn = atom({ plugin: 'session-weather', key: 'isDebugOn' } as const, false)
 
 const COMMAND = 'session-weather'
+// Turns the summary's debug log on and off.
+const DEBUG_COMMAND = 'session-weather-debug'
 const PANE = 'session-weather'
 const TITLE = 'Session Weather'
 // The rows the pane asks for where it sits inline above the prompt (the
@@ -177,6 +180,9 @@ const SECOND = 1000
 
 // Set when the person turns the summary off, so later sessions keep it off.
 const STORED_SUMMARY_OFF = 'isSummaryOff'
+// Set while the person keeps the summary's debug log on, in later sessions
+// too.
+const STORED_DEBUG_ON = 'isDebugOn'
 // The address of the Button that turns it off and on.
 const TOGGLE = 'summary-toggle'
 
@@ -569,16 +575,20 @@ const joinPath = (base: string, ...parts: string[]) => {
   return [base.replace(/[\\/]+$/, ''), ...parts].join(separator)
 }
 
-// The session's log, in the configuration directory as Claude Code finds it:
-// the variable that moves it, else `.claude` in the home directory (the
-// profile's on Windows). Null where no directory is known.
-const logPath = async ($: EngineInterface, sessionId: string) => {
+// A file of the session's own in a folder of the mod's, in the configuration
+// directory as Claude Code finds it: the variable that moves it, else
+// `.claude` in the home directory (the profile's on Windows). Null where no
+// directory is known.
+const sessionFile = async ($: EngineInterface, folder: readonly string[], sessionId: string) => {
   const moved = present(await $.env.get('CLAUDE_CONFIG_DIR'))
   const home = present(await $.env.get('USERPROFILE')) ?? present(await $.env.get('HOME'))
   const dir = moved ?? (home === undefined ? undefined : joinPath(home, '.claude'))
 
-  return dir === undefined ? null : joinPath(dir, ...LOG_FOLDER, `${sessionId.replace(/[^\w.-]/g, '_')}.md`)
+  return dir === undefined ? null : joinPath(dir, ...folder, `${sessionId.replace(/[^\w.-]/g, '_')}.md`)
 }
+
+// The session's thinking log.
+const logPath = ($: EngineInterface, sessionId: string) => sessionFile($, LOG_FOLDER, sessionId)
 
 const pad = (n: number) => String(n).padStart(2, '0')
 
@@ -779,6 +789,170 @@ const readLog = async ($: EngineInterface, input: { turns?: unknown; full?: unkn
   return [lead, ...kept].join('\n\n')
 }
 
+// The summary's debug log, while the person keeps it on: each Haiku request
+// as sent and its reply, in a Markdown file of the session's own beside the
+// thinking log, the newest DEBUG_REQUESTS kept (the file API writes a file
+// whole and deletes none), and a line for each in the transcript, which the
+// model is not sent.
+const DEBUG_FOLDER = ['session-weather', 'debug'] as const
+const DEBUG_REQUESTS = 30
+// Each request's entry opens with a mark of when it was sent: a rewrite
+// finds the entries by it.
+const DEBUG_MARK = /^(?=<!-- request [^\n]* -->$)/m
+
+// One Haiku request of the summary, as the debug log tells it.
+type DebugRequest = {
+  turn: Thinking
+  sentAt: number
+  answeredAt: number
+  isForced: boolean
+  covered: number
+  prompt: string
+  result: ModelCompleteResult | null
+  failure: string
+  said: Said | null
+  isAborted: boolean
+}
+
+// A short mark of a text, to tell whether two requests sent the same one.
+const fingerprint = (text: string) => {
+  let hash = 5381
+
+  for (let at = 0; at < text.length; at += 1) hash = ((hash * 33) ^ text.charCodeAt(at)) >>> 0
+
+  return hash.toString(16).padStart(8, '0')
+}
+
+// `text` in a Markdown fence longer than any run of backticks in it.
+const fenced = (text: string) => {
+  const fence = '`'.repeat(Math.max(3, ...[...text.matchAll(/`+/g)].map(run => run[0].length + 1)))
+
+  return `${fence}text\n${text}\n${fence}`
+}
+
+// "14:32:05", the host's time.
+const formatClock = (ms: number) => {
+  const date = new Date(ms)
+
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+const formatChars = (n: number) => (n < 1000 ? `${n} chars` : `${formatTokens(n)} chars`)
+
+// The notes a request read, by their place in the turn: those after the
+// last update's, or for the recap all of them.
+const notesRead = (request: DebugRequest) =>
+  `notes ${request.turn.durationMs === undefined ? request.turn.summarized + 1 : 1}–${request.covered}`
+
+// What the request let Haiku answer.
+const askedFor = (request: DebugRequest) =>
+  request.turn.durationMs !== undefined
+    ? 'the recap, WAIT not allowed'
+    : request.isForced
+      ? `an update, WAIT not allowed after ${formatDuration(request.sentAt - lastUpdateAt(request.turn))} without one`
+      : 'an update or WAIT'
+
+// What the request came to, in a few words.
+const outcomeOf = (request: DebugRequest) => {
+  const { said } = request
+
+  if (said !== null && 'update' in said) return `update: ${said.update.gist}`
+  if (said !== null) return said.wait === '' ? 'WAIT' : `WAIT: ${said.wait}`
+  if (request.isAborted) return 'cut: the summary was turned off'
+
+  return `failed: ${request.failure}`
+}
+
+// The request in one line of the transcript.
+const debugLine = (request: DebugRequest) =>
+  clip(
+    `Summary debug: ${notesRead(request)}, ${formatChars(request.prompt.length)}${
+      request.turn.durationMs !== undefined ? ', recap' : request.isForced ? ', WAIT not allowed' : ''
+    } → ${outcomeOf(request)}`,
+    300,
+  )
+
+const debugHeader = (sessionId: string) =>
+  [
+    '# Summary debug log',
+    '',
+    `Session \`${sessionId}\`: each request the Session Weather mod sent ${HAIKU_NAME} for its thinking summary, as sent, and the reply, oldest first; the last ${DEBUG_REQUESTS} are kept. \`/${DEBUG_COMMAND}\` turns it off.`,
+    '',
+    `The system prompt, \`${fingerprint(SUMMARY_SYSTEM)}\`, which each request names by that mark (Claude Code puts its own identity block before it):`,
+    '',
+    fenced(SUMMARY_SYSTEM),
+    '',
+    '',
+  ].join('\n')
+
+// One request's entry: when and what it asked, what came of it, then the
+// prompt and the reply as they were.
+const debugEntry = (request: DebugRequest) => {
+  const { result } = request
+  const usage = result?.usage
+  const spent =
+    usage === undefined
+      ? ''
+      : `; ${usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens} tokens in, ${usage.output_tokens} out, $${haikuCost(usage).toFixed(5)}`
+
+  return [
+    `<!-- request ${new Date(request.sentAt).toISOString()} -->`,
+    `## ${formatClock(request.sentAt)} · ${formatDuration(Math.max(0, request.sentAt - request.turn.startedAt))} into turn \`${request.turn.turnId}\``,
+    '',
+    `- Asked for ${askedFor(request)}: ${notesRead(request)} of the turn, ${formatChars(request.prompt.length)}, system prompt \`${fingerprint(SUMMARY_SYSTEM)}\`.`,
+    `- Answered in ${((request.answeredAt - request.sentAt) / 1000).toFixed(1)} s${spent}.`,
+    `- Outcome: ${outcomeOf(request)}`,
+    '',
+    '### Prompt',
+    '',
+    fenced(request.prompt),
+    '',
+    '### Reply',
+    '',
+    result?.isAnswered ? fenced(result.text) : `(no reply: ${request.failure})`,
+    '',
+    '',
+  ].join('\n')
+}
+
+// The debug log's writes, one at a time: each reads the file and writes it
+// whole.
+let debugging: Promise<void> = Promise.resolve()
+
+const writeDebug = async ($: EngineInterface, entry: string) => {
+  const sessionId = await $.session.id()
+  const path = await sessionFile($, DEBUG_FOLDER, sessionId)
+
+  if (path === null) return
+
+  const text = (await $.fs.exists(path)) ? await $.fs.read(path) : ''
+  const entries = [...text.split(DEBUG_MARK).slice(1), entry].slice(-DEBUG_REQUESTS)
+
+  await $.fs.write(path, `${debugHeader(sessionId)}${entries.join('')}`)
+}
+
+// A request into the transcript and the file. The person asked for the log:
+// a file it cannot write is said in the transcript too.
+const logDebug = ($: EngineInterface, request: DebugRequest) => {
+  try {
+    $.ui.log(debugLine(request))
+  } catch {
+    // The line is lost; the file still takes the request.
+  }
+
+  debugging = debugging
+    .then(() => writeDebug($, debugEntry(request)))
+    .catch((error: unknown) => {
+      try {
+        $.ui.log(`Summary debug log not written: ${error instanceof Error ? error.message : String(error)}`)
+      } catch {
+        // The summary goes on without its debug log.
+      }
+    })
+
+  return debugging
+}
+
 // The summary's clockwork, the module's own: a reload starts it over.
 let ticker: Timer | null = null
 let asking: AbortController | null = null
@@ -908,18 +1082,13 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
 
   await keep(one => ({ ...one, isSummarizing: true }))
 
+  const prompt = summaryPrompt(turn, isForced)
   let result: ModelCompleteResult | null = null
   let failure: string
 
   try {
     result = await $.model.complete(
-      {
-        model: HAIKU,
-        system: SUMMARY_SYSTEM,
-        prompt: summaryPrompt(turn, isForced),
-        effort: 'low',
-        timeoutMs: SUMMARY_TIMEOUT,
-      },
+      { model: HAIKU, system: SUMMARY_SYSTEM, prompt, effort: 'low', timeoutMs: SUMMARY_TIMEOUT },
       { signal },
     )
     failure = failureOf(result)
@@ -927,6 +1096,8 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
     // A request the engine refuses to send, as for a model the settings block.
     failure = clip(error instanceof Error ? error.message : String(error), 120)
   }
+
+  const answeredAt = await $.clock.now()
 
   if (result !== null) {
     const spent = haikuCost(result.usage)
@@ -962,6 +1133,21 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
     // Cut because the person turned the summary off: nothing went wrong.
     return signal.aborted ? kept : { ...kept, failure }
   })
+
+  if (await read($, isDebugOn)) {
+    await logDebug($, {
+      turn,
+      sentAt: now,
+      answeredAt,
+      isForced,
+      covered,
+      prompt,
+      result,
+      failure,
+      said,
+      isAborted: signal.aborted,
+    })
+  }
 
   // The new update goes on top: someone scrolled down keeps the lines they
   // were reading where they were.
@@ -1084,6 +1270,8 @@ export const register: Register = on => {
     // new clock.
     const isOff = (await $.store.get(STORED_SUMMARY_OFF)) === true
     await update($, isSummaryOn, () => !isOff)
+    const isDebugging = (await $.store.get(STORED_DEBUG_ON)) === true
+    await update($, isDebugOn, () => isDebugging)
     await update($, thinking, turn => (turn?.isSummarizing === true ? { ...turn, isSummarizing: false } : turn))
     const turn = await read($, thinking)
 
@@ -1097,6 +1285,11 @@ export const register: Register = on => {
     await $.command.register({
       name: COMMAND,
       description: 'Open the Session Weather pane',
+      immediate: true,
+    })
+    await $.command.register({
+      name: DEBUG_COMMAND,
+      description: "Turn the thinking summary's debug log on or off",
       immediate: true,
     })
 
@@ -1120,6 +1313,26 @@ export const register: Register = on => {
     await openPane($)
 
     return {}
+  })
+
+  // The person turning the summary's debug log on or off: the output says
+  // where it writes.
+  on('command.run', { command: DEBUG_COMMAND }, async $ => {
+    const isOn = !(await read($, isDebugOn))
+    await $.store.set(STORED_DEBUG_ON, isOn)
+    await update($, isDebugOn, () => isOn)
+    const path = await sessionFile($, DEBUG_FOLDER, await $.session.id())
+
+    if (!isOn) {
+      return { text: `Summary debug log off.${path === null ? '' : ` What it wrote stays in ${path}`}` }
+    }
+
+    return {
+      text:
+        path === null
+          ? `Summary debug log on, but with no file: the Claude Code configuration directory is not known. Each request still leaves a line in the transcript. /${DEBUG_COMMAND} turns it off.`
+          : `Summary debug log on: each Haiku request and its reply go to ${path}, and a line to the transcript. /${DEBUG_COMMAND} turns it off.`,
+    }
   })
 
   on('ui.close', async ($, e, next) => {
@@ -1393,6 +1606,7 @@ export const register: Register = on => {
     const isOn = await read($, isSummaryOn)
     const turnNow = isOn ? await read($, thinking) : null
     const summarySpent = isOn ? await read($, summaryCost) : 0
+    const isDebugging = isOn ? await read($, isDebugOn) : false
 
     // "🧭 Thinking · 1m 46s", the turn's whole length once it ended.
     const header =
@@ -1448,8 +1662,9 @@ export const register: Register = on => {
 
     // The lines showing, the first from the row on top, a body's height of
     // rows at most; each one Text the surface wraps at its full width. Kept
-    // together by update: a Box's `gap` spaces the updates, as an empty Box
-    // of one row did not on the desktop.
+    // together by update, with a rule between two: it stands where a Box's
+    // `gap` spaced them (an empty Box of one row drew nothing on the
+    // desktop), and the steps count neither.
     const shown: { kind: UpdateLine['kind']; text: string; entry: number }[][] = []
     let budget = isPinned ? rows : Number.POSITIVE_INFINITY
 
@@ -1468,6 +1683,15 @@ export const register: Register = on => {
       budget -= (laid.starts[at + 1] ?? laid.rows.length) - (laid.starts[at] ?? 0)
     }
 
+    // The rule between two updates: a dim row of box drawing across the body,
+    // in the monospaced face whose cells the body is measured in, and cut
+    // rather than wrapped should it run over. (The desktop drew no Svg here.)
+    const rule = (
+      <Text dimColor mono wrap="truncate">
+        {'─'.repeat(Math.max(1, e.props.bodyColumns - 1))}
+      </Text>
+    )
+
     const thoughts = (
       <Box flexDirection="column" {...(isPinned ? { flexGrow: 1, flexShrink: 1, overflow: 'hidden' as const } : {})}>
         <Text bold>{header}</Text>
@@ -1482,14 +1706,15 @@ export const register: Register = on => {
           />
         )}
         {shown.length > 0 && (
-          <Box flexDirection="column" gap={1}>
-            {shown.map(group => (
+          <Box flexDirection="column">
+            {shown.flatMap((group, at) => [
+              ...(at === 0 ? [] : [rule]),
               <Box flexDirection="column">
                 {group.map(item =>
                   item.kind === 'decision' ? <Text color="warning">{item.text}</Text> : <Text>{item.text}</Text>,
                 )}
-              </Box>
-            ))}
+              </Box>,
+            ])}
           </Box>
         )}
       </Box>
@@ -1526,7 +1751,9 @@ export const register: Register = on => {
         {isOn && thoughts}
         <Box flexDirection="column" flexShrink={0}>
           <Text dimColor>
-            {isOn ? `Summary cost ${formatSummaryCost(summarySpent)} - ${HAIKU_NAME}` : '🧭 Thinking summary is off'}
+            {isOn
+              ? `Summary cost ${formatSummaryCost(summarySpent)} - ${HAIKU_NAME}${isDebugging ? ' · debug log on' : ''}`
+              : '🧭 Thinking summary is off'}
           </Text>
           <Box flexDirection="row" gap={1}>
             <Button

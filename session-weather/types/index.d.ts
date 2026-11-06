@@ -78,6 +78,9 @@ declare module 'claude-code' {
       // Where the updates' window stands, the newest at 0: the line on top
       // (lines scrolled past), and how many rows of it are above the window.
       summaryPlace: { line: number; row: number }
+      // Whether each Haiku request of the summary, and its reply, goes to the
+      // debug log; the person turns it on and off.
+      isDebugOn: boolean
     }
   }
 }
