@@ -1662,8 +1662,9 @@ export const register: Register = on => {
 
     // The lines showing, the first from the row on top, a body's height of
     // rows at most; each one Text the surface wraps at its full width. Kept
-    // together by update: a Box's `gap` spaces the updates, as an empty Box
-    // of one row did not on the desktop.
+    // together by update, with a rule between two: it stands where a Box's
+    // `gap` spaced them (an empty Box of one row drew nothing on the
+    // desktop), and the steps count neither.
     const shown: { kind: UpdateLine['kind']; text: string; entry: number }[][] = []
     let budget = isPinned ? rows : Number.POSITIVE_INFINITY
 
@@ -1682,6 +1683,15 @@ export const register: Register = on => {
       budget -= (laid.starts[at + 1] ?? laid.rows.length) - (laid.starts[at] ?? 0)
     }
 
+    // The rule between two updates: a dim row of box drawing across the body,
+    // in the monospaced face whose cells the body is measured in, and cut
+    // rather than wrapped should it run over. (The desktop drew no Svg here.)
+    const rule = (
+      <Text dimColor mono wrap="truncate">
+        {'─'.repeat(Math.max(1, e.props.bodyColumns - 1))}
+      </Text>
+    )
+
     const thoughts = (
       <Box flexDirection="column" {...(isPinned ? { flexGrow: 1, flexShrink: 1, overflow: 'hidden' as const } : {})}>
         <Text bold>{header}</Text>
@@ -1696,14 +1706,15 @@ export const register: Register = on => {
           />
         )}
         {shown.length > 0 && (
-          <Box flexDirection="column" gap={1}>
-            {shown.map(group => (
+          <Box flexDirection="column">
+            {shown.flatMap((group, at) => [
+              ...(at === 0 ? [] : [rule]),
               <Box flexDirection="column">
                 {group.map(item =>
                   item.kind === 'decision' ? <Text color="warning">{item.text}</Text> : <Text>{item.text}</Text>,
                 )}
-              </Box>
-            ))}
+              </Box>,
+            ])}
           </Box>
         )}
       </Box>

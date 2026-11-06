@@ -260,6 +260,9 @@ const PLAIN = 'GIST: Claude đang sửa lỗi.'
 // The line that ends a request where Haiku may not reply WAIT.
 const NO_WAIT = 'WAIT is not allowed this time.'
 
+// The rule the pane draws between two updates: box drawing across the body.
+const RULE = '─'.repeat(PANE.props.bodyColumns - 1)
+
 // What a prompt holds between <tag> and </tag>, or '' where it has none.
 const tagged = (prompt: string | undefined, tag: string) => {
   const text = prompt ?? ''
@@ -649,11 +652,12 @@ test('updates keep 15 seconds apart, stay newest first, and the end adds a recap
   expect(asks[1]?.prompt).toContain('<update>\nGIST: Một.\nDECISION: Chỉ sửa file A\n</update>')
   expect(asks[1]?.prompt).not.toContain(NO_WAIT)
 
-  // The first update stays, under the second.
+  // The first update stays, under the second, a rule between them.
   expect(await thoughts($)).toEqual([
     '🧭 Thinking · 16s',
     '16s · Hai.',
     '→ Chạy test',
+    RULE,
     '1s · Một.',
     '★ Chỉ sửa file A',
     'Summary cost $0.004 - Haiku 5.5',
@@ -677,8 +681,10 @@ test('updates keep 15 seconds apart, stay newest first, and the end adds a recap
     '★ A',
     '★ B',
     '★ C',
+    RULE,
     '16s · Hai.',
     '→ Chạy test',
+    RULE,
     '1s · Một.',
     '★ Chỉ sửa file A',
     'Summary cost $0.006 - Haiku 5.5',
@@ -687,6 +693,30 @@ test('updates keep 15 seconds apart, stay newest first, and the end adds a recap
   // The recap is the turn's last word: no more asking.
   await clock.advance(60 * SECOND)
   expect(asks.length).toBe(3)
+})
+
+test('a rule of box drawing stands between two updates, on the desktop as in the terminal', async ($, on) => {
+  const { steps, clock } = engine(on)
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, 'First note.'), stop])
+  await clock.advance(SECOND)
+  // One update: nothing to set apart.
+  expect(await thoughts($)).not.toContain(RULE)
+
+  for (const text of ['Second note.', 'Third note.']) {
+    await runStep($, steps, 't1', [thought(0, text), stop])
+    await clock.advance(15 * SECOND)
+  }
+
+  // Three updates, two rules between them, each across the body.
+  for (const surface of ['desktop', 'terminal'] as const) {
+    const texts = await thoughts($, surface)
+    expect(texts.filter(text => text === RULE).length).toBe(2)
+    expect(texts.indexOf(RULE)).toBe(texts.indexOf('31s · Claude đang sửa lỗi.') + 1)
+    expect(texts.lastIndexOf(RULE)).toBe(texts.indexOf('16s · Claude đang sửa lỗi.') + 1)
+  }
 })
 
 test('a new prompt starts the updates over', async ($, on) => {
@@ -729,9 +759,10 @@ test('one update and nothing after it needs no recap; a note it missed gets one'
   await clock.settle()
   expect(asks.length).toBe(3)
   expect(asks[2]?.prompt).toContain('Late note.')
-  expect((await thoughts($)).slice(0, 3)).toEqual([
+  expect((await thoughts($)).slice(0, 4)).toEqual([
     '🧭 Thinking · 3s · done',
     'Recap · Claude đang sửa lỗi.',
+    RULE,
     '1s · Claude đang sửa lỗi.',
   ])
 })
