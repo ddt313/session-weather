@@ -203,9 +203,10 @@ const mount = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop', colu
     props: { ...PANE.props, ...(columns === undefined ? {} : { bodyColumns: columns }) },
   } as never)) as Mounted
 
-// Everything the pane shows, one string per Text, on the surface named.
-const allTexts = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop') => {
-  const ui = await mount($, surface)
+// Everything the pane shows, one string per Text, on the surface named, in a
+// pane `columns` wide when given.
+const allTexts = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop', columns?: number) => {
+  const ui = await mount($, surface, columns)
   const texts = (await ui.findAll({ type: 'Text' })).map(one => one.text)
   await ui.unmount()
 
@@ -226,9 +227,7 @@ const pane = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop') => {
 // The thinking summary, from its header down, in a pane `columns` wide when
 // given.
 const thoughts = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop', columns?: number) => {
-  const ui = await mount($, surface, columns)
-  const texts = (await ui.findAll({ type: 'Text' })).map(one => one.text)
-  await ui.unmount()
+  const texts = await allTexts($, surface, columns)
   const top = texts.findIndex(SUMMARY_TOP)
 
   return top === -1 ? [] : texts.slice(top)
@@ -256,6 +255,15 @@ const press = async ($: Test$, key: string, columns?: number) => {
 const USAGE = { input_tokens: 10_000, output_tokens: 2_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 const answer = (text: string) => ({ isAnswered: true, text, usage: USAGE })
 const PLAIN = 'GIST: Claude đang sửa lỗi.'
+
+// A request the API refused for the rate limit.
+const RATE_LIMITED = {
+  isAnswered: false,
+  reason: 'api-error',
+  status: 429,
+  error: 'rate_limit',
+  usage: { ...USAGE, input_tokens: 0, output_tokens: 0 },
+}
 
 // The line that ends a request where Haiku may not reply WAIT.
 const NO_WAIT = 'WAIT is not allowed this time.'
@@ -525,6 +533,21 @@ const turnDone = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 })
 
+// A turn of one update, asked a second in, that ends two seconds in.
+const oneTurn = async (
+  $: Parameters<typeof runStep>[0] & { turn: { start: (e: never) => Promise<unknown>; complete: (e: never) => Promise<unknown> } },
+  steps: unknown[][],
+  clock: { advance: (ms: number) => Promise<void>; settle: () => Promise<void> },
+  turnId: string,
+  text: string,
+) => {
+  await $.turn.start({ text, turnId } as never)
+  await runStep($, steps, turnId, [thought(0, 'A note.'), stop])
+  await clock.advance(SECOND)
+  await $.turn.complete(turnDone({ turnId, durationMs: 2_000 }) as never)
+  await clock.settle()
+}
+
 test('the pane says where the engine compacts on its own, or that it does not', async ($, on) => {
   engine(on, { breakdown: { autoCompactThreshold: 184_000, isAutoCompactEnabled: true } })
 
@@ -729,11 +752,7 @@ test('a new prompt starts the updates over', async ($, on) => {
   const { steps, clock } = engine(on)
 
   await $.session.start(start)
-  await $.turn.start({ text: 'fix it', turnId: 't1' })
-  await runStep($, steps, 't1', [thought(0, 'A note.'), stop])
-  await clock.advance(SECOND)
-  await $.turn.complete(turnDone({ durationMs: 2_000 }) as never)
-  await clock.settle()
+  await oneTurn($, steps, clock, 't1', 'fix it')
   expect(await thoughts($)).toContain('1s · Claude đang sửa lỗi.')
 
   await $.turn.start({ text: 'and now this', turnId: 't2' })
@@ -818,13 +837,7 @@ test("a subagent's thinking stays out, and its turn neither resets the main one 
 
 test('a failed summary says why, and the next tick after the gap tries again', async ($, on) => {
   const { asks, replies, steps, clock } = engine(on)
-  replies.push({
-    isAnswered: false,
-    reason: 'api-error',
-    status: 429,
-    error: 'rate_limit',
-    usage: { ...USAGE, input_tokens: 0, output_tokens: 0 },
-  })
+  replies.push(RATE_LIMITED)
 
   await $.session.start(start)
   await $.turn.start({ text: 'fix it', turnId: 't1' })
@@ -1341,13 +1354,7 @@ test('a debug log left on in an earlier session keeps the newest 30 requests', a
 
 test('a failed request goes to the debug log with why', async ($, on) => {
   const { replies, steps, clock, files, logs } = engine(on, { stored: { isDebugOn: true } })
-  replies.push({
-    isAnswered: false,
-    reason: 'api-error',
-    status: 429,
-    error: 'rate_limit',
-    usage: { ...USAGE, input_tokens: 0, output_tokens: 0 },
-  })
+  replies.push(RATE_LIMITED)
 
   await $.session.start(start)
   await $.turn.start({ text: 'fix it', turnId: 't1' })
@@ -1384,21 +1391,6 @@ const sectionOf = (text: string, turnId: string) => {
   const next = text.indexOf('\n<!-- turn ', at + 1)
 
   return at === -1 ? '' : text.slice(at, next === -1 ? undefined : next + 1)
-}
-
-// A turn of one update, asked a second in, that ends two seconds in.
-const oneTurn = async (
-  $: Parameters<typeof runStep>[0] & { turn: { start: (e: never) => Promise<unknown>; complete: (e: never) => Promise<unknown> } },
-  steps: unknown[][],
-  clock: { advance: (ms: number) => Promise<void>; settle: () => Promise<void> },
-  turnId: string,
-  text: string,
-) => {
-  await $.turn.start({ text, turnId } as never)
-  await runStep($, steps, turnId, [thought(0, 'A note.'), stop])
-  await clock.advance(SECOND)
-  await $.turn.complete(turnDone({ turnId, durationMs: 2_000 }) as never)
-  await clock.settle()
 }
 
 test("each turn's updates go to the session's log, its recap first, then the updates in order", async ($, on) => {
@@ -1533,13 +1525,13 @@ test('a resumed session goes on in its log, the sections before left as they wer
   )
 })
 
+// What the thinking_log tool answers, given `input`.
+const callLog = async ($: { tool: { call: (e: never) => Promise<unknown> } }, input: Record<string, unknown> = {}) =>
+  String(((await $.tool.call({ tool: LOG_TOOL, ...input } as never)) as { result?: unknown }).result)
+
 // Where the tool says the log is: the path the mod made, before the host
 // resolved it.
-const logLead = async ($: { tool: { call: (e: never) => Promise<unknown> } }) => {
-  const called = (await $.tool.call({ tool: LOG_TOOL } as never)) as { result?: unknown }
-
-  return String(called.result).split('\n')[0]
-}
+const logLead = async ($: Parameters<typeof callLog>[0]) => (await callLog($)).split('\n')[0]
 
 test('on Windows the log sits in the profile, in its separators', async ($, on) => {
   const { steps, clock } = engine(on, { env: { USERPROFILE: 'C:\\Users\\me', HOME: '/c/Users/me' } })
@@ -1585,8 +1577,7 @@ test("the thinking_log tool is registered behind ToolSearch, and reads back each
 
   const t1 = `## ${when(NOW)} · 40s · done\n\n> fix it\n\n`
   const t2 = `## ${when(NOW + 16 * SECOND + MINUTE)} · 2s · done\n\n> and now this\n\n- 1s · Claude đang sửa lỗi.`
-  const recaps = (await $.tool.call({ tool: LOG_TOOL } as never)) as { result?: unknown }
-  expect(recaps.result).toBe(
+  expect(await callLog($)).toBe(
     [
       `The thinking log of this session, ${LOG}: 2 turns, oldest first. Each turn shows its recap, or its last update when it has none; \`full: true\` gives every update.`,
       `${t1}- Recap · Tổng kết.\n  - ★ A`,
@@ -1594,11 +1585,12 @@ test("the thinking_log tool is registered behind ToolSearch, and reads back each
     ].join('\n\n'),
   )
 
-  const full = (await $.tool.call({ tool: LOG_TOOL, turns: 1.7, full: true } as never)) as { result?: unknown }
-  expect(full.result).toBe(`The thinking log of this session, ${LOG}: the last 1 of 2 turns, oldest first.\n\n${t2}`)
-
-  const first = (await $.tool.call({ tool: LOG_TOOL, turns: 2, full: true } as never)) as { result?: unknown }
-  expect(first.result).toContain(`${t1}- Recap · Tổng kết.\n  - ★ A\n- 1s · Một.\n- 16s · Hai.\n  - ★ Chỉ sửa file A\n\n${t2}`)
+  expect(await callLog($, { turns: 1.7, full: true })).toBe(
+    `The thinking log of this session, ${LOG}: the last 1 of 2 turns, oldest first.\n\n${t2}`,
+  )
+  expect(await callLog($, { turns: 2, full: true })).toContain(
+    `${t1}- Recap · Tổng kết.\n  - ★ A\n- 1s · Một.\n- 16s · Hai.\n  - ★ Chỉ sửa file A\n\n${t2}`,
+  )
 })
 
 test('the tool leaves the oldest turns out past its budget, and says when there is no log', async ($, on) => {
@@ -1609,15 +1601,13 @@ test('the tool leaves the oldest turns out past its budget, and says when there 
   const { files } = engine(on)
 
   await $.session.start(start)
-  const none = (await $.tool.call({ tool: LOG_TOOL } as never)) as { result?: unknown }
-  expect(none.result).toBe(
+  expect(await callLog($)).toBe(
     'No thinking log for this session yet: no turn has had a thinking summary. It needs the Session Weather summary on, and the Thinking or Verbose transcript view.',
   )
 
   files.set(LOG, log)
   const fits = Math.floor(20_000 / body(0).length)
-  const all = (await $.tool.call({ tool: LOG_TOOL, turns: 30 } as never)) as { result?: unknown }
-  const text = String(all.result)
+  const text = await callLog($, { turns: 30 })
   expect(text).toContain(`: the last ${fits} of 30 turns, oldest first.`)
   expect(text.endsWith(body(29))).toBe(true)
   expect(text).toContain(body(30 - fits))
