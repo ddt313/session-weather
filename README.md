@@ -27,19 +27,27 @@ The pane opens beside the conversation when a session starts.
 **Thinking summary**
 
 - Reads the main loop's thinking blocks as they stream (subagents left out)
-  and has Claude Haiku 5.5 sum them up in a few lines: what Claude is doing,
-  the decisions it settled on (★), and what it says comes next (→).
+  and has Claude Haiku 5.5 sum them up in a few lines: what is new in what
+  Claude is doing, the decisions it made (★), what it takes as true without
+  having checked it (?), and what it says comes next (→).
 - At most one Haiku request every 15 seconds while new notes arrive. A long
   stretch of thinking does not wait for its end: what it wrote since the
   last request (200 characters or more, cut at a sentence's end) is read
-  while it goes on. Each request also carries the last thousand characters
-  or so of what the previous update read, so Haiku can follow where the new
-  notes pick up.
-- Haiku gives an update only when the notes say something new: what Claude
-  sets out to do, what it found, a choice it settled on, a change of plan.
-  Otherwise it replies WAIT: the pane says what it waits for
-  (`Đợi thêm: …`), and those notes go again with the next ones. After 45
-  seconds without an update, and for the turn's recap, WAIT is not allowed.
+  while it goes on, each note with its time into the turn. Each request also
+  carries:
+  - the last thousand characters or so of what the previous update read, so
+    Haiku can follow where the new notes pick up;
+  - the main loop's tool calls since the last update, in a few words: a
+    command by the description Claude gave it, never its own text, and a
+    file by its name alone;
+  - what Claude wrote to you since the last update, which the update leaves
+    out: you have read it.
+- An update tells only what is new since the earlier ones, and says so when
+  Claude changes course. With nothing new yet (Claude only begins a thought,
+  still weighs its options, or goes over what was reported) Haiku replies
+  WAIT: the pane says what it waits for (`Đợi thêm: …`), and those notes go
+  again with the next ones. After 45 seconds without an update, and for the
+  turn's recap, WAIT is not allowed.
 - The prompt's earlier updates stay, newest first, in their own window under
   the weather. A recap closes a turn that had two updates or more, or that
   ended with notes no update read. A new prompt starts the list over.
@@ -70,8 +78,9 @@ The pane opens beside the conversation when a session starts.
 - The summary is written in Vietnamese (fixed for now).
 - Each update or WAIT is one Haiku request on the session's own account,
   about $0.001; the pane shows what the summaries cost this session. The request
-  carries your prompt and Claude's thinking notes. **Turn summary off** stops
-  the requests, and the choice is kept across sessions.
+  carries your prompt, Claude's thinking notes, its tool calls in a few words
+  and what it wrote to you. **Turn summary off** stops the requests, and the
+  choice is kept across sessions.
 - To see what the summary sends Haiku, `/session-weather-debug` turns on its
   debug log, kept on in later sessions until you run the command again. Each
   request goes as sent, with Haiku's reply as it came, to a Markdown file

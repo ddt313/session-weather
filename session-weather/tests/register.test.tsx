@@ -263,9 +263,14 @@ const NO_WAIT = 'WAIT is not allowed this time.'
 // The rule the pane draws between two updates: box drawing across the body.
 const RULE = '─'.repeat(PANE.props.bodyColumns - 1)
 
-// What a prompt holds between <tag> and </tag>, or '' where it has none.
+// A prompt with each note's time taken out, for the tests that read what the
+// notes say rather than when they came.
+const plain = (prompt: string | undefined) => (prompt ?? '').replace(/<note at="[^"]*">/g, '<note>')
+
+// What a prompt holds between <tag> and </tag>, its notes without their
+// times, or '' where it has none.
 const tagged = (prompt: string | undefined, tag: string) => {
-  const text = prompt ?? ''
+  const text = plain(prompt)
   const open = text.indexOf(`<${tag}>\n`)
   const close = text.indexOf(`\n</${tag}>`, open)
 
@@ -274,6 +279,7 @@ const tagged = (prompt: string | undefined, tag: string) => {
 
 // Pieces of one streamed response.
 const thought = (index: number, text: string) => ({ kind: 'thinking', index, text })
+const words = (index: number, text: string) => ({ kind: 'text', index, text })
 const toolStart = (index: number) => ({ kind: 'tool', index, id: `toolu_${index}`, name: 'Read' })
 const toolInput = (index: number) => ({ kind: 'input', index, json: '{"file_path":"a.ts"}' })
 const stop = { kind: 'stop', stopReason: 'tool_use', usage: null }
@@ -613,8 +619,8 @@ test("Haiku reads the main loop's thinking notes, and the pane shows what it say
   expect(asks[0]).toMatchObject({ model: 'claude-haiku-5-5', effort: 'low' })
   expect(asks[0]?.system).toContain('Vietnamese')
   expect(asks[0]?.prompt).toContain('Chỉ thêm key cho top tool thôi')
-  expect(asks[0]?.prompt).toContain("<note>\nI'm going with the user's choice to add only the top tool's keys.\n</note>")
-  expect(asks[0]?.prompt).toContain('<note>\nNext I will check the Press page.\n</note>')
+  expect(plain(asks[0]?.prompt)).toContain("<note>\nI'm going with the user's choice to add only the top tool's keys.\n</note>")
+  expect(plain(asks[0]?.prompt)).toContain('<note>\nNext I will check the Press page.\n</note>')
 
   expect(await thoughts($)).toEqual([
     '🧭 Thinking · 1s',
@@ -993,7 +999,7 @@ test('a long stretch of thinking is summarized a part at a time while it streams
   // Its first part is summarized while the block goes on.
   await clock.advance(SECOND)
   expect(asks.length).toBe(1)
-  expect(asks[0]?.prompt).toContain(`<note>\n${sentences(1)} …\n</note>`)
+  expect(plain(asks[0]?.prompt)).toContain(`<note>\n${sentences(1)} …\n</note>`)
   expect(asks[0]?.system).toContain('was cut while Claude was still writing it')
 
   // Its second, after the gap and once written: the new part, the first one
@@ -1008,7 +1014,7 @@ test('a long stretch of thinking is summarized a part at a time while it streams
   await clock.advance(20 * SECOND)
   await running
   expect(asks.length).toBe(3)
-  expect(asks[2]?.prompt).toContain('<note>\n… And so it is settled.\n</note>')
+  expect(plain(asks[2]?.prompt)).toContain('<note>\n… And so it is settled.\n</note>')
 
   await $.turn.complete(turnDone({ durationMs: 41_000 }) as never)
   await clock.settle()
@@ -1034,7 +1040,7 @@ test('a short block is one note, kept whole when it ends', async ($, on) => {
   await running
   await clock.advance(SECOND)
   expect(asks.length).toBe(1)
-  expect(asks[0]?.prompt).toContain('<note>\nA short thought. Done.\n</note>')
+  expect(plain(asks[0]?.prompt)).toContain('<note>\nA short thought. Done.\n</note>')
 })
 
 test('a long note keeps its opening and its end, where the reasoning lands', async ($, on) => {
@@ -1046,7 +1052,7 @@ test('a long note keeps its opening and its end, where the reasoning lands', asy
   await runStep($, steps, 't1', [thought(0, long), stop])
   await clock.advance(SECOND)
 
-  const prompt = asks[0]?.prompt ?? ''
+  const prompt = plain(asks[0]?.prompt)
   expect(prompt).toContain(`<note>\n${'A'.repeat(2_000)}\n[…]\n${'B'.repeat(1_000)}${'C'.repeat(3_000)}\n</note>`)
   expect(prompt).not.toContain('A'.repeat(2_001))
 })
@@ -1162,6 +1168,92 @@ test('a turn that ends while Haiku waits gets its recap, WAIT not allowed', asyn
     'Recap · Claude đã đọc code và dừng ở đó.',
     'Summary cost $0.004 - Haiku 5.5',
   ])
+})
+
+test('each note goes to Haiku with its time into the turn', async ($, on) => {
+  const { asks, steps, clock } = engine(on)
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await clock.advance(3 * SECOND)
+  await runStep($, steps, 't1', [thought(0, 'First note.'), stop])
+  await clock.advance(SECOND)
+  expect(asks[0]?.prompt).toContain('<note at="3s">\nFirst note.\n</note>')
+})
+
+test('the tool calls since the last update go along in a few words: a command by its description, a file by its name', async ($, on) => {
+  const { asks, steps, clock } = engine(on)
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, 'First note.'), stop])
+  await $.tool.call({ tool: 'Bash', command: 'curl -H "token: s3cret" https://example.test', description: 'Fetch the report' })
+  await clock.advance(SECOND)
+  expect(tagged(asks[0]?.prompt, 'actions')).toBe('0s · Bash: Fetch the report')
+  expect(asks[0]?.prompt).not.toContain('s3cret')
+
+  // After that update: the main loop's calls go, a subagent's stays out.
+  await clock.advance(5 * SECOND)
+  await $.tool.call({ tool: 'Edit', file_path: '/work/app/src/pane.tsx', old_string: 'a', new_string: 'b' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'ls', agentId: 'a1' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'git status' })
+  await runStep($, steps, 't1', [thought(0, 'Second note.'), stop])
+  await clock.advance(10 * SECOND)
+  expect(asks.length).toBe(2)
+  expect(tagged(asks[1]?.prompt, 'actions')).toBe('6s · Edit: pane.tsx\n6s · Bash')
+
+  // The recap reads the whole turn's calls.
+  await $.turn.complete(turnDone({ durationMs: 20_000 }) as never)
+  await clock.settle()
+  expect(asks.length).toBe(3)
+  expect(tagged(asks[2]?.prompt, 'actions')).toBe('0s · Bash: Fetch the report\n6s · Edit: pane.tsx\n6s · Bash')
+})
+
+test('what Claude wrote to the person since the last update goes along, for Haiku not to tell it again', async ($, on) => {
+  const { asks, steps, clock } = engine(on)
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, 'Plan it.'), words(1, 'Mình sẽ sửa '), words(1, 'file A.'), stop])
+  await clock.advance(SECOND)
+  expect(tagged(asks[0]?.prompt, 'said')).toBe('Mình sẽ sửa file A.')
+  expect(tagged(asks[0]?.prompt, 'notes')).toBe('<note>\nPlan it.\n</note>')
+  expect(asks[0]?.system).toContain('<said>')
+
+  // Read once, it goes no more, and the recap reads none.
+  await runStep($, steps, 't1', [thought(0, 'Done it.'), stop])
+  await clock.advance(15 * SECOND)
+  expect(asks.length).toBe(2)
+  expect(asks[1]?.prompt).not.toContain('<said>')
+
+  await $.turn.complete(turnDone({ durationMs: 20_000 }) as never)
+  await clock.settle()
+  expect(asks.length).toBe(3)
+  expect(asks[2]?.prompt).not.toContain('<said>')
+})
+
+test('an assumption shows in the pane, marked ?, and goes back to Haiku with its update', async ($, on) => {
+  const { asks, replies, steps, clock } = engine(on)
+  replies.push(answer('GIST: Claude dùng chung một element rule.\nASSUMPTION: Element là dữ liệu bất biến\nNEXT: Viết test'))
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, 'Reuse the element.'), stop])
+  await clock.advance(SECOND)
+  expect(asks[0]?.system).toContain('ASSUMPTION: something Claude takes as true')
+  expect(await thoughts($)).toEqual([
+    '🧭 Thinking · 1s',
+    '1s · Claude dùng chung một element rule.',
+    '? Element là dữ liệu bất biến',
+    '→ Viết test',
+    'Summary cost $0.002 - Haiku 5.5',
+  ])
+
+  await runStep($, steps, 't1', [thought(0, 'Test it.'), stop])
+  await clock.advance(15 * SECOND)
+  expect(asks[1]?.prompt).toContain(
+    '<update>\nGIST: Claude dùng chung một element rule.\nASSUMPTION: Element là dữ liệu bất biến\nNEXT: Viết test\n</update>',
+  )
 })
 
 // The summary's debug log, under the home directory the engine's process has.

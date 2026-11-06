@@ -20,18 +20,33 @@ export type AutoCompact = { threshold?: number; isEnabled: boolean }
 
 // One update Haiku gave on a turn's thinking, written at `at` (ms since the
 // epoch): what Claude is at, the decisions it settled on since the update
-// before, and what it says comes next. `isRecap` marks the one written
-// after the turn ended, over the whole turn.
-export type ThinkingEntry = { at: number; gist: string; decisions: string[]; next?: string; isRecap?: true }
+// before, what it takes as true without having checked it, and what it says
+// comes next. `isRecap` marks the one written after the turn ended, over the
+// whole turn.
+export type ThinkingEntry = {
+  at: number
+  gist: string
+  decisions: string[]
+  assumptions?: string[]
+  next?: string
+  isRecap?: true
+}
+
+// Something of the main loop's turn the summary reads beside the thinking,
+// at `at` (ms since the epoch): a tool call in a few words, or a block of
+// the text Claude wrote to the person.
+export type TurnMark = { at: number; text: string }
 
 // The main loop's current or last turn, as the summary follows it. `notes`
-// are its thinking blocks that carried text, oldest first; `summarized`
+// are its thinking blocks that carried text, oldest first, and `noteAt`
+// when each was kept (-1 where a version before kept it); `summarized`
 // counts the ones an update has read, and `seen` the ones Haiku has read,
-// an update or a WAIT (`summarized` when absent); `entries` are the
-// updates, oldest first. `durationMs` is set once the turn ended; `failure`
-// says why the latest request gave no update; `waitingFor` is what Haiku
-// said it waits for at its last WAIT ('' when it did not say), until an
-// update comes.
+// an update or a WAIT (`summarized` when absent); `actions` are its tool
+// calls and `said` the text Claude wrote to the person, oldest first;
+// `entries` are the updates, oldest first. `durationMs` is set once the
+// turn ended; `failure` says why the latest request gave no update;
+// `waitingFor` is what Haiku said it waits for at its last WAIT ('' when it
+// did not say), until an update comes.
 export type Thinking = {
   turnId: string
   request: string
@@ -39,8 +54,11 @@ export type Thinking = {
   durationMs?: number
   isAborted?: boolean
   notes: string[]
+  noteAt?: number[]
   summarized: number
   seen?: number
+  actions?: TurnMark[]
+  said?: TurnMark[]
   entries: ThinkingEntry[]
   isSummarizing: boolean
   failure?: string
