@@ -69,3 +69,7 @@ claude plugin validate session-weather
 Claude Code writes the API's type declarations into
 `session-weather/.claude-plugin/types/` when it loads the mod; they are not
 committed.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
