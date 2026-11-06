@@ -53,7 +53,9 @@ const PANE = {
 const bar = (filled: number) => '█'.repeat(filled) + '░'.repeat(20 - filled)
 
 // Stands for the engine beneath the mod: what it opens, redraws, toasts and
-// stores; `stored` is what earlier sessions left in the mod's store.
+// stores; `stored` is what earlier sessions left in the mod's store, `files`
+// what the disk holds, and `env` the variables the process has (a home
+// directory unless given).
 const engine = (
   on: On,
   usage: {
@@ -63,11 +65,16 @@ const engine = (
     stored?: Record<string, unknown>
     breakdown?: Record<string, unknown>
     cost?: number
+    files?: Record<string, string>
+    env?: Record<string, string>
   } = {},
 ) => {
   const opens: unknown[] = []
   const toasts: string[] = []
   const writes: { key: string; value: unknown }[] = []
+  // The disk, by path, and the tools the mod registered.
+  const files = new Map(Object.entries(usage.files ?? {}))
+  const registered: unknown[] = []
   // What each `$.turn.step` streams, in turn (a `{ wait }` holds the stream
   // that many milliseconds of the clock); what Haiku was asked, and the
   // replies it gives, in turn (a plain summary once they run out).
@@ -93,10 +100,19 @@ const engine = (
 
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'tool_use' as const, usage: null }
   })
-  on('model.complete', ($, e) => {
+  // A `{ wait, reply }` comes back that many milliseconds of the clock late.
+  on('model.complete', async ($, e) => {
     asks.push({ model: e.model, prompt: e.prompt, system: e.system, effort: e.effort })
+    const reply = replies.shift() ?? answer(PLAIN)
+    const held = reply as { wait?: number; reply?: unknown }
 
-    return { value: (replies.shift() ?? answer(PLAIN)) as never }
+    if (held.wait !== undefined) {
+      await clock.sleep(held.wait)
+
+      return { value: held.reply as never }
+    }
+
+    return { value: reply as never }
   })
 
   on('session.usage', ($, e) => ({
@@ -140,7 +156,27 @@ const engine = (
     return { value: undefined }
   })
 
-  return { clock, opens, toasts, writes, steps, asks, replies, redraws: () => redraws }
+  // The engine hands the file hooks a path made absolute on the host: on
+  // Windows `/home/me` comes as `C:\home\me`. The disk keys it the POSIX way.
+  const key = (path: string) => path.replace(/^[A-Za-z]:/, '').replaceAll('\\', '/')
+
+  mock.env(on, usage.env ?? { HOME: '/home/me' })
+  on('session.id', () => ({ value: 'session-1' }))
+  on('session.root', () => ({ value: '/work/app' }))
+  on('fs.exists', ($, e) => ({ value: files.has(key(e.path)) }))
+  on('fs.read', ($, e) => ({ value: files.get(key(e.path)) ?? '' }))
+  on('fs.write', ($, e) => {
+    files.set(key(e.path), e.text)
+
+    return { value: undefined }
+  })
+  on('tool.register', ($, e, next) => {
+    registered.push(e)
+
+    return next(e)
+  })
+
+  return { clock, opens, toasts, writes, steps, asks, replies, files, registered, redraws: () => redraws }
 }
 
 const start = { cwd: '/tmp', surface: 'desktop' as const, isInteractive: true }
@@ -959,4 +995,268 @@ test('a long note keeps its opening and its end, where the reasoning lands', asy
   const prompt = asks[0]?.prompt ?? ''
   expect(prompt).toContain(`<note>\n${'A'.repeat(2_000)}\n[…]\n${'B'.repeat(1_000)}${'C'.repeat(3_000)}\n</note>`)
   expect(prompt).not.toContain('A'.repeat(2_001))
+})
+
+// The session's log, under the home directory the engine's process has.
+const LOG = '/home/me/.claude/session-weather/thinking/session-1.md'
+const LOG_TOOL = 'mcp__session-weather__thinking_log'
+
+const two = (n: number) => String(n).padStart(2, '0')
+
+// A section's time, as the host's clock reads it, its offset said.
+const when = (ms: number) => {
+  const date = new Date(ms)
+  const offset = -date.getTimezoneOffset()
+
+  return [
+    `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}`,
+    `${two(date.getHours())}:${two(date.getMinutes())}`,
+    `UTC${offset < 0 ? '-' : '+'}${two(Math.floor(Math.abs(offset) / 60))}:${two(Math.abs(offset) % 60)}`,
+  ].join(' ')
+}
+
+// One turn's section of a log, from its mark to the next one.
+const sectionOf = (text: string, turnId: string) => {
+  const at = text.indexOf(`<!-- turn ${turnId} -->\n`)
+  const next = text.indexOf('\n<!-- turn ', at + 1)
+
+  return at === -1 ? '' : text.slice(at, next === -1 ? undefined : next + 1)
+}
+
+// A turn of one update, asked a second in, that ends two seconds in.
+const oneTurn = async (
+  $: Parameters<typeof runStep>[0] & { turn: { start: (e: never) => Promise<unknown>; complete: (e: never) => Promise<unknown> } },
+  steps: unknown[][],
+  clock: { advance: (ms: number) => Promise<void>; settle: () => Promise<void> },
+  turnId: string,
+  text: string,
+) => {
+  await $.turn.start({ text, turnId } as never)
+  await runStep($, steps, turnId, [thought(0, 'A note.'), stop])
+  await clock.advance(SECOND)
+  await $.turn.complete(turnDone({ turnId, durationMs: 2_000 }) as never)
+  await clock.settle()
+}
+
+test("each turn's updates go to the session's log, its recap first, then the updates in order", async ($, on) => {
+  const { files, replies, steps, clock } = engine(on)
+  replies.push(
+    answer('GIST: Một.\nDECISION: Chỉ sửa file A'),
+    answer('GIST: Hai.\nNEXT: Chạy test'),
+    answer('GIST: Tổng kết.\nDECISION: A'),
+  )
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'fix   it\nplease', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, 'First note.'), stop])
+  await clock.advance(SECOND)
+
+  // Written as it goes: the turn still running.
+  expect(sectionOf(files.get(LOG) ?? '', 't1')).toContain(`## ${when(NOW)} · in progress\n`)
+
+  await runStep($, steps, 't1', [thought(0, 'Second note.'), stop])
+  await clock.advance(15 * SECOND)
+  await $.turn.complete(turnDone({ durationMs: 40_000 }) as never)
+  await clock.settle()
+
+  const text = files.get(LOG) ?? ''
+  expect(text.startsWith('# Thinking log\n\nSession `session-1` in `/work/app`.\n\nWhat Haiku 5.5 said')).toBe(true)
+  expect(sectionOf(text, 't1')).toBe(
+    [
+      '<!-- turn t1 -->',
+      `## ${when(NOW)} · 40s · done`,
+      '',
+      '> fix it please',
+      '',
+      '- Recap · Tổng kết.',
+      '  - ★ A',
+      '- 1s · Một.',
+      '  - ★ Chỉ sửa file A',
+      '- 16s · Hai.',
+      '  - → Chạy test',
+      '',
+      '',
+    ].join('\n'),
+  )
+})
+
+test('a turn with no update leaves no log', async ($, on) => {
+  const { files, steps, clock } = engine(on)
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await runStep($, steps, 't1', [toolStart(0), toolInput(0), stop])
+  await $.turn.complete(turnDone({ durationMs: 3_000 }) as never)
+  await clock.settle()
+  expect([...files.keys()]).toEqual([])
+})
+
+test('each turn keeps its own section, and a recap that lands after the next prompt goes to its turn', async ($, on) => {
+  const { files, replies, steps, clock } = engine(on)
+  // The recap comes back nine and a half seconds after it was asked.
+  replies.push(
+    answer('GIST: Một.'),
+    answer('GIST: Hai.'),
+    { wait: 9_500, reply: answer('GIST: Tổng kết.') },
+    answer('GIST: Lượt hai.'),
+  )
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, 'First note.'), stop])
+  await clock.advance(SECOND)
+  await runStep($, steps, 't1', [thought(0, 'Second note.'), stop])
+  await clock.advance(15 * SECOND)
+  await $.turn.complete(turnDone({ durationMs: 20_000 }) as never)
+  await clock.settle()
+
+  // The next prompt comes while the recap is on its way.
+  await $.turn.start({ text: 'and now this', turnId: 't2' })
+  await runStep($, steps, 't2', [thought(0, 'A note of the second turn.'), stop])
+  await clock.advance(10 * SECOND)
+  await $.turn.complete(turnDone({ turnId: 't2', durationMs: 12_000 }) as never)
+  await clock.settle()
+
+  const text = files.get(LOG) ?? ''
+  expect(text.slice(text.indexOf('<!-- turn '))).toBe(
+    [
+      '<!-- turn t1 -->',
+      `## ${when(NOW)} · 20s · done`,
+      '',
+      '> fix it',
+      '',
+      '- Recap · Tổng kết.',
+      '- 1s · Một.',
+      '- 16s · Hai.',
+      '',
+      '<!-- turn t2 -->',
+      `## ${when(NOW + 16 * SECOND)} · 12s · done`,
+      '',
+      '> and now this',
+      '',
+      '- 10s · Lượt hai.',
+      '',
+      '',
+    ].join('\n'),
+  )
+
+  // The pane shows the second turn alone, as before.
+  expect((await thoughts($))[1]).toBe('10s · Lượt hai.')
+})
+
+test('a resumed session goes on in its log, the sections before left as they were', async ($, on) => {
+  const earlier = [
+    '# Thinking log',
+    '',
+    'Session `session-1` in `/work/app`.',
+    '',
+    'What Haiku 5.5 said of the notes.',
+    '',
+    '<!-- turn t0 -->',
+    '## 2026-10-14 09:00 UTC+07:00 · 5s · done',
+    '',
+    '> yesterday',
+    '',
+    '- 1s · Hôm qua.',
+    '',
+    '',
+  ].join('\n')
+  const { files, steps, clock } = engine(on, { files: { [LOG]: earlier } })
+
+  await $.session.start(start)
+  await oneTurn($, steps, clock, 't1', 'fix it')
+  expect(files.get(LOG)).toBe(
+    `${earlier}<!-- turn t1 -->\n## ${when(NOW)} · 2s · done\n\n> fix it\n\n- 1s · Claude đang sửa lỗi.\n\n`,
+  )
+})
+
+// Where the tool says the log is: the path the mod made, before the host
+// resolved it.
+const logLead = async ($: { tool: { call: (e: never) => Promise<unknown> } }) => {
+  const called = (await $.tool.call({ tool: LOG_TOOL } as never)) as { result?: unknown }
+
+  return String(called.result).split('\n')[0]
+}
+
+test('on Windows the log sits in the profile, in its separators', async ($, on) => {
+  const { steps, clock } = engine(on, { env: { USERPROFILE: 'C:\\Users\\me', HOME: '/c/Users/me' } })
+
+  await $.session.start(start)
+  await oneTurn($, steps, clock, 't1', 'fix it')
+  expect(await logLead($)).toBe(
+    'The thinking log of this session, C:\\Users\\me\\.claude\\session-weather\\thinking\\session-1.md: 1 turn, oldest first. Each turn shows its recap, or its last update when it has none; `full: true` gives every update.',
+  )
+})
+
+test('CLAUDE_CONFIG_DIR moves the log with the rest of the configuration', async ($, on) => {
+  const { files, steps, clock } = engine(on, { env: { CLAUDE_CONFIG_DIR: '/cfg/claude/', HOME: '/home/me' } })
+
+  await $.session.start(start)
+  await oneTurn($, steps, clock, 't1', 'fix it')
+  expect([...files.keys()]).toEqual(['/cfg/claude/session-weather/thinking/session-1.md'])
+  expect(await logLead($)).toContain('this session, /cfg/claude/session-weather/thinking/session-1.md: 1 turn')
+})
+
+test("the thinking_log tool is registered behind ToolSearch, and reads back each turn's recap", async ($, on) => {
+  const { registered, replies, steps, clock } = engine(on)
+  replies.push(answer('GIST: Một.'), answer('GIST: Hai.\nDECISION: Chỉ sửa file A'), answer('GIST: Tổng kết.\nDECISION: A'))
+
+  await $.session.start(start)
+  expect(registered).toMatchObject([
+    {
+      name: 'thinking_log',
+      isDeferred: true,
+      inputSchema: { properties: { turns: { type: 'integer' }, full: { type: 'boolean' } } },
+    },
+  ])
+
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, 'First note.'), stop])
+  await clock.advance(SECOND)
+  await runStep($, steps, 't1', [thought(0, 'Second note.'), stop])
+  await clock.advance(15 * SECOND)
+  await $.turn.complete(turnDone({ durationMs: 40_000 }) as never)
+  await clock.settle()
+  await clock.advance(MINUTE)
+  await oneTurn($, steps, clock, 't2', 'and now this')
+
+  const t1 = `## ${when(NOW)} · 40s · done\n\n> fix it\n\n`
+  const t2 = `## ${when(NOW + 16 * SECOND + MINUTE)} · 2s · done\n\n> and now this\n\n- 1s · Claude đang sửa lỗi.`
+  const recaps = (await $.tool.call({ tool: LOG_TOOL } as never)) as { result?: unknown }
+  expect(recaps.result).toBe(
+    [
+      `The thinking log of this session, ${LOG}: 2 turns, oldest first. Each turn shows its recap, or its last update when it has none; \`full: true\` gives every update.`,
+      `${t1}- Recap · Tổng kết.\n  - ★ A`,
+      t2,
+    ].join('\n\n'),
+  )
+
+  const full = (await $.tool.call({ tool: LOG_TOOL, turns: 1.7, full: true } as never)) as { result?: unknown }
+  expect(full.result).toBe(`The thinking log of this session, ${LOG}: the last 1 of 2 turns, oldest first.\n\n${t2}`)
+
+  const first = (await $.tool.call({ tool: LOG_TOOL, turns: 2, full: true } as never)) as { result?: unknown }
+  expect(first.result).toContain(`${t1}- Recap · Tổng kết.\n  - ★ A\n- 1s · Một.\n- 16s · Hai.\n  - ★ Chỉ sửa file A\n\n${t2}`)
+})
+
+test('the tool leaves the oldest turns out past its budget, and says when there is no log', async ($, on) => {
+  // Sections of one length each.
+  const body = (at: number) =>
+    `## 2026-10-14 09:${two(at)} UTC+07:00 · 5s · done\n\n> turn ${two(at)}\n\n- 1s · ${'x'.repeat(1_000)}`
+  const log = `# Thinking log\n\n${Array.from({ length: 30 }, (_, at) => `<!-- turn t${at} -->\n${body(at)}\n\n`).join('')}`
+  const { files } = engine(on)
+
+  await $.session.start(start)
+  const none = (await $.tool.call({ tool: LOG_TOOL } as never)) as { result?: unknown }
+  expect(none.result).toBe(
+    'No thinking log for this session yet: no turn has had a thinking summary. It needs the Session Weather summary on, and the Thinking or Verbose transcript view.',
+  )
+
+  files.set(LOG, log)
+  const fits = Math.floor(20_000 / body(0).length)
+  const all = (await $.tool.call({ tool: LOG_TOOL, turns: 30 } as never)) as { result?: unknown }
+  const text = String(all.result)
+  expect(text).toContain(`: the last ${fits} of 30 turns, oldest first.`)
+  expect(text.endsWith(body(29))).toBe(true)
+  expect(text).toContain(body(30 - fits))
+  expect(text).not.toContain(body(29 - fits))
 })

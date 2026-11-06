@@ -45,6 +45,21 @@ The pane opens beside the conversation when a session starts.
   session's **Transcript view** is **Thinking** (or Verbose), from the next
   prompt on. In the Normal view only the short notes Claude writes between
   tool calls arrive, so there is less to summarize.
+- Each turn's updates also go to a log of the session's own, a Markdown
+  file named after the session's id in `~/.claude/session-weather/thinking/`
+  (under `CLAUDE_CONFIG_DIR` when that is set). A turn's section says when
+  it began and how it ended, then your prompt, the recap, and the updates in
+  the order they came. It is written again as each update comes, a recap
+  that lands after your next prompt still goes to its turn, and a resumed
+  session goes on in the same file. A turn with no update adds nothing.
+- Claude reads the log through a tool of the mod's,
+  `mcp__session-weather__thinking_log`, kept behind ToolSearch until it is
+  wanted: the recaps of the last 10 turns by default, up to 50 turns, or
+  every update with `full`. Its description tells Claude that the log is
+  Haiku's paraphrase of its summarized thinking, to check against the code
+  or the transcript, not a record of what it decided.
+- The mod cannot delete files (its file API has no delete), so the logs stay
+  until you remove them; a turn takes a kilobyte or two.
 - The summary is written in Vietnamese (fixed for now).
 - Each update is one Haiku request on the session's own account, about
   $0.001; the pane shows what the summaries cost this session. The request

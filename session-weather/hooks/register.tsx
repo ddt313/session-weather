@@ -458,6 +458,242 @@ const failureOf = (result: ModelCompleteResult) => {
   return 'cut short'
 }
 
+// The thinking log: each turn's updates in a Markdown file of the session's
+// own under the Claude Code configuration directory, its section rewritten
+// as they come, and a tool that reads it back for the model. A turn with no
+// update leaves no section.
+const LOG_FOLDER = ['session-weather', 'thinking'] as const
+const LOG_REQUEST_CHARS = 300
+// Each section opens with this mark and the turn's id: a rewrite finds the
+// turn's section by it.
+const LOG_MARK = '<!-- turn '
+// What the tool hands back: the latest turns, LOG_TURNS unless asked, and
+// no more characters than LOG_BUDGET, the oldest turns left out first.
+const LOG_TURNS = 10
+const MAX_LOG_TURNS = 50
+const LOG_BUDGET = 20_000
+const LOG_TOOL = 'thinking_log'
+const LOG_TOOL_NAME = 'mcp__session-weather__thinking_log'
+
+const present = (value: string | undefined) => (value === undefined || value === '' ? undefined : value)
+
+// Joined with the separator the base path is written with.
+const joinPath = (base: string, ...parts: string[]) => {
+  const separator = base.includes('\\') && !base.includes('/') ? '\\' : '/'
+
+  return [base.replace(/[\\/]+$/, ''), ...parts].join(separator)
+}
+
+// The session's log, in the configuration directory as Claude Code finds it:
+// the variable that moves it, else `.claude` in the home directory (the
+// profile's on Windows). Null where no directory is known.
+const logPath = async ($: EngineInterface, sessionId: string) => {
+  const moved = present(await $.env.get('CLAUDE_CONFIG_DIR'))
+  const home = present(await $.env.get('USERPROFILE')) ?? present(await $.env.get('HOME'))
+  const dir = moved ?? (home === undefined ? undefined : joinPath(home, '.claude'))
+
+  return dir === undefined ? null : joinPath(dir, ...LOG_FOLDER, `${sessionId.replace(/[^\w.-]/g, '_')}.md`)
+}
+
+const pad = (n: number) => String(n).padStart(2, '0')
+
+// "2026-11-06 14:32 UTC+07:00": the host's time, its offset said.
+const formatWhen = (ms: number) => {
+  const date = new Date(ms)
+  const offset = -date.getTimezoneOffset()
+
+  return [
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+    `${pad(date.getHours())}:${pad(date.getMinutes())}`,
+    `UTC${offset < 0 ? '-' : '+'}${pad(Math.floor(Math.abs(offset) / 60))}:${pad(Math.abs(offset) % 60)}`,
+  ].join(' ')
+}
+
+const logHeader = (sessionId: string, root: string | null) =>
+  [
+    '# Thinking log',
+    '',
+    `Session \`${sessionId}\`${root === null ? '' : ` in \`${root}\``}.`,
+    '',
+    `What ${HAIKU_NAME} said of Claude's thinking notes, turn by turn, as the Session Weather pane showed it: each turn's recap first, then its updates in the order they came. Haiku's reading of summarized thinking, not Claude's own words: check a decision against the code and the transcript before relying on it.`,
+    '',
+    '',
+  ].join('\n')
+
+// One update as a bullet, its time into the turn (or Recap) and its gist,
+// its decisions and next step under it.
+const logLines = (turn: Thinking, entry: ThinkingEntry) => [
+  `- ${entry.isRecap ? 'Recap' : formatDuration(Math.max(0, entry.at - turn.startedAt))} · ${entry.gist}`,
+  ...entry.decisions.map(decision => `  - ★ ${decision}`),
+  ...(entry.next === undefined ? [] : [`  - → ${entry.next}`]),
+]
+
+// A turn's section: when it began and how it ended, the request, the recap
+// (the newest first, should a late note have brought a second), then the
+// updates in order.
+const logSection = (turn: Thinking) => {
+  const request = clip(turn.request.replace(/\s+/g, ' ').trim(), LOG_REQUEST_CHARS)
+  const recaps = turn.entries.filter(entry => entry.isRecap === true).reverse()
+  const updates = turn.entries.filter(entry => entry.isRecap !== true)
+  const ending =
+    turn.durationMs === undefined
+      ? ['in progress']
+      : [formatDuration(turn.durationMs), turn.isAborted === true ? 'interrupted' : 'done']
+
+  return [
+    `${LOG_MARK}${turn.turnId} -->`,
+    `## ${[formatWhen(turn.startedAt), ...ending].join(' · ')}`,
+    '',
+    `> ${request === '' ? '(no prompt text)' : request}`,
+    '',
+    ...[...recaps, ...updates].flatMap(entry => logLines(turn, entry)),
+    '',
+    '',
+  ].join('\n')
+}
+
+// The log with the turn's section where it stood, or after the others.
+const withSection = (text: string, turnId: string, section: string) => {
+  const mark = `${LOG_MARK}${turnId} -->\n`
+  const at = text.startsWith(mark) ? 0 : text.indexOf(`\n${mark}`) + 1
+
+  if (at === 0 && !text.startsWith(mark)) {
+    const closed = text.endsWith('\n\n') ? text : text.endsWith('\n') ? `${text}\n` : `${text}\n\n`
+
+    return `${closed}${section}`
+  }
+
+  const next = text.indexOf(`\n${LOG_MARK}`, at)
+
+  return `${text.slice(0, at)}${section}${next === -1 ? '' : text.slice(next + 1)}`
+}
+
+// The log's writes, one at a time: each reads the file and writes it whole.
+let logging: Promise<void> = Promise.resolve()
+
+// The main loop's turn before the current one, as it stood when the next
+// began: an update asked on it may land after, and the log still takes it.
+let previousTurn: Thinking | null = null
+
+const writeTurn = async ($: EngineInterface, turn: Thinking) => {
+  const sessionId = await $.session.id()
+  const path = await logPath($, sessionId)
+
+  if (path === null) return
+
+  // A file there that cannot be read is left as it is, not written over.
+  const text = (await $.fs.exists(path)) ? await $.fs.read(path) : ''
+  const base = text === '' ? logHeader(sessionId, await $.session.root().catch(() => null)) : text
+
+  await $.fs.write(path, withSection(base, turn.turnId, logSection(turn)))
+}
+
+const logTurn = ($: EngineInterface, turn: Thinking) => {
+  if (turn.entries.length === 0) return logging
+
+  logging = logging
+    .then(() => writeTurn($, turn))
+    .catch((error: unknown) => {
+      try {
+        $.ui.log(`Thinking log not written: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+      } catch {
+        // The pane goes on without the log.
+      }
+    })
+
+  return logging
+}
+
+const LOG_TOOL_SPEC = {
+  name: LOG_TOOL,
+  description: [
+    "This session's thinking log: for each earlier turn, the user's request and what Claude Haiku said of your thinking notes (the gist, the decisions marked ★, the next step marked →), the turn's recap first.",
+    'Call it to recall what you weighed or settled on in a turn the conversation no longer holds in detail, as after a compaction, or when the user asks about an earlier turn.',
+    "It is Haiku's paraphrase of your summarized thinking, in Vietnamese: a lead to check against the code, the transcript or the user, never a record of what you decided.",
+    `By default the last ${LOG_TURNS} turns, each with its recap, or its last update when it has none.`,
+  ].join(' '),
+  inputSchema: {
+    type: 'object',
+    properties: {
+      turns: {
+        type: 'integer',
+        minimum: 1,
+        maximum: MAX_LOG_TURNS,
+        description: `How many of the latest turns to return; ${LOG_TURNS} when left out.`,
+      },
+      full: { type: 'boolean', description: 'Every update of each turn, not only its recap.' },
+    },
+    additionalProperties: false,
+  },
+  isDeferred: true,
+}
+
+// A section cut to the turn's last word: its heading and request, then its
+// recap, or its last update when it has none.
+const lastWord = (section: string) => {
+  const lines = section.split('\n')
+  const first = lines.findIndex(line => line.startsWith('- '))
+
+  if (first === -1) return section
+
+  const blocks: string[][] = []
+
+  for (const line of lines.slice(first)) {
+    const block = blocks.at(-1)
+
+    if (line.startsWith('- ') || block === undefined) blocks.push([line])
+    else block.push(line)
+  }
+
+  const word = blocks.find(block => block[0]?.startsWith('- Recap · ')) ?? blocks.at(-1) ?? []
+
+  return [...lines.slice(0, first), ...word].join('\n')
+}
+
+// The tool's answer: the latest turns' sections, oldest first, within the
+// budget.
+const readLog = async ($: EngineInterface, input: { turns?: unknown; full?: unknown }) => {
+  const path = await logPath($, await $.session.id())
+
+  if (path === null) return 'No thinking log: the Claude Code configuration directory is not known.'
+
+  const none =
+    'No thinking log for this session yet: no turn has had a thinking summary. It needs the Session Weather summary on, and the Thinking or Verbose transcript view.'
+
+  if (!(await $.fs.exists(path))) return none
+
+  const sections = (await $.fs.read(path))
+    .split(/^<!-- turn [^\n]* -->\n/m)
+    .slice(1)
+    .map(section => section.trimEnd())
+
+  if (sections.length === 0) return none
+
+  const asked = typeof input.turns === 'number' && Number.isFinite(input.turns) ? Math.floor(input.turns) : LOG_TURNS
+  const isFull = input.full === true
+  const picked = sections
+    .slice(-Math.min(MAX_LOG_TURNS, Math.max(1, asked)))
+    .map(section => (isFull ? section : lastWord(section)))
+  const kept: string[] = []
+  let size = 0
+
+  for (const section of [...picked].reverse()) {
+    if (kept.length > 0 && size + section.length > LOG_BUDGET) break
+
+    kept.unshift(clip(section, LOG_BUDGET))
+    size += section.length
+  }
+
+  const count = `${sections.length} turn${sections.length === 1 ? '' : 's'}`
+  const lead = [
+    `The thinking log of this session, ${path}:`,
+    kept.length === sections.length ? `${count}, oldest first.` : `the last ${kept.length} of ${count}, oldest first.`,
+    ...(isFull ? [] : ['Each turn shows its recap, or its last update when it has none; `full: true` gives every update.']),
+  ].join(' ')
+
+  return [lead, ...kept].join('\n\n')
+}
+
 // The summary's clockwork, the module's own: a reload starts it over.
 let ticker: Timer | null = null
 let asking: AbortController | null = null
@@ -599,14 +835,14 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
   }
 
   const said = result?.isAnswered ? parseSummary(result.text, isRecap ? MAX_RECAP_DECISIONS : MAX_DECISIONS) : null
+  const entry: ThinkingEntry | null =
+    said === null ? null : { at: now, ...said, ...(isRecap ? { isRecap: true as const } : {}) }
 
   await keep(one => {
     const { failure: _, ...rest } = one
     const settled = { ...rest, isSummarizing: false }
 
-    if (said !== null) {
-      const entry: ThinkingEntry = { at: now, ...said, ...(isRecap ? { isRecap: true as const } : {}) }
-
+    if (entry !== null) {
       return { ...settled, entries: [...settled.entries, entry].slice(-MAX_ENTRIES), summarized: covered }
     }
 
@@ -625,7 +861,27 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
 
   const after = await read($, thinking)
 
+  // The log takes the update on the turn it was asked on, the next prompt's
+  // turn having begun meanwhile or not.
+  if (entry !== null) {
+    if (after?.turnId === turn.turnId) {
+      await logTurn($, after)
+    } else if (previousTurn?.turnId === turn.turnId) {
+      previousTurn = { ...previousTurn, entries: [...previousTurn.entries, entry].slice(-MAX_ENTRIES) }
+      await logTurn($, previousTurn)
+    }
+  }
+
   return after?.turnId === turn.turnId && after.durationMs !== undefined && (!isRecap || after.notes.length > covered)
+}
+
+// A main-loop turn ended: the log takes how it ended, then the summary asks
+// for its last word.
+const endTurn = async ($: EngineInterface, turnId: string, isOn: boolean) => {
+  const turn = await read($, thinking)
+
+  if (turn?.turnId === turnId) await logTurn($, turn)
+  if (isOn) await askSummary($, true)
 }
 
 // The person's switch: off cuts a request under way and stops the clock;
@@ -726,6 +982,13 @@ export const register: Register = on => {
       immediate: true,
     })
 
+    // The log's tool, listed for the model from the first prompt on.
+    try {
+      await $.tool.register(LOG_TOOL_SPEC)
+    } catch {
+      // No tool: the log is still written, for the person to read.
+    }
+
     if ((await $.store.get(STORED_CLOSED)) !== true) {
       void openPane($)
     }
@@ -759,6 +1022,9 @@ export const register: Register = on => {
       askedAt = Number.NEGATIVE_INFINITY
       liveBlock = null
       await toNewest($)
+      // The turn before, for an update on it that lands from here on.
+      const before = await read($, thinking)
+      previousTurn = before === null ? null : { ...before, notes: [] }
       const startedAt = await $.clock.now()
       await update($, thinking, () => ({
         turnId: e.turnId,
@@ -843,14 +1109,23 @@ export const register: Register = on => {
       )
       stopTicker()
 
-      // The turn's last word, past the gap: no tick follows the end.
-      if (await read($, isSummaryOn)) {
-        $.clock.after(0, () => void askSummary($, true).catch(() => {}))
-      }
+      // The log takes the end, then the turn's last word is asked, past the
+      // gap: no tick follows the end.
+      const isOn = await read($, isSummaryOn)
+      $.clock.after(0, () => void endTurn($, e.turnId, isOn).catch(() => {}))
     }
 
     return next(e)
   })
+
+  // The model reading the log, through the tool registered at the start.
+  on('tool.call', { tool: LOG_TOOL_NAME }, async ($, e) => {
+    try {
+      return { result: await readLog($, e as unknown as { turns?: unknown; full?: unknown }) }
+    } catch (error) {
+      return { deny: `The thinking log could not be read: ${error instanceof Error ? error.message : String(error)}` }
+    }
+  }).catch(() => ({ deny: 'The thinking log could not be read.' }))
 
   on('session.measure', async ($, e, next) => {
     const windowBefore = (await read($, reading))?.window
