@@ -71,6 +71,8 @@ const engine = (
 ) => {
   const opens: unknown[] = []
   const toasts: string[] = []
+  // The lines the mod logged, and where to.
+  const logs: { text: string; to: string }[] = []
   const writes: { key: string; value: unknown }[] = []
   // The disk, by path, and the tools the mod registered.
   const files = new Map(Object.entries(usage.files ?? {}))
@@ -148,6 +150,11 @@ const engine = (
 
     return { value: undefined }
   })
+  on('ui.log', ($, e) => {
+    logs.push({ text: e.text, to: e.to })
+
+    return { value: undefined }
+  })
   on('store.get', ($, e) => ({ value: store.get(e.key) }))
   on('store.set', ($, e) => {
     store.set(e.key, e.value)
@@ -176,7 +183,7 @@ const engine = (
     return next(e)
   })
 
-  return { clock, opens, toasts, writes, steps, asks, replies, files, registered, redraws: () => redraws }
+  return { clock, opens, toasts, logs, writes, steps, asks, replies, files, registered, redraws: () => redraws }
 }
 
 const start = { cwd: '/tmp', surface: 'desktop' as const, isInteractive: true }
@@ -1124,6 +1131,110 @@ test('a turn that ends while Haiku waits gets its recap, WAIT not allowed', asyn
     'Recap · Claude đã đọc code và dừng ở đó.',
     'Summary cost $0.004 - Haiku 5.5',
   ])
+})
+
+// The summary's debug log, under the home directory the engine's process has.
+const DEBUG = '/home/me/.claude/session-weather/debug/session-1.md'
+
+const entriesIn = (text: string) => text.match(/^<!-- request [^\n]* -->$/gm)?.length ?? 0
+
+test('the debug log is off until /session-weather-debug, then keeps each request as sent and its reply', async ($, on) => {
+  const { asks, replies, steps, clock, files, writes, logs } = engine(on)
+  replies.push(answer('WAIT: Claude chưa chốt dùng A hay B'), answer('GIST: Claude chọn B.'))
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, 'Option A is quick. Option B is safe.'), stop])
+  await clock.advance(SECOND)
+  expect(asks.length).toBe(1)
+
+  // Off until asked: no file, no line.
+  expect(files.has(DEBUG)).toBe(false)
+  expect(logs).toEqual([])
+
+  const ran = await $.command.run({ command: 'session-weather-debug' } as never)
+  expect(ran.text).toBe(
+    `Summary debug log on: each Haiku request and its reply go to ${DEBUG}, and a line to the transcript. /session-weather-debug turns it off.`,
+  )
+  expect(writes.at(-1)).toEqual({ key: 'isDebugOn', value: true })
+  expect((await thoughts($)).at(-1)).toBe('Summary cost $0.002 - Haiku 5.5 · debug log on')
+
+  await runStep($, steps, 't1', [thought(0, 'B it is.'), stop])
+  await clock.advance(15 * SECOND)
+  expect(asks.length).toBe(2)
+
+  // The request as sent, under the system prompt, and the reply as it came.
+  const text = files.get(DEBUG) ?? ''
+  const prompt = asks[1]?.prompt ?? '?'
+  expect(text.startsWith('# Summary debug log\n')).toBe(true)
+  expect(text).toContain(`\`\`\`text\n${asks[1]?.system}\n\`\`\``)
+  expect(text).toContain(`\`\`\`text\n${prompt}\n\`\`\``)
+  expect(text).toContain('```text\nGIST: Claude chọn B.\n```')
+  expect(text).toContain('· 16s into turn `t1`')
+  expect(text).toContain('- Asked for an update or WAIT: notes 1–2 of the turn')
+  expect(text).toContain('- Outcome: update: Claude chọn B.')
+  expect(entriesIn(text)).toBe(1)
+  expect(logs).toEqual([
+    { text: `Summary debug: notes 1–2, ${prompt.length} chars → update: Claude chọn B.`, to: 'transcript' },
+  ])
+
+  // Off again: the file stays as it was, and no line comes.
+  const off = await $.command.run({ command: 'session-weather-debug' } as never)
+  expect(off.text).toBe(`Summary debug log off. What it wrote stays in ${DEBUG}`)
+  expect((await thoughts($)).at(-1)).toBe('Summary cost $0.004 - Haiku 5.5')
+
+  await runStep($, steps, 't1', [thought(0, 'Done.'), stop])
+  await clock.advance(15 * SECOND)
+  expect(asks.length).toBe(3)
+  expect(files.get(DEBUG)).toBe(text)
+  expect(logs.length).toBe(1)
+})
+
+test('a debug log left on in an earlier session keeps the newest 30 requests', async ($, on) => {
+  const { asks, steps, clock, files } = engine(on, { stored: { isDebugOn: true } })
+
+  await $.session.start(start)
+  expect((await thoughts($)).at(-1)).toBe('Summary cost $0.000 - Haiku 5.5 · debug log on')
+
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+
+  for (let at = 0; at < 32; at += 1) {
+    await runStep($, steps, 't1', [thought(0, `Note ${at}.`), stop])
+    await clock.advance(15 * SECOND)
+  }
+
+  expect(asks.length).toBe(32)
+
+  // The two oldest went: the first kept was sent 31 seconds in, the last
+  // 7m 46s in.
+  const text = files.get(DEBUG) ?? ''
+  expect(entriesIn(text)).toBe(30)
+  expect(text).not.toContain('· 1s into turn')
+  expect(text).not.toContain('· 16s into turn')
+  expect(text).toContain('· 31s into turn')
+  expect(text).toContain('· 7m 46s into turn')
+  expect(text.match(/^# Summary debug log$/gm)?.length).toBe(1)
+})
+
+test('a failed request goes to the debug log with why', async ($, on) => {
+  const { replies, steps, clock, files, logs } = engine(on, { stored: { isDebugOn: true } })
+  replies.push({
+    isAnswered: false,
+    reason: 'api-error',
+    status: 429,
+    error: 'rate_limit',
+    usage: { ...USAGE, input_tokens: 0, output_tokens: 0 },
+  })
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, 'A note.'), stop])
+  await clock.advance(SECOND)
+
+  const text = files.get(DEBUG) ?? ''
+  expect(text).toContain('- Outcome: failed: rate_limit 429')
+  expect(text).toContain('### Reply\n\n(no reply: rate_limit 429)')
+  expect(logs.at(-1)?.text).toMatch(/^Summary debug: notes 1–1, \d+ chars → failed: rate_limit 429$/)
 })
 
 // The session's log, under the home directory the engine's process has.

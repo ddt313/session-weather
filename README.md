@@ -72,6 +72,14 @@ The pane opens beside the conversation when a session starts.
   about $0.001; the pane shows what the summaries cost this session. The request
   carries your prompt and Claude's thinking notes. **Turn summary off** stops
   the requests, and the choice is kept across sessions.
+- To see what the summary sends Haiku, `/session-weather-debug` turns on its
+  debug log, kept on in later sessions until you run the command again. Each
+  request goes as sent, with Haiku's reply as it came, to a Markdown file
+  named after the session's id in `~/.claude/session-weather/debug/`, the
+  system prompt at its top and the newest 30 requests kept; each also leaves
+  a dim line in the transcript, which Claude is not sent. The pane's footer
+  says `debug log on` while it is. The file holds your prompts and Claude's
+  thinking notes, and stays until you remove it.
 
 ## Install
 
