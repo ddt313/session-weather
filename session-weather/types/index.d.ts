@@ -27,38 +27,36 @@ export type ThinkingEntry = {
   at: number
   gist: string
   decisions: string[]
-  assumptions?: string[]
+  assumptions: string[]
   next?: string
   isRecap?: true
 }
 
-// Something of the main loop's turn the summary reads beside the thinking,
-// at `at` (ms since the epoch): a tool call in a few words, or a block of
-// the text Claude wrote to the person.
+// Something of the main loop's turn the summary reads, kept at `at` (ms
+// since the epoch): a thinking note, a tool call in a few words, or a block
+// of the text Claude wrote to the person.
 export type TurnMark = { at: number; text: string }
 
 // The main loop's current or last turn, as the summary follows it. `notes`
-// are its thinking blocks that carried text, oldest first, and `noteAt`
-// when each was kept (-1 where a version before kept it); `summarized`
+// are its thinking blocks that carried text, oldest first; `summarized`
 // counts the ones an update has read, and `seen` the ones Haiku has read,
-// an update or a WAIT (`summarized` when absent); `actions` are its tool
-// calls and `said` the text Claude wrote to the person, oldest first;
-// `entries` are the updates, oldest first. `durationMs` is set once the
-// turn ended; `failure` says why the latest request gave no update;
-// `waitingFor` is what Haiku said it waits for at its last WAIT ('' when it
-// did not say), until an update comes.
+// an update or a WAIT; `actions` are its tool calls and `said` the text
+// Claude wrote to the person, oldest first; `entries` are the updates,
+// oldest first. `durationMs` is set once the turn ended; `failure` says why
+// the latest request gave no update; `waitingFor` is what Haiku said it
+// waits for at its last WAIT ('' when it did not say), until an update
+// comes. A change to this shape bumps the atom's shape tag.
 export type Thinking = {
   turnId: string
   request: string
   startedAt: number
   durationMs?: number
   isAborted?: boolean
-  notes: string[]
-  noteAt?: number[]
+  notes: TurnMark[]
   summarized: number
-  seen?: number
-  actions?: TurnMark[]
-  said?: TurnMark[]
+  seen: number
+  actions: TurnMark[]
+  said: TurnMark[]
   entries: ThinkingEntry[]
   isSummarizing: boolean
   failure?: string
@@ -85,8 +83,7 @@ declare module 'claude-code' {
       // keeps no ledger.
       cost: number | null
       // Null until the main loop starts a turn while the mod is loaded.
-      // Shaped: a turn kept by the version that showed a single summary is
-      // declined.
+      // Shaped: a turn an earlier version kept in another shape is declined.
       thinking: Shaped<Thinking | null>
       // Whether the thinking summary runs; the person turns it off and on.
       isSummaryOn: boolean

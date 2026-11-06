@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, ModelCompleteResult, ModelUsage, Register, Timer } from 'claude-code'
+import type { EngineInterface, ModelCompleteResult, ModelUsage, Register, Timer, UiLogOptions } from 'claude-code'
 
 import type { AutoCompact, Limit, Reading, Thinking, ThinkingEntry, TurnMark } from '../types'
 
@@ -11,9 +11,9 @@ const turnTools = atom({ plugin: 'session-weather', key: 'turnTools' } as const,
 const lastTurn = atom({ plugin: 'session-weather', key: 'lastTurn' } as const, null)
 const autoCompact = atom({ plugin: 'session-weather', key: 'autoCompact' } as const, null)
 const cost = atom({ plugin: 'session-weather', key: 'cost' } as const, null)
-// Tagged: the version that showed a single summary kept a turn of another
-// shape, which this one declines.
-const thinking = atom({ plugin: 'session-weather', key: 'thinking' } as const, null, { shape: 'thinking-entries-1' })
+// Tagged: a turn an earlier version kept in another shape is declined, not
+// read. Bump the tag whenever the shape of `Thinking` changes.
+const thinking = atom({ plugin: 'session-weather', key: 'thinking' } as const, null, { shape: 'thinking-entries-2' })
 const isSummaryOn = atom({ plugin: 'session-weather', key: 'isSummaryOn' } as const, true)
 const summaryCost = atom({ plugin: 'session-weather', key: 'summaryCost' } as const, 0)
 const summaryPlace = atom({ plugin: 'session-weather', key: 'summaryPlace' } as const, { line: 0, row: 0 })
@@ -60,6 +60,9 @@ const formatDuration = (ms: number) => {
 
 const formatCost = (usd: number) => (usd < 0.01 ? '<$0.01' : `$${usd.toFixed(2)}`)
 
+// "1 note", "3 notes".
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
+
 // Where the engine compacts on its own, from the window's breakdown. The
 // `summary` breakdown is estimated locally and sends no request.
 const readAutoCompact = async ($: EngineInterface): Promise<AutoCompact | null> => {
@@ -72,6 +75,16 @@ const readAutoCompact = async ($: EngineInterface): Promise<AutoCompact | null> 
   } catch {
     return null
   }
+}
+
+// "auto-compact at 92% · 920k" in a window of `window` tokens, or that it is
+// off; null where the engine has not said.
+const compactLineOf = (compactAt: AutoCompact | null, window: number) => {
+  if (compactAt === null) return null
+  if (!compactAt.isEnabled) return 'auto-compact off'
+  if (compactAt.threshold === undefined) return null
+
+  return `auto-compact at ${Math.round((compactAt.threshold / window) * 100)}% · ${formatTokens(compactAt.threshold)}`
 }
 
 // 20 cells, filled to the share used.
@@ -225,26 +238,33 @@ const clipNote = (text: string) =>
 // whole, as the engine does.
 const MIN_PINNED_ROWS = 24
 
-// One line of the updates' window: an update's gist, a decision, an
-// assumption, or its next step. `entry` counts from the newest.
-type UpdateLine = { kind: 'gist' | 'decision' | 'assumption' | 'next'; entry: number; text: string }
+// "1m 5s" into the turn.
+const intoTurn = (turn: Thinking, at: number) => formatDuration(Math.max(0, at - turn.startedAt))
+
+// One line of an update: its gist, a decision, an assumption, or its next
+// step.
+type UpdateLine = { kind: 'gist' | 'decision' | 'assumption' | 'next'; text: string }
+
+// An update's lines, in the order the pane, the prompt and the log all give
+// them.
+const partsOf = (one: Update): UpdateLine[] => [
+  { kind: 'gist', text: one.gist },
+  ...one.decisions.map(text => ({ kind: 'decision' as const, text })),
+  ...one.assumptions.map(text => ({ kind: 'assumption' as const, text })),
+  ...(one.next === undefined ? [] : [{ kind: 'next' as const, text: one.next }]),
+]
+
+// What an update's gist opens with in the pane and the log: Recap, or its
+// time into the turn.
+const stampOf = (turn: Thinking, entry: ThinkingEntry) => (entry.isRecap ? 'Recap' : intoTurn(turn, entry.at))
 
 // The turn's updates as the window scrolls over them, newest first.
 const updateLines = (turn: Thinking): UpdateLine[] =>
-  [...turn.entries].reverse().flatMap((entry, at): UpdateLine[] => [
-    {
-      kind: 'gist',
-      entry: at,
-      text: `${entry.isRecap ? 'Recap' : formatDuration(Math.max(0, entry.at - turn.startedAt))} · ${entry.gist}`,
-    },
-    ...entry.decisions.map(text => ({ kind: 'decision' as const, entry: at, text })),
-    ...(entry.assumptions ?? []).map(text => ({ kind: 'assumption' as const, entry: at, text })),
-    ...(entry.next === undefined ? [] : [{ kind: 'next' as const, entry: at, text: entry.next }]),
-  ])
+  [...turn.entries].reverse().flatMap(entry => {
+    const stamp = stampOf(turn, entry)
 
-// The lines a new update puts above the earlier ones.
-const linesAdded = (said: Update) =>
-  1 + said.decisions.length + (said.assumptions?.length ?? 0) + (said.next === undefined ? 0 : 1)
+    return partsOf(entry).map(line => (line.kind === 'gist' ? { ...line, text: `${stamp} · ${line.text}` } : line))
+  })
 
 // What each kind of line opens with: ★ a decision, ? an assumption, → the
 // next step.
@@ -265,26 +285,24 @@ const rowStarts = (text: string, width: number) => {
     const space = text.indexOf(' ', at)
     const wordEnd = space === -1 ? text.length : space
 
-    if (wordEnd - rowStart > width && at > rowStart) {
-      // The word does not fit on this row: it starts the next one.
-      rowStart = at
-      starts.push(at)
-    } else if (wordEnd - rowStart > width) {
-      // A word longer than a row is cut.
-      rowStart += width
-      starts.push(rowStart)
-      at = rowStart
-    } else {
+    if (wordEnd - rowStart <= width) {
       at = wordEnd + 1
+      continue
     }
+
+    // The word does not fit on this row: it starts the next one, or, a word
+    // longer than a row, is cut.
+    rowStart = at > rowStart ? at : rowStart + width
+    starts.push(rowStart)
+    at = rowStart
   }
 
   return starts
 }
 
 // One row of the updates, as the steps count them: the line it is part of,
-// the update, and the character of the line's shown text it starts at.
-type UpdateRow = { kind: UpdateLine['kind']; line: number; entry: number; start: number }
+// and the character of the line's shown text it starts at.
+type UpdateRow = { line: number; start: number }
 
 // The lines' rows at `width`, and the row each line starts on.
 const updateRows = (lines: readonly UpdateLine[], width: number) => {
@@ -295,7 +313,7 @@ const updateRows = (lines: readonly UpdateLine[], width: number) => {
     starts.push(rows.length)
 
     for (const start of rowStarts(shownText(line), width)) {
-      rows.push({ kind: line.kind, line: at, entry: line.entry, start })
+      rows.push({ line: at, start })
     }
   })
 
@@ -306,7 +324,6 @@ const updateRows = (lines: readonly UpdateLine[], width: number) => {
 // and on the desktop a seventh more, its face being narrower than the cells
 // the pane is measured in. What the arrows step through.
 const DESKTOP_FACE = 1.15
-let rowWidth = 45
 
 const widthOf = (columns: number, surface: string) =>
   Math.max(10, Math.round((columns - 1) * (surface === 'terminal' ? 1 : DESKTOP_FACE)))
@@ -329,25 +346,27 @@ const topRow = (starts: readonly number[], rowCount: number, line: number, withi
   return first + Math.max(0, Math.min(within, lineRows - 1))
 }
 
+// The updates' window over the turn at `width`: the lines, their rows, the
+// row each line starts on, and the row standing on top (0 with no rows).
+const layUpdates = (turn: Thinking | null, width: number, place: { line: number; row: number }) => {
+  const lines = turn === null ? [] : updateLines(turn)
+  const { rows, starts } = updateRows(lines, width)
+  const top = rows.length === 0 ? 0 : topRow(starts, rows.length, Math.min(place.line, lines.length - 1), place.row)
+
+  return { lines, rows, starts, top }
+}
+
 // Moves the updates' window `by` rows (negative toward the newest), within
-// the turn's rows. The place is kept as a line and the rows into it, so an
-// update added on top, or another width, keeps the reader where they were.
-const moveUpdates = async ($: EngineInterface, by: number) => {
-  const turn = await read($, thinking)
+// the turn's rows at the `width` the pane was drawn at. The place is kept as
+// a line and the rows into it, so an update added on top, or another width,
+// keeps the reader where they were.
+const moveUpdates = async ($: EngineInterface, by: number, width: number) => {
+  const { rows, starts, top } = layUpdates(await read($, thinking), width, await read($, summaryPlace))
+  const to = Math.max(0, Math.min(rows.length - 1, top + by))
 
-  if (turn === null) return
-
-  const lines = updateLines(turn)
-  const { rows, starts } = updateRows(lines, rowWidth)
-
-  if (rows.length === 0) return
-
-  const place = await read($, summaryPlace)
-  const from = topRow(starts, rows.length, Math.min(place.line, lines.length - 1), place.row)
-  const to = Math.max(0, Math.min(rows.length - 1, from + by))
-
-  // At either end a held arrow keeps asking: nothing to write, nothing to draw.
-  if (to === from) return
+  // At either end (or with no rows) a held arrow keeps asking: nothing to
+  // write, nothing to draw.
+  if (to === top) return
 
   const line = rows[to]?.line ?? 0
   await update($, summaryPlace, () => ({ line, row: to - (starts[line] ?? 0) }))
@@ -368,6 +387,10 @@ const haikuCost = (usage: ModelUsage) =>
     usage.cache_read_input_tokens * 0.01 +
     usage.cache_creation_input_tokens * 0.125) /
   1_000_000
+
+// The tokens a request read: those the cache served or took, and the rest.
+const inputTokens = (usage: ModelUsage) =>
+  usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens
 
 // "$0.004"; "<$0.001" below half of that last digit.
 const formatSummaryCost = (usd: number) => (usd > 0 && usd < 0.0005 ? '<$0.001' : `$${usd.toFixed(3)}`)
@@ -410,26 +433,27 @@ const RECAP = [
 // MAX_SILENCE.
 const NO_WAIT = 'WAIT is not allowed this time.'
 
-const entryLines = (entry: ThinkingEntry) => [
-  `GIST: ${entry.gist}`,
-  ...entry.decisions.map(decision => `DECISION: ${decision}`),
-  ...(entry.assumptions ?? []).map(assumption => `ASSUMPTION: ${assumption}`),
-  ...(entry.next === undefined ? [] : [`NEXT: ${entry.next}`]),
-]
+// The tag each kind of line goes under in a reply, and in the earlier
+// updates a request sends back.
+const TAGS = { gist: 'GIST', decision: 'DECISION', assumption: 'ASSUMPTION', next: 'NEXT' } as const
 
-// The newest notes that fit the budget, oldest first, and how many older
-// ones were left out.
-const fitNotes = (notes: readonly string[]) => {
-  const kept: string[] = []
+const entryLines = (entry: ThinkingEntry) => partsOf(entry).map(line => `${TAGS[line.kind]}: ${line.text}`)
+
+// The newest items whose sizes fit the budget, oldest first; the newest is
+// kept whatever its size.
+const fitNewest = <T,>(items: readonly T[], budget: number, sizeOf: (item: T) => number) => {
+  const kept: T[] = []
   let size = 0
 
-  for (const note of [...notes].reverse()) {
-    if (kept.length > 0 && size + note.length > NOTES_BUDGET) break
-    kept.unshift(note)
-    size += note.length
+  for (const item of [...items].reverse()) {
+    const itemSize = sizeOf(item)
+
+    if (kept.length > 0 && size + itemSize > budget) break
+    kept.unshift(item)
+    size += itemSize
   }
 
-  return { kept, left: notes.length - kept.length }
+  return kept
 }
 
 // The end of the notes an update has read, CONTEXT_CHARS of it at most, for
@@ -461,45 +485,42 @@ const contextNotes = (covered: readonly string[]) => {
   return kept
 }
 
-// Each note in its tag, with its time into the turn where it is known.
-const noteTags = (notes: readonly string[], times: readonly (string | undefined)[] = []) =>
-  notes.map((note, at) => `<note${times[at] === undefined ? '' : ` at="${times[at]}"`}>\n${note}\n</note>`).join('\n')
+// A note in its tag, with its time into the turn where given.
+const noteTag = (text: string, time?: string) => `<note${time === undefined ? '' : ` at="${time}"`}>\n${text}\n</note>`
 
-// "1m 5s" into the turn; undefined where the moment is not known.
-const intoTurn = (turn: Thinking, at: number | undefined) =>
-  at === undefined || at < 0 ? undefined : formatDuration(Math.max(0, at - turn.startedAt))
+// The size of a note or a mark, as the budgets count it.
+const sizeOfMark = (mark: TurnMark) => mark.text.length
 
-// The newest marks whose text fits the budget, oldest first.
-const fitMarks = (marks: readonly TurnMark[], budget: number) => {
-  const kept: TurnMark[] = []
-  let size = 0
+// What one request asks, settled once for the prompt and the debug log: the
+// recap (the turn has ended) or an update, whether WAIT is taken away, the
+// notes it reads (from `from` up to `covered`), and since when it tells what
+// Claude did and wrote.
+type Ask = { isRecap: boolean; isForced: boolean; from: number; covered: number; since: number }
 
-  for (const mark of [...marks].reverse()) {
-    if (kept.length > 0 && size + mark.text.length > budget) break
-    kept.unshift(mark)
-    size += mark.text.length
+const askOf = (turn: Thinking, now: number): Ask => {
+  const isRecap = turn.durationMs !== undefined
+
+  return {
+    isRecap,
+    isForced: isRecap || isSilent(turn, now),
+    from: isRecap ? 0 : turn.summarized,
+    covered: turn.notes.length,
+    since: isRecap ? turn.startedAt : lastUpdateAt(turn),
   }
-
-  return kept
 }
 
 // The request, the updates given so far, the end of the notes they read,
 // the notes to read (those no update has read, or for the recap the whole
 // turn's), and what Claude did and wrote to the person since the last
-// update (the recap: the turn's tool calls alone). `isForced` takes WAIT
-// away.
-const summaryPrompt = (turn: Thinking, isForced: boolean) => {
-  const isRecap = turn.durationMs !== undefined
-  const from = isRecap ? 0 : turn.summarized
-  const { kept, left } = fitNotes(turn.notes.slice(from))
-  const noteAt = turn.noteAt?.length === turn.notes.length ? turn.noteAt : []
-  const keptAt = kept.map((_, at) => intoTurn(turn, noteAt[from + left + at]))
-  const context = isRecap ? [] : contextNotes(turn.notes.slice(0, turn.summarized))
-  const since = isRecap ? turn.startedAt : lastUpdateAt(turn)
-  const actions = (turn.actions ?? [])
-    .filter(one => one.at >= since)
-    .slice(isRecap ? -RECAP_ACTIONS : -PROMPT_ACTIONS)
-  const said = isRecap ? [] : fitMarks((turn.said ?? []).filter(one => one.at >= since), SAID_BUDGET)
+// update (the recap: the turn's tool calls alone).
+const summaryPrompt = (turn: Thinking, ask: Ask) => {
+  const { isRecap, since } = ask
+  const notes = turn.notes.slice(ask.from)
+  const kept = fitNewest(notes, NOTES_BUDGET, sizeOfMark)
+  const left = notes.length - kept.length
+  const context = isRecap ? [] : contextNotes(turn.notes.slice(0, turn.summarized).map(note => note.text))
+  const actions = turn.actions.filter(one => one.at >= since).slice(isRecap ? -RECAP_ACTIONS : -PROMPT_ACTIONS)
+  const said = isRecap ? [] : fitNewest(turn.said.filter(one => one.at >= since), SAID_BUDGET, sizeOfMark)
   const earlier = turn.entries.slice(-EARLIER_UPDATES)
   const unsent = turn.entries.length - earlier.length
   const notesTitle = isRecap
@@ -520,16 +541,20 @@ const summaryPrompt = (turn: Thinking, isForced: boolean) => {
         ]),
     ...(context.length === 0
       ? []
-      : ['', "The end of Claude's thinking that your updates already cover:", `<context>\n${noteTags(context)}\n</context>`]),
+      : [
+          '',
+          "The end of Claude's thinking that your updates already cover:",
+          `<context>\n${context.map(text => noteTag(text)).join('\n')}\n</context>`,
+        ]),
     '',
     `${notesTitle}, oldest first${left === 0 ? '' : ` (${left} earlier ones left out)`}:`,
-    `<notes>\n${noteTags(kept, keptAt)}\n</notes>`,
+    `<notes>\n${kept.map(note => noteTag(note.text, intoTurn(turn, note.at))).join('\n')}\n</notes>`,
     ...(actions.length === 0
       ? []
       : [
           '',
           `The tools Claude called ${isRecap ? 'this turn' : 'since your last update'}, oldest first:`,
-          `<actions>\n${actions.map(one => `${intoTurn(turn, one.at) ?? '?'} · ${one.text}`).join('\n')}\n</actions>`,
+          `<actions>\n${actions.map(one => `${intoTurn(turn, one.at)} · ${one.text}`).join('\n')}\n</actions>`,
         ]),
     ...(said.length === 0
       ? []
@@ -539,7 +564,7 @@ const summaryPrompt = (turn: Thinking, isForced: boolean) => {
           `<said>\n${said.map(one => one.text).join('\n\n')}\n</said>`,
         ]),
     ...(isRecap ? ['', RECAP] : []),
-    ...(isForced ? ['', NO_WAIT] : []),
+    ...(ask.isForced ? ['', NO_WAIT] : []),
   ].join('\n')
 }
 
@@ -550,12 +575,12 @@ type Update = Pick<ThinkingEntry, 'gist' | 'decisions' | 'assumptions' | 'next'>
 
 // What a reply says: an update, or that Haiku waits for more notes, and for
 // what ('' when it did not say).
-type Said = { update: Update } | { wait: string }
+type Reply = { update: Update } | { wait: string }
 
 // "WAIT", or "WAIT: what for".
 const WAIT_LINE = /^WAIT\s*(?::\s*(.*))?$/i
 
-const parseSummary = (text: string, maxDecisions: number, isForced: boolean): Said | null => {
+const parseSummary = (text: string, maxDecisions: number, isForced: boolean): Reply | null => {
   let gist = ''
   let next: string | undefined
   let wait: string | undefined
@@ -602,9 +627,7 @@ const parseSummary = (text: string, maxDecisions: number, isForced: boolean): Sa
     update: {
       gist: clip(gist, 400),
       decisions: decisions.slice(0, maxDecisions).map(decision => clip(decision, 200)),
-      ...(assumptions.length === 0
-        ? {}
-        : { assumptions: assumptions.slice(0, MAX_ASSUMPTIONS).map(assumption => clip(assumption, 200)) }),
+      assumptions: assumptions.slice(0, MAX_ASSUMPTIONS).map(assumption => clip(assumption, 200)),
       ...(next === undefined ? {} : { next: clip(next, 200) }),
     },
   }
@@ -627,8 +650,9 @@ const failureOf = (result: ModelCompleteResult) => {
 const LOG_FOLDER = ['session-weather', 'thinking'] as const
 const LOG_REQUEST_CHARS = 300
 // Each section opens with this mark and the turn's id: a rewrite finds the
-// turn's section by it.
+// turn's section by it, and the tool splits the log at each.
 const LOG_MARK = '<!-- turn '
+const LOG_SECTION = /^<!-- turn [^\n]* -->\n/m
 // What the tool hands back: the latest turns, LOG_TURNS unless asked, and
 // no more characters than LOG_BUDGET, the oldest turns left out first.
 const LOG_TURNS = 10
@@ -658,8 +682,34 @@ const sessionFile = async ($: EngineInterface, folder: readonly string[], sessio
   return dir === undefined ? null : joinPath(dir, ...folder, `${sessionId.replace(/[^\w.-]/g, '_')}.md`)
 }
 
-// The session's thinking log.
-const logPath = ($: EngineInterface, sessionId: string) => sessionFile($, LOG_FOLDER, sessionId)
+const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error))
+
+// A line to the transcript, or where `options` sends it; lost where it
+// cannot go, the mod going on without it.
+const tell = ($: EngineInterface, text: string, options?: UiLogOptions) => {
+  try {
+    $.ui.log(text, options)
+  } catch {
+    // The line is lost.
+  }
+}
+
+// Writes the session's file in `folder` whole, with what `change` makes of
+// the text it holds ('' while there is none). A file there that cannot be
+// read is left as it is, not written over.
+const rewrite = async (
+  $: EngineInterface,
+  folder: readonly string[],
+  change: (text: string, sessionId: string) => string | Promise<string>,
+) => {
+  const sessionId = await $.session.id()
+  const path = await sessionFile($, folder, sessionId)
+
+  if (path === null) return
+
+  const text = (await $.fs.exists(path)) ? await $.fs.read(path) : ''
+  await $.fs.write(path, await change(text, sessionId))
+}
 
 const pad = (n: number) => String(n).padStart(2, '0')
 
@@ -687,13 +737,15 @@ const logHeader = (sessionId: string, root: string | null) =>
   ].join('\n')
 
 // One update as a bullet, its time into the turn (or Recap) and its gist,
-// its decisions, assumptions and next step under it.
-const logLines = (turn: Thinking, entry: ThinkingEntry) => [
-  `- ${entry.isRecap ? 'Recap' : formatDuration(Math.max(0, entry.at - turn.startedAt))} · ${entry.gist}`,
-  ...entry.decisions.map(decision => `  - ★ ${decision}`),
-  ...(entry.assumptions ?? []).map(assumption => `  - ? ${assumption}`),
-  ...(entry.next === undefined ? [] : [`  - → ${entry.next}`]),
-]
+// its decisions, assumptions and next step under it, marked as the pane
+// marks them.
+const logLines = (turn: Thinking, entry: ThinkingEntry) =>
+  partsOf(entry).map(line =>
+    line.kind === 'gist' ? `- ${stampOf(turn, entry)} · ${line.text}` : `  - ${shownText(line)}`,
+  )
+
+// The line that opens a turn's section.
+const sectionMark = (turnId: string) => `${LOG_MARK}${turnId} -->`
 
 // A turn's section: when it began and how it ended, the request, the recap
 // (the newest first, should a late note have brought a second), then the
@@ -708,7 +760,7 @@ const logSection = (turn: Thinking) => {
       : [formatDuration(turn.durationMs), turn.isAborted === true ? 'interrupted' : 'done']
 
   return [
-    `${LOG_MARK}${turn.turnId} -->`,
+    sectionMark(turn.turnId),
     `## ${[formatWhen(turn.startedAt), ...ending].join(' · ')}`,
     '',
     `> ${request === '' ? '(no prompt text)' : request}`,
@@ -721,10 +773,11 @@ const logSection = (turn: Thinking) => {
 
 // The log with the turn's section where it stood, or after the others.
 const withSection = (text: string, turnId: string, section: string) => {
-  const mark = `${LOG_MARK}${turnId} -->\n`
-  const at = text.startsWith(mark) ? 0 : text.indexOf(`\n${mark}`) + 1
+  // Looked for after a newline put before the text, the mark is found at
+  // the text's very start too.
+  const at = `\n${text}`.indexOf(`\n${sectionMark(turnId)}\n`)
 
-  if (at === 0 && !text.startsWith(mark)) {
+  if (at === -1) {
     const closed = text.endsWith('\n\n') ? text : text.endsWith('\n') ? `${text}\n` : `${text}\n\n`
 
     return `${closed}${section}`
@@ -742,31 +795,20 @@ let logging: Promise<void> = Promise.resolve()
 // began: an update asked on it may land after, and the log still takes it.
 let previousTurn: Thinking | null = null
 
-const writeTurn = async ($: EngineInterface, turn: Thinking) => {
-  const sessionId = await $.session.id()
-  const path = await logPath($, sessionId)
-
-  if (path === null) return
-
-  // A file there that cannot be read is left as it is, not written over.
-  const text = (await $.fs.exists(path)) ? await $.fs.read(path) : ''
-  const base = text === '' ? logHeader(sessionId, await $.session.root().catch(() => null)) : text
-
-  await $.fs.write(path, withSection(base, turn.turnId, logSection(turn)))
-}
-
 const logTurn = ($: EngineInterface, turn: Thinking) => {
   if (turn.entries.length === 0) return logging
 
   logging = logging
-    .then(() => writeTurn($, turn))
-    .catch((error: unknown) => {
-      try {
-        $.ui.log(`Thinking log not written: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
-      } catch {
-        // The pane goes on without the log.
-      }
-    })
+    .then(() =>
+      rewrite($, LOG_FOLDER, async (text, sessionId) =>
+        withSection(
+          text === '' ? logHeader(sessionId, await $.session.root().catch(() => null)) : text,
+          turn.turnId,
+          logSection(turn),
+        ),
+      ),
+    )
+    .catch((error: unknown) => tell($, `Thinking log not written: ${messageOf(error)}`, { to: 'debug' }))
 
   return logging
 }
@@ -798,29 +840,18 @@ const LOG_TOOL_SPEC = {
 // A section cut to the turn's last word: its heading and request, then its
 // recap, or its last update when it has none.
 const lastWord = (section: string) => {
-  const lines = section.split('\n')
-  const first = lines.findIndex(line => line.startsWith('- '))
+  // Each update is a bullet at the line's start, its decisions and the rest
+  // indented under it: the section splits before each update.
+  const [head, ...updates] = section.split(/\n(?=- )/)
+  const word = updates.find(block => block.startsWith('- Recap · ')) ?? updates.at(-1)
 
-  if (first === -1) return section
-
-  const blocks: string[][] = []
-
-  for (const line of lines.slice(first)) {
-    const block = blocks.at(-1)
-
-    if (line.startsWith('- ') || block === undefined) blocks.push([line])
-    else block.push(line)
-  }
-
-  const word = blocks.find(block => block[0]?.startsWith('- Recap · ')) ?? blocks.at(-1) ?? []
-
-  return [...lines.slice(0, first), ...word].join('\n')
+  return word === undefined ? section : `${head}\n${word}`
 }
 
 // The tool's answer: the latest turns' sections, oldest first, within the
 // budget.
 const readLog = async ($: EngineInterface, input: { turns?: unknown; full?: unknown }) => {
-  const path = await logPath($, await $.session.id())
+  const path = await sessionFile($, LOG_FOLDER, await $.session.id())
 
   if (path === null) return 'No thinking log: the Claude Code configuration directory is not known.'
 
@@ -830,7 +861,7 @@ const readLog = async ($: EngineInterface, input: { turns?: unknown; full?: unkn
   if (!(await $.fs.exists(path))) return none
 
   const sections = (await $.fs.read(path))
-    .split(/^<!-- turn [^\n]* -->\n/m)
+    .split(LOG_SECTION)
     .slice(1)
     .map(section => section.trimEnd())
 
@@ -841,17 +872,9 @@ const readLog = async ($: EngineInterface, input: { turns?: unknown; full?: unkn
   const picked = sections
     .slice(-Math.min(MAX_LOG_TURNS, Math.max(1, asked)))
     .map(section => (isFull ? section : lastWord(section)))
-  const kept: string[] = []
-  let size = 0
-
-  for (const section of [...picked].reverse()) {
-    if (kept.length > 0 && size + section.length > LOG_BUDGET) break
-
-    kept.unshift(clip(section, LOG_BUDGET))
-    size += section.length
-  }
-
-  const count = `${sections.length} turn${sections.length === 1 ? '' : 's'}`
+  // Only the newest, kept whatever its size, can run over the budget.
+  const kept = fitNewest(picked, LOG_BUDGET, section => section.length).map(section => clip(section, LOG_BUDGET))
+  const count = plural(sections.length, 'turn')
   const lead = [
     `The thinking log of this session, ${path}:`,
     kept.length === sections.length ? `${count}, oldest first.` : `the last ${kept.length} of ${count}, oldest first.`,
@@ -875,14 +898,13 @@ const DEBUG_MARK = /^(?=<!-- request [^\n]* -->$)/m
 // One Haiku request of the summary, as the debug log tells it.
 type DebugRequest = {
   turn: Thinking
+  ask: Ask
   sentAt: number
   answeredAt: number
-  isForced: boolean
-  covered: number
   prompt: string
   result: ModelCompleteResult | null
   failure: string
-  said: Said | null
+  reply: Reply | null
   isAborted: boolean
 }
 
@@ -894,6 +916,9 @@ const fingerprint = (text: string) => {
 
   return hash.toString(16).padStart(8, '0')
 }
+
+// The mark each request names the system prompt by.
+const SYSTEM_MARK = fingerprint(SUMMARY_SYSTEM)
 
 // `text` in a Markdown fence longer than any run of backticks in it.
 const fenced = (text: string) => {
@@ -913,23 +938,22 @@ const formatChars = (n: number) => (n < 1000 ? `${n} chars` : `${formatTokens(n)
 
 // The notes a request read, by their place in the turn: those after the
 // last update's, or for the recap all of them.
-const notesRead = (request: DebugRequest) =>
-  `notes ${request.turn.durationMs === undefined ? request.turn.summarized + 1 : 1}–${request.covered}`
+const notesRead = ({ ask }: DebugRequest) => `notes ${ask.from + 1}–${ask.covered}`
 
 // What the request let Haiku answer.
-const askedFor = (request: DebugRequest) =>
-  request.turn.durationMs !== undefined
+const askedFor = ({ ask, sentAt }: DebugRequest) =>
+  ask.isRecap
     ? 'the recap, WAIT not allowed'
-    : request.isForced
-      ? `an update, WAIT not allowed after ${formatDuration(request.sentAt - lastUpdateAt(request.turn))} without one`
+    : ask.isForced
+      ? `an update, WAIT not allowed after ${formatDuration(sentAt - ask.since)} without one`
       : 'an update or WAIT'
 
 // What the request came to, in a few words.
 const outcomeOf = (request: DebugRequest) => {
-  const { said } = request
+  const { reply } = request
 
-  if (said !== null && 'update' in said) return `update: ${said.update.gist}`
-  if (said !== null) return said.wait === '' ? 'WAIT' : `WAIT: ${said.wait}`
+  if (reply !== null && 'update' in reply) return `update: ${reply.update.gist}`
+  if (reply !== null) return reply.wait === '' ? 'WAIT' : `WAIT: ${reply.wait}`
   if (request.isAborted) return 'cut: the summary was turned off'
 
   return `failed: ${request.failure}`
@@ -939,7 +963,7 @@ const outcomeOf = (request: DebugRequest) => {
 const debugLine = (request: DebugRequest) =>
   clip(
     `Summary debug: ${notesRead(request)}, ${formatChars(request.prompt.length)}${
-      request.turn.durationMs !== undefined ? ', recap' : request.isForced ? ', WAIT not allowed' : ''
+      request.ask.isRecap ? ', recap' : request.ask.isForced ? ', WAIT not allowed' : ''
     } → ${outcomeOf(request)}`,
     300,
   )
@@ -950,7 +974,7 @@ const debugHeader = (sessionId: string) =>
     '',
     `Session \`${sessionId}\`: each request the Session Weather mod sent ${HAIKU_NAME} for its thinking summary, as sent, and the reply, oldest first; the last ${DEBUG_REQUESTS} are kept. \`/${DEBUG_COMMAND}\` turns it off.`,
     '',
-    `The system prompt, \`${fingerprint(SUMMARY_SYSTEM)}\`, which each request names by that mark (Claude Code puts its own identity block before it):`,
+    `The system prompt, \`${SYSTEM_MARK}\`, which each request names by that mark (Claude Code puts its own identity block before it):`,
     '',
     fenced(SUMMARY_SYSTEM),
     '',
@@ -965,13 +989,13 @@ const debugEntry = (request: DebugRequest) => {
   const spent =
     usage === undefined
       ? ''
-      : `; ${usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens} tokens in, ${usage.output_tokens} out, $${haikuCost(usage).toFixed(5)}`
+      : `; ${inputTokens(usage)} tokens in, ${usage.output_tokens} out, $${haikuCost(usage).toFixed(5)}`
 
   return [
     `<!-- request ${new Date(request.sentAt).toISOString()} -->`,
-    `## ${formatClock(request.sentAt)} · ${formatDuration(Math.max(0, request.sentAt - request.turn.startedAt))} into turn \`${request.turn.turnId}\``,
+    `## ${formatClock(request.sentAt)} · ${intoTurn(request.turn, request.sentAt)} into turn \`${request.turn.turnId}\``,
     '',
-    `- Asked for ${askedFor(request)}: ${notesRead(request)} of the turn, ${formatChars(request.prompt.length)}, system prompt \`${fingerprint(SUMMARY_SYSTEM)}\`.`,
+    `- Asked for ${askedFor(request)}: ${notesRead(request)} of the turn, ${formatChars(request.prompt.length)}, system prompt \`${SYSTEM_MARK}\`.`,
     `- Answered in ${((request.answeredAt - request.sentAt) / 1000).toFixed(1)} s${spent}.`,
     `- Outcome: ${outcomeOf(request)}`,
     '',
@@ -991,36 +1015,20 @@ const debugEntry = (request: DebugRequest) => {
 // whole.
 let debugging: Promise<void> = Promise.resolve()
 
-const writeDebug = async ($: EngineInterface, entry: string) => {
-  const sessionId = await $.session.id()
-  const path = await sessionFile($, DEBUG_FOLDER, sessionId)
-
-  if (path === null) return
-
-  const text = (await $.fs.exists(path)) ? await $.fs.read(path) : ''
-  const entries = [...text.split(DEBUG_MARK).slice(1), entry].slice(-DEBUG_REQUESTS)
-
-  await $.fs.write(path, `${debugHeader(sessionId)}${entries.join('')}`)
-}
-
 // A request into the transcript and the file. The person asked for the log:
 // a file it cannot write is said in the transcript too.
 const logDebug = ($: EngineInterface, request: DebugRequest) => {
-  try {
-    $.ui.log(debugLine(request))
-  } catch {
-    // The line is lost; the file still takes the request.
-  }
+  tell($, debugLine(request))
 
   debugging = debugging
-    .then(() => writeDebug($, debugEntry(request)))
-    .catch((error: unknown) => {
-      try {
-        $.ui.log(`Summary debug log not written: ${error instanceof Error ? error.message : String(error)}`)
-      } catch {
-        // The summary goes on without its debug log.
-      }
-    })
+    .then(() =>
+      rewrite($, DEBUG_FOLDER, (text, sessionId) => {
+        const entries = [...text.split(DEBUG_MARK).slice(1), debugEntry(request)].slice(-DEBUG_REQUESTS)
+
+        return `${debugHeader(sessionId)}${entries.join('')}`
+      }),
+    )
+    .catch((error: unknown) => tell($, `Summary debug log not written: ${messageOf(error)}`))
 
   return debugging
 }
@@ -1100,6 +1108,27 @@ const endLive = async ($: EngineInterface) => {
   await keepNote($, live.turnId, live.kept === 0 ? rest : `… ${rest}`)
 }
 
+// A main-loop turn as the summary starts to follow it.
+const newTurn = (turnId: string, request: string, startedAt: number): Thinking => ({
+  turnId,
+  request,
+  startedAt,
+  notes: [],
+  summarized: 0,
+  seen: 0,
+  actions: [],
+  said: [],
+  entries: [],
+  isSummarizing: false,
+})
+
+// Changes the turn kept, where it is still the turn `turnId`.
+const updateTurn = ($: EngineInterface, turnId: string, change: (turn: Thinking) => Thinking) =>
+  update($, thinking, turn => (turn?.turnId === turnId ? change(turn) : turn))
+
+// The updates with `entry` after them, the newest MAX_ENTRIES kept.
+const withEntry = (entries: readonly ThinkingEntry[], entry: ThinkingEntry) => [...entries, entry].slice(-MAX_ENTRIES)
+
 // When the pane last had an update on the turn, or the turn began.
 const lastUpdateAt = (turn: Thinking) => turn.entries.at(-1)?.at ?? turn.startedAt
 
@@ -1113,7 +1142,7 @@ const isSilent = (turn: Thinking, now: number) =>
 // update and nothing after it needs none: the recap would say it again.
 const hasNews = (turn: Thinking, now: number) =>
   turn.durationMs === undefined
-    ? turn.notes.length > (turn.seen ?? turn.summarized) || isSilent(turn, now)
+    ? turn.notes.length > turn.seen || isSilent(turn, now)
     : turn.notes.length > turn.summarized || (turn.entries.length >= 2 && turn.entries.at(-1)?.isRecap !== true)
 
 // One request at a time: a tick that comes while one runs leaves it be.
@@ -1139,22 +1168,22 @@ const askSummary = async ($: EngineInterface, isDue: boolean) => {
 // turn ended meanwhile and still wants its recap, which no tick will ask
 // for.
 const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean) => {
-  const turn = await read($, thinking)
   const now = await $.clock.now()
 
-  if (turn === null || !hasNews(turn, now) || !(await read($, isSummaryOn))) return false
+  // The gap first: it needs no read of the turn, which ticks would make
+  // each second.
   if (!isDue && now - askedAt < SUMMARY_GAP) return false
 
+  const turn = await read($, thinking)
+
+  if (turn === null || !hasNews(turn, now) || !(await read($, isSummaryOn))) return false
+
   askedAt = now
-  const covered = turn.notes.length
-  const isRecap = turn.durationMs !== undefined
-  const isForced = isRecap || isSilent(turn, now)
-  const keep = (change: (one: Thinking) => Thinking) =>
-    update($, thinking, one => (one?.turnId === turn.turnId ? change(one) : one))
+  const ask = askOf(turn, now)
 
-  await keep(one => ({ ...one, isSummarizing: true }))
+  await updateTurn($, turn.turnId, one => ({ ...one, isSummarizing: true }))
 
-  const prompt = summaryPrompt(turn, isForced)
+  const prompt = summaryPrompt(turn, ask)
   let result: ModelCompleteResult | null = null
   let failure: string
 
@@ -1166,7 +1195,7 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
     failure = failureOf(result)
   } catch (error) {
     // A request the engine refuses to send, as for a model the settings block.
-    failure = clip(error instanceof Error ? error.message : String(error), 120)
+    failure = clip(messageOf(error), 120)
   }
 
   const answeredAt = await $.clock.now()
@@ -1177,28 +1206,23 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
     if (spent > 0) await update($, summaryCost, usd => usd + spent)
   }
 
-  const said = result?.isAnswered
-    ? parseSummary(result.text, isRecap ? MAX_RECAP_DECISIONS : MAX_DECISIONS, isForced)
+  const reply = result?.isAnswered
+    ? parseSummary(result.text, ask.isRecap ? MAX_RECAP_DECISIONS : MAX_DECISIONS, ask.isForced)
     : null
-  const told = said !== null && 'update' in said ? said.update : null
+  const told = reply !== null && 'update' in reply ? reply.update : null
   const entry: ThinkingEntry | null =
-    told === null ? null : { at: now, ...told, ...(isRecap ? { isRecap: true as const } : {}) }
+    told === null ? null : { at: now, ...told, ...(ask.isRecap ? { isRecap: true as const } : {}) }
 
-  await keep(one => {
+  await updateTurn($, turn.turnId, one => {
     const { failure: _, waitingFor, ...rest } = one
     const settled = { ...rest, isSummarizing: false }
 
     if (entry !== null) {
-      return {
-        ...settled,
-        entries: [...settled.entries, entry].slice(-MAX_ENTRIES),
-        summarized: covered,
-        seen: covered,
-      }
+      return { ...settled, entries: withEntry(settled.entries, entry), summarized: ask.covered, seen: ask.covered }
     }
 
     // Haiku waits for more: these notes come back with the next ones.
-    if (said !== null && 'wait' in said) return { ...settled, seen: covered, waitingFor: said.wait }
+    if (reply !== null && 'wait' in reply) return { ...settled, seen: ask.covered, waitingFor: reply.wait }
 
     const kept = waitingFor === undefined ? settled : { ...settled, waitingFor }
 
@@ -1207,24 +1231,13 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
   })
 
   if (await read($, isDebugOn)) {
-    await logDebug($, {
-      turn,
-      sentAt: now,
-      answeredAt,
-      isForced,
-      covered,
-      prompt,
-      result,
-      failure,
-      said,
-      isAborted: signal.aborted,
-    })
+    await logDebug($, { turn, ask, sentAt: now, answeredAt, prompt, result, failure, reply, isAborted: signal.aborted })
   }
 
   // The new update goes on top: someone scrolled down keeps the lines they
   // were reading where they were.
   if (told !== null) {
-    const added = linesAdded(told)
+    const added = partsOf(told).length
     await update($, summaryPlace, place =>
       place.line > 0 || place.row > 0 ? { line: place.line + added, row: place.row } : place,
     )
@@ -1238,12 +1251,16 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
     if (after?.turnId === turn.turnId) {
       await logTurn($, after)
     } else if (previousTurn?.turnId === turn.turnId) {
-      previousTurn = { ...previousTurn, entries: [...previousTurn.entries, entry].slice(-MAX_ENTRIES) }
+      previousTurn = { ...previousTurn, entries: withEntry(previousTurn.entries, entry) }
       await logTurn($, previousTurn)
     }
   }
 
-  return after?.turnId === turn.turnId && after.durationMs !== undefined && (!isRecap || after.notes.length > covered)
+  return (
+    after?.turnId === turn.turnId &&
+    after.durationMs !== undefined &&
+    (!ask.isRecap || after.notes.length > ask.covered)
+  )
 }
 
 // A main-loop turn ended: the log takes how it ended, then the summary asks
@@ -1284,34 +1301,28 @@ const keepNote = async ($: EngineInterface, turnId: string, text: string) => {
   if (note === '') return
 
   try {
-    const isKnown = (await read($, thinking))?.turnId === turnId
     const now = await $.clock.now()
+    let isNew = false
 
     await update($, thinking, turn => {
-      const one: Thinking =
-        turn?.turnId === turnId
-          ? turn
-          : { turnId, request: '', startedAt: now, notes: [], summarized: 0, entries: [], isSummarizing: false }
+      const one = turn?.turnId === turnId ? turn : newTurn(turnId, '', now)
+      isNew = one !== turn
 
       // The same block twice, as from a retried request, is one note.
-      if (one.notes.at(-1) === note) return one
+      if (one.notes.at(-1)?.text === note) return one
 
-      const notes = [...one.notes, note]
-      // A note kept by a version before has no time: -1 stands for it.
-      const known = one.noteAt?.length === one.notes.length ? one.noteAt : one.notes.map(() => -1)
-      const noteAt = [...known, now]
+      const notes = [...one.notes, { at: now, text: note }]
       const dropped = Math.max(0, notes.length - MAX_NOTES)
 
       return {
         ...one,
         notes: notes.slice(dropped),
-        noteAt: noteAt.slice(dropped),
         summarized: Math.max(0, one.summarized - dropped),
-        ...(one.seen === undefined ? {} : { seen: Math.max(0, one.seen - dropped) }),
+        seen: Math.max(0, one.seen - dropped),
       }
     })
 
-    if (!isKnown && (await read($, isSummaryOn))) startTicker($)
+    if (isNew && (await read($, isSummaryOn))) startTicker($)
   } catch {
     // The stream goes on; the summary misses this note.
   }
@@ -1352,7 +1363,7 @@ const keepMark = async ($: EngineInterface, key: 'actions' | 'said', text: strin
         return turn
       }
 
-      const marks = [...(turn[key] ?? []), { at, text: mark }].slice(-MAX_MARKS)
+      const marks = [...turn[key], { at, text: mark }].slice(-MAX_MARKS)
 
       return key === 'actions' ? { ...turn, actions: marks } : { ...turn, said: marks }
     })
@@ -1361,12 +1372,39 @@ const keepMark = async ($: EngineInterface, key: 'actions' | 'said', text: strin
   }
 }
 
+// A line on where the summary stands, when the updates do not say it:
+// after a WAIT, what Haiku waits for, in the summary's language.
+const statusOf = (turn: Thinking | null) => {
+  if (turn === null) return 'Waiting for the next turn.'
+
+  if (turn.waitingFor !== undefined && turn.failure === undefined) {
+    return turn.waitingFor === '' ? 'Đợi thêm…' : `Đợi thêm: ${turn.waitingFor}`
+  }
+
+  if (turn.entries.length > 0) return turn.failure === undefined ? null : `Update failed: ${turn.failure}`
+
+  if (turn.notes.length === 0) {
+    return turn.durationMs === undefined ? 'No thinking notes yet.' : 'No thinking notes this turn.'
+  }
+
+  if (turn.failure !== undefined) return `Summary failed: ${turn.failure}`
+
+  return `Summarizing ${plural(turn.notes.length, 'note')}…`
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     // Also runs on every hot reload: seed the reading, but leave the samples
     // alone. A mod loaded mid-session counts the next turn's growth from this
-    // reading, not from zero.
-    const usage = await $.session.usage()
+    // reading, not from zero. What the engine and the store hold is read all
+    // at once.
+    const [usage, compactAt, isOff, isDebugging, isClosed] = await Promise.all([
+      $.session.usage(),
+      readAutoCompact($),
+      $.store.get(STORED_SUMMARY_OFF).then(value => value === true),
+      $.store.get(STORED_DEBUG_ON).then(value => value === true),
+      $.store.get(STORED_CLOSED).then(value => value === true),
+    ])
     const { tokens, window, percent } = usage.context
     const now: Reading = { tokens, window, percent }
     await update($, reading, () => now)
@@ -1382,18 +1420,14 @@ export const register: Register = on => {
     }
 
     await update($, cost, () => usage.cost?.usd ?? null)
-    const compactAt = await readAutoCompact($)
     await update($, autoCompact, () => compactAt)
 
     // The summary as the person left it. A reload drops the request under
     // way and the clock with the old module: a turn still running gets a
     // new clock.
-    const isOff = (await $.store.get(STORED_SUMMARY_OFF)) === true
     await update($, isSummaryOn, () => !isOff)
-    const isDebugging = (await $.store.get(STORED_DEBUG_ON)) === true
     await update($, isDebugOn, () => isDebugging)
-    await update($, thinking, turn => (turn?.isSummarizing === true ? { ...turn, isSummarizing: false } : turn))
-    const turn = await read($, thinking)
+    const turn = await update($, thinking, one => (one?.isSummarizing === true ? { ...one, isSummarizing: false } : one))
 
     if (!isOff && turn !== null && turn.durationMs === undefined) {
       startTicker($)
@@ -1420,7 +1454,7 @@ export const register: Register = on => {
       // No tool: the log is still written, for the person to read.
     }
 
-    if ((await $.store.get(STORED_CLOSED)) !== true) {
+    if (!isClosed) {
       void openPane($)
     }
 
@@ -1477,15 +1511,7 @@ export const register: Register = on => {
       const before = await read($, thinking)
       previousTurn = before === null ? null : { ...before, notes: [] }
       const startedAt = await $.clock.now()
-      await update($, thinking, () => ({
-        turnId: e.turnId,
-        request: clip(e.text.trim(), MAX_REQUEST_CHARS),
-        startedAt,
-        notes: [],
-        summarized: 0,
-        entries: [],
-        isSummarizing: false,
-      }))
+      await update($, thinking, () => newTurn(e.turnId, clip(e.text.trim(), MAX_REQUEST_CHARS), startedAt))
 
       if (await read($, isSummaryOn)) {
         startTicker($)
@@ -1568,9 +1594,7 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
       const usage = e.usage
-      const input = usage
-        ? usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens
-        : 0
+      const input = usage ? inputTokens(usage) : 0
       const tools = await read($, turnTools)
       await update($, lastTurn, () => ({
         durationMs: e.durationMs,
@@ -1579,9 +1603,7 @@ export const register: Register = on => {
         ...(usage && input > 0 ? { cacheRate: usage.cache_read_input_tokens / input } : {}),
       }))
 
-      await update($, thinking, turn =>
-        turn?.turnId === e.turnId ? { ...turn, durationMs: e.durationMs, isAborted: e.isAborted } : turn,
-      )
+      await updateTurn($, e.turnId, turn => ({ ...turn, durationMs: e.durationMs, isAborted: e.isAborted }))
       stopTicker()
 
       // The log takes the end, then the turn's last word is asked, past the
@@ -1598,13 +1620,11 @@ export const register: Register = on => {
     try {
       return { result: await readLog($, e as unknown as { turns?: unknown; full?: unknown }) }
     } catch (error) {
-      return { deny: `The thinking log could not be read: ${error instanceof Error ? error.message : String(error)}` }
+      return { deny: `The thinking log could not be read: ${messageOf(error)}` }
     }
   }).catch(() => ({ deny: 'The thinking log could not be read.' }))
 
   on('session.measure', async ($, e, next) => {
-    const windowBefore = (await read($, reading))?.window
-
     if (e.changed.includes('context')) {
       const { tokens, window, percent } = e.context
       const now: Reading = { tokens, window, percent }
@@ -1635,23 +1655,23 @@ export const register: Register = on => {
         // Only the previous turn's end is ever read back.
         await update($, samples, list => [...list, { tokens, percent }].slice(-1))
       }
+
+      // A switch of model changes the window, and with it where compaction
+      // runs.
+      if (window !== before?.window || (await read($, autoCompact)) === null) {
+        const compactAt = await readAutoCompact($)
+        await update($, autoCompact, () => compactAt)
+      }
     }
 
     if (e.changed.includes('rateLimits')) {
-      await update($, limits, () => [...e.rateLimits])
-      await $.store.set(STORED_LIMITS, [...e.rateLimits])
+      const fresh = [...e.rateLimits]
+      await update($, limits, () => fresh)
+      await $.store.set(STORED_LIMITS, fresh)
     }
 
     if (e.changed.includes('cost')) {
       await update($, cost, () => e.cost?.usd ?? null)
-    }
-
-    // A switch of model changes the window, and with it where compaction runs.
-    const was = await read($, autoCompact)
-
-    if (e.changed.includes('context') && (was === null || e.context.window !== windowBefore)) {
-      const compactAt = await readAutoCompact($)
-      await update($, autoCompact, () => compactAt)
     }
 
     return next(e)
@@ -1688,34 +1708,30 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
-    const at = await $.clock.now()
-    const now = await read($, reading)
-    const added = await read($, delta)
-    const hasTurns = (await read($, samples)).length > 0
-    const windows = liveWindows(await read($, limits), at)
-
-    const compactAt = await read($, autoCompact)
-    const turn = await read($, lastTurn)
-    const spent = await read($, cost)
+    // Each read subscribes the drawing to its value; they go all at once.
+    const [at, now, added, lastSamples, readings, compactAt, turn, spent, isOn] = await Promise.all([
+      $.clock.now(),
+      read($, reading),
+      read($, delta),
+      read($, samples),
+      read($, limits),
+      read($, autoCompact),
+      read($, lastTurn),
+      read($, cost),
+      read($, isSummaryOn),
+    ])
+    const hasTurns = lastSamples.length > 0
+    const windows = liveWindows(readings, at)
 
     const tokens = now?.tokens
     const percent = now?.percent
-
-    // "auto-compact at 92% · 920k", or that it is off.
-    const compactLine =
-      compactAt === null || now === null
-        ? null
-        : !compactAt.isEnabled
-          ? 'auto-compact off'
-          : compactAt.threshold === undefined
-            ? null
-            : `auto-compact at ${Math.round((compactAt.threshold / now.window) * 100)}% · ${formatTokens(compactAt.threshold)}`
+    const compactLine = now === null ? null : compactLineOf(compactAt, now.window)
 
     // "Last turn ▲ +9.7k · 2m 14s · 18 tools · cache 96%".
     const turnParts = [
       added === null ? null : formatDelta(added),
       turn === null ? null : `${formatDuration(turn.durationMs)}${turn.isAborted ? ' (interrupted)' : ''}`,
-      turn === null ? null : `${turn.tools} tool${turn.tools === 1 ? '' : 's'}`,
+      turn === null ? null : plural(turn.tools, 'tool'),
       turn?.cacheRate === undefined ? null : `cache ${Math.round(turn.cacheRate * 100)}%`,
     ].filter((part): part is string => part !== null)
 
@@ -1747,10 +1763,9 @@ export const register: Register = on => {
 
     // The thinking summary sits last: it changes the most. Off, it reads
     // nothing, so its updates redraw nothing.
-    const isOn = await read($, isSummaryOn)
-    const turnNow = isOn ? await read($, thinking) : null
-    const summarySpent = isOn ? await read($, summaryCost) : 0
-    const isDebugging = isOn ? await read($, isDebugOn) : false
+    const [turnNow, summarySpent, isDebugging, place] = isOn
+      ? await Promise.all([read($, thinking), read($, summaryCost), read($, isDebugOn), read($, summaryPlace)])
+      : ([null, 0, false, { line: 0, row: 0 }] as const)
 
     // "🧭 Thinking · 1m 46s", the turn's whole length once it ended.
     const header =
@@ -1763,42 +1778,18 @@ export const register: Register = on => {
             ...(turnNow.isSummarizing ? ['summarizing…'] : []),
           ].join(' · ')
 
-    // A line on where the summary stands, when the updates do not say it:
-    // after a WAIT, what Haiku waits for, in the summary's language.
-    const status =
-      turnNow === null
-        ? 'Waiting for the next turn.'
-        : turnNow.waitingFor !== undefined && turnNow.failure === undefined
-          ? turnNow.waitingFor === ''
-            ? 'Đợi thêm…'
-            : `Đợi thêm: ${turnNow.waitingFor}`
-          : turnNow.entries.length > 0
-          ? turnNow.failure === undefined
-            ? null
-            : `Update failed: ${turnNow.failure}`
-          : turnNow.notes.length === 0
-            ? turnNow.durationMs === undefined
-              ? 'No thinking notes yet.'
-              : 'No thinking notes this turn.'
-            : turnNow.failure !== undefined
-              ? `Summary failed: ${turnNow.failure}`
-              : `Summarizing ${turnNow.notes.length} note${turnNow.notes.length === 1 ? '' : 's'}…`
+    const status = statusOf(turnNow)
 
     // A body tall enough pins the weather on top and the summary's cost at
     // the bottom; the turn's updates scroll in the window between, moved by
     // the arrows. A new prompt starts them over.
-    const rows = e.props.scroll?.bodyRows
-    const isPinned = isOn && rows !== undefined && rows >= MIN_PINNED_ROWS
-    const lines = turnNow === null ? [] : updateLines(turnNow)
+    const rows = e.props.scroll.bodyRows
+    const isPinned = isOn && rows >= MIN_PINNED_ROWS
     // The lines measured in rows at the body's width, the measure the arrows
     // then step through.
-    rowWidth = widthOf(e.props.bodyColumns, e.surface)
-    const laid = updateRows(lines, rowWidth)
-    const place = await read($, summaryPlace)
-    const top =
-      isPinned && laid.rows.length > 0
-        ? topRow(laid.starts, laid.rows.length, Math.min(place.line, Math.max(0, lines.length - 1)), place.row)
-        : 0
+    const width = widthOf(e.props.bodyColumns, e.surface)
+    const { lines, ...laid } = layUpdates(turnNow, width, place)
+    const top = isPinned ? laid.top : 0
     const topLine = laid.rows[top]?.line ?? 0
     const topChar = laid.rows[top]?.start ?? 0
     // Updates whose first row is scrolled past, above the window.
@@ -1806,10 +1797,10 @@ export const register: Register = on => {
 
     // The lines showing, the first from the row on top, a body's height of
     // rows at most; each one Text the surface wraps at its full width. Kept
-    // together by update, with a rule between two: it stands where a Box's
-    // `gap` spaced them (an empty Box of one row drew nothing on the
-    // desktop), and the steps count neither.
-    const shown: { kind: UpdateLine['kind']; text: string; entry: number }[][] = []
+    // together by update (each opens with its gist), with a rule between
+    // two: it stands where a Box's `gap` spaced them (an empty Box of one row
+    // drew nothing on the desktop), and the steps count neither.
+    const shown: UpdateLine[][] = []
     let budget = isPinned ? rows : Number.POSITIVE_INFINITY
 
     for (let at = topLine; at < lines.length && budget > 0; at += 1) {
@@ -1819,10 +1810,10 @@ export const register: Register = on => {
 
       const text = at === topLine && topChar > 0 ? `… ${shownText(one).slice(topChar)}` : shownText(one)
       const group = shown.at(-1)
-      const item = { kind: one.kind, text, entry: one.entry }
+      const item = { kind: one.kind, text }
 
-      if (group !== undefined && group[0]?.entry === one.entry) group.push(item)
-      else shown.push([item])
+      if (group === undefined || one.kind === 'gist') shown.push([item])
+      else group.push(item)
 
       budget -= (laid.starts[at + 1] ?? laid.rows.length) - (laid.starts[at] ?? 0)
     }
@@ -1845,7 +1836,7 @@ export const register: Register = on => {
             key="newest"
             plain
             dimColor
-            label={`↑ ${newer} newer update${newer === 1 ? '' : 's'}`}
+            label={`↑ ${plural(newer, 'newer update')}`}
             onPress={() => toNewest($).catch(() => {})}
           />
         )}
@@ -1876,7 +1867,7 @@ export const register: Register = on => {
     // itself, which, pinned, has nothing to scroll; and its keys do not
     // reach the pane.
     const canScroll = isPinned && laid.rows.length > 1
-    const step = pageStep(rows ?? MIN_PINNED_ROWS)
+    const step = pageStep(rows)
 
     return (
       <Box flexDirection="column" gap={1} {...(isPinned ? { height: rows } : {})}>
@@ -1913,10 +1904,22 @@ export const register: Register = on => {
               onPress={() => setSummary($, !isOn).catch(() => {})}
             />
             {canScroll && (
-              <Button key="newer" plain dimColor label="▲" onPress={() => moveUpdates($, -step).catch(() => {})} />
+              <Button
+                key="newer"
+                plain
+                dimColor
+                label="▲"
+                onPress={() => moveUpdates($, -step, width).catch(() => {})}
+              />
             )}
             {canScroll && (
-              <Button key="older" plain dimColor label="▼" onPress={() => moveUpdates($, step).catch(() => {})} />
+              <Button
+                key="older"
+                plain
+                dimColor
+                label="▼"
+                onPress={() => moveUpdates($, step, width).catch(() => {})}
+              />
             )}
           </Box>
         </Box>
