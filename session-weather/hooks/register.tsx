@@ -17,6 +17,7 @@ const thinking = atom({ plugin: 'session-weather', key: 'thinking' } as const, n
 const isSummaryOn = atom({ plugin: 'session-weather', key: 'isSummaryOn' } as const, true)
 const summaryCost = atom({ plugin: 'session-weather', key: 'summaryCost' } as const, 0)
 const summaryScroll = atom({ plugin: 'session-weather', key: 'summaryScroll' } as const, 0)
+const summaryRow = atom({ plugin: 'session-weather', key: 'summaryRow' } as const, 0)
 
 const COMMAND = 'session-weather'
 const PANE = 'session-weather'
@@ -200,16 +201,13 @@ const clipNote = (text: string) =>
 // whole, as the engine does.
 const MIN_PINNED_ROWS = 24
 
-// One line of the updates' window: an update's gist, a decision, its next
-// step, or the gap above an earlier update. `entry` counts from the newest.
-type UpdateLine =
-  | { kind: 'gist' | 'decision' | 'next'; entry: number; text: string }
-  | { kind: 'gap'; entry: number }
+// One line of the updates' window: an update's gist, a decision, or its
+// next step. `entry` counts from the newest.
+type UpdateLine = { kind: 'gist' | 'decision' | 'next'; entry: number; text: string }
 
 // The turn's updates as the window scrolls over them, newest first.
 const updateLines = (turn: Thinking): UpdateLine[] =>
   [...turn.entries].reverse().flatMap((entry, at): UpdateLine[] => [
-    ...(at === 0 ? [] : [{ kind: 'gap' as const, entry: at }]),
     {
       kind: 'gist',
       entry: at,
@@ -219,9 +217,109 @@ const updateLines = (turn: Thinking): UpdateLine[] =>
     ...(entry.next === undefined ? [] : [{ kind: 'next' as const, entry: at, text: entry.next }]),
   ])
 
-// The lines a new update puts above the earlier ones: its own and a gap.
-const linesAdded = (said: Update, hasEarlier: boolean) =>
-  1 + said.decisions.length + (said.next === undefined ? 0 : 1) + (hasEarlier ? 1 : 0)
+// The lines a new update puts above the earlier ones.
+const linesAdded = (said: Update) => 1 + said.decisions.length + (said.next === undefined ? 0 : 1)
+
+const shownText = (line: UpdateLine) =>
+  line.kind === 'decision' ? `★ ${line.text}` : line.kind === 'next' ? `→ ${line.text}` : line.text
+
+// Where the rows of `text` would start, wrapped at `width` characters at
+// spaces where it can. The surface wraps the lines itself, using all the
+// width it has; these rows only measure how far a step goes, and where a
+// line shown from part-way begins.
+const rowStarts = (text: string, width: number) => {
+  const starts = [0]
+  let rowStart = 0
+  let at = 0
+
+  while (at < text.length) {
+    const space = text.indexOf(' ', at)
+    const wordEnd = space === -1 ? text.length : space
+
+    if (wordEnd - rowStart > width && at > rowStart) {
+      // The word does not fit on this row: it starts the next one.
+      rowStart = at
+      starts.push(at)
+    } else if (wordEnd - rowStart > width) {
+      // A word longer than a row is cut.
+      rowStart += width
+      starts.push(rowStart)
+      at = rowStart
+    } else {
+      at = wordEnd + 1
+    }
+  }
+
+  return starts
+}
+
+// One row of the updates, as the steps count them: the line it is part of,
+// the update, and the character of the line's shown text it starts at.
+type UpdateRow = { kind: UpdateLine['kind']; line: number; entry: number; start: number }
+
+// The lines' rows at `width`, and the row each line starts on.
+const updateRows = (lines: readonly UpdateLine[], width: number) => {
+  const rows: UpdateRow[] = []
+  const starts: number[] = []
+
+  lines.forEach((line, at) => {
+    starts.push(rows.length)
+
+    for (const start of rowStarts(shownText(line), width)) {
+      rows.push({ kind: line.kind, line: at, entry: line.entry, start })
+    }
+  })
+
+  return { rows, starts }
+}
+
+// How many characters a row of the pane holds, roughly: its cells less one,
+// and on the desktop a seventh more, its face being narrower than the cells
+// the pane is measured in. What the arrows and the keys step through.
+const DESKTOP_FACE = 1.15
+let rowWidth = 45
+
+const widthOf = (columns: number, surface: string) =>
+  Math.max(10, Math.round((columns - 1) * (surface === 'terminal' ? 1 : DESKTOP_FACE)))
+
+// Rows an arrow press moves the window: a few at a time, not a whole line.
+const ROW_STEP = 3
+
+// The row standing at the top of the window: the line it is in, and how many
+// of that line's rows are above it.
+const topRow = (starts: readonly number[], rowCount: number, line: number, within: number) => {
+  const first = starts[line] ?? 0
+  const lineRows = (starts[line + 1] ?? rowCount) - first
+
+  return first + Math.max(0, Math.min(within, lineRows - 1))
+}
+
+// Moves the updates' window `by` rows (negative toward the newest), within
+// the turn's rows. The place is kept as a line and the rows into it, so an
+// update added on top, or another width, keeps the reader where they were.
+const moveUpdates = async ($: EngineInterface, by: number) => {
+  const turn = await read($, thinking)
+
+  if (turn === null) return
+
+  const lines = updateLines(turn)
+  const { rows, starts } = updateRows(lines, rowWidth)
+
+  if (rows.length === 0) return
+
+  const line = Math.min(await read($, summaryScroll), lines.length - 1)
+  const from = topRow(starts, rows.length, line, await read($, summaryRow))
+  const to = Math.max(0, Math.min(rows.length - 1, from + by))
+  const at = rows[to]?.line ?? 0
+
+  await update($, summaryScroll, () => at)
+  await update($, summaryRow, () => to - (starts[at] ?? 0))
+}
+
+const toNewest = async ($: EngineInterface) => {
+  await update($, summaryScroll, () => 0)
+  await update($, summaryRow, () => 0)
+}
 
 // Claude Haiku 5.5 in US dollars per million tokens, for prompts of 100K
 // tokens or fewer (these stay far below): input $0.10, output $0.50, cache
@@ -457,8 +555,9 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
   // The new update goes on top: someone scrolled down keeps the lines they
   // were reading where they were.
   if (said !== null) {
-    const added = linesAdded(said, turn.entries.length > 0)
-    await update($, summaryScroll, at => (at > 0 ? at + added : 0))
+    const added = linesAdded(said)
+    const within = await read($, summaryRow)
+    await update($, summaryScroll, at => (at > 0 || within > 0 ? at + added : 0))
   }
 
   const after = await read($, thinking)
@@ -594,7 +693,7 @@ export const register: Register = on => {
       // A new prompt's first note is summarized at once, not after the gap
       // the last turn's updates left; its updates start at the top.
       askedAt = Number.NEGATIVE_INFINITY
-      await update($, summaryScroll, () => 0)
+      await toNewest($)
       const startedAt = await $.clock.now()
       await update($, thinking, () => ({
         turnId: e.turnId,
@@ -767,16 +866,15 @@ export const register: Register = on => {
     return done
   })
 
-  // In a body tall enough to pin the weather, the wheel and the scroll keys
-  // move the updates inside their own window and leave the pane where it is.
+  // In a body tall enough to pin the weather, the scroll keys (and the wheel,
+  // where a surface hands it over) move the updates a row at a time inside
+  // their own window, and leave the pane where it is.
   on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     if (e.bodyRows < MIN_PINNED_ROWS || !(await read($, isSummaryOn))) {
       return next(e)
     }
 
-    const turn = await read($, thinking)
-    const last = turn === null ? 0 : Math.max(0, updateLines(turn).length - 1)
-    await update($, summaryScroll, at => Math.max(0, Math.min(last, at + e.by)))
+    await moveUpdates($, e.by)
 
     return {}
   })
@@ -879,9 +977,41 @@ export const register: Register = on => {
     const rows = e.props.scroll?.bodyRows
     const isPinned = isOn && rows !== undefined && rows >= MIN_PINNED_ROWS
     const lines = turnNow === null ? [] : updateLines(turnNow)
-    const start = isPinned ? Math.min(await read($, summaryScroll), Math.max(0, lines.length - 1)) : 0
-    // Updates whose first line is scrolled past, above the window.
-    const newer = lines.slice(0, start).filter(line => line.kind === 'gist').length
+    // The lines measured in rows at the body's width, the measure the arrows
+    // and the keys then step through.
+    rowWidth = widthOf(e.props.bodyColumns, e.surface)
+    const laid = updateRows(lines, rowWidth)
+    const line = Math.min(await read($, summaryScroll), Math.max(0, lines.length - 1))
+    const top =
+      isPinned && laid.rows.length > 0
+        ? topRow(laid.starts, laid.rows.length, line, await read($, summaryRow))
+        : 0
+    const topLine = laid.rows[top]?.line ?? 0
+    const topChar = laid.rows[top]?.start ?? 0
+    // Updates whose first row is scrolled past, above the window.
+    const newer = laid.starts.filter((first, at) => lines[at]?.kind === 'gist' && first < top).length
+
+    // The lines showing, the first from the row on top, a body's height of
+    // rows at most; each one Text the surface wraps at its full width. Kept
+    // together by update: a Box's `gap` spaces the updates, as an empty Box
+    // of one row did not on the desktop.
+    const shown: { kind: UpdateLine['kind']; text: string; entry: number }[][] = []
+    let budget = isPinned ? rows : Number.POSITIVE_INFINITY
+
+    for (let at = topLine; at < lines.length && budget > 0; at += 1) {
+      const one = lines[at]
+
+      if (one === undefined) break
+
+      const text = at === topLine && topChar > 0 ? `… ${shownText(one).slice(topChar)}` : shownText(one)
+      const group = shown.at(-1)
+      const item = { kind: one.kind, text, entry: one.entry }
+
+      if (group !== undefined && group[0]?.entry === one.entry) group.push(item)
+      else shown.push([item])
+
+      budget -= (laid.starts[at + 1] ?? laid.rows.length) - (laid.starts[at] ?? 0)
+    }
 
     const thoughts = (
       <Box flexDirection="column" {...(isPinned ? { flexGrow: 1, flexShrink: 1, overflow: 'hidden' as const } : {})}>
@@ -893,22 +1023,28 @@ export const register: Register = on => {
             plain
             dimColor
             label={`↑ ${newer} newer update${newer === 1 ? '' : 's'}`}
-            onPress={() => update($, summaryScroll, () => 0).catch(() => {})}
+            onPress={() => toNewest($).catch(() => {})}
           />
         )}
-        {lines.slice(start).map(line =>
-          line.kind === 'gap' ? (
-            <Box height={1} />
-          ) : line.kind === 'decision' ? (
-            <Text color="warning">★ {line.text}</Text>
-          ) : line.kind === 'next' ? (
-            <Text>→ {line.text}</Text>
-          ) : (
-            <Text>{line.text}</Text>
-          ),
+        {shown.length > 0 && (
+          <Box flexDirection="column" gap={1}>
+            {shown.map(group => (
+              <Box flexDirection="column">
+                {group.map(item =>
+                  item.kind === 'decision' ? <Text color="warning">{item.text}</Text> : <Text>{item.text}</Text>,
+                )}
+              </Box>
+            ))}
+          </Box>
         )}
       </Box>
     )
+
+    // The arrows step the window ROW_STEP rows at a time. The desktop's wheel
+    // scrolls the pane itself, natively, and a pinned pane has nothing to
+    // scroll; the keys reach the `ui.scroll` hook while the pane holds the
+    // focus.
+    const canScroll = isPinned && laid.rows.length > 1
 
     return (
       <Box flexDirection="column" gap={1} {...(isPinned ? { height: rows } : {})}>
@@ -935,12 +1071,20 @@ export const register: Register = on => {
           <Text dimColor>
             {isOn ? `Summary cost ${formatSummaryCost(summarySpent)} - ${HAIKU_NAME}` : '🧭 Thinking summary is off'}
           </Text>
-          <Button
-            key={TOGGLE}
-            label={isOn ? 'Turn summary off' : 'Turn summary on'}
-            dimColor
-            onPress={() => setSummary($, !isOn).catch(() => {})}
-          />
+          <Box flexDirection="row" gap={1}>
+            <Button
+              key={TOGGLE}
+              label={isOn ? 'Turn summary off' : 'Turn summary on'}
+              dimColor
+              onPress={() => setSummary($, !isOn).catch(() => {})}
+            />
+            {canScroll && (
+              <Button key="newer" plain dimColor label="▲" onPress={() => moveUpdates($, -ROW_STEP).catch(() => {})} />
+            )}
+            {canScroll && (
+              <Button key="older" plain dimColor label="▼" onPress={() => moveUpdates($, ROW_STEP).catch(() => {})} />
+            )}
+          </Box>
         </Box>
       </Box>
     )

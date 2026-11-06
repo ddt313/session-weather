@@ -41,7 +41,9 @@ const PANE = {
   props: {
     title: 'Session Weather',
     isFocused: false,
-    bodyColumns: 40,
+    // Wide, so an update's lines draw one row each; the tests of rows lay
+    // the pane out narrower.
+    bodyColumns: 200,
     placement: 'dock',
     scroll: { offset: 0, bodyRows: 30 },
     view: {},
@@ -141,8 +143,14 @@ type Mounted = {
 }
 type Test$ = { ui: { mount: (target: never) => Promise<unknown>; press: (target: never) => Promise<unknown> } }
 
-const mount = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop') =>
-  (await $.ui.mount({ plugin: 'session-weather', surface, ...PANE } as never)) as Mounted
+// The pane drawn on `surface`, `columns` wide when given.
+const mount = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop', columns?: number) =>
+  (await $.ui.mount({
+    plugin: 'session-weather',
+    surface,
+    ...PANE,
+    props: { ...PANE.props, ...(columns === undefined ? {} : { bodyColumns: columns }) },
+  } as never)) as Mounted
 
 // Everything the pane shows, one string per Text, on the surface named.
 const allTexts = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop') => {
@@ -164,9 +172,12 @@ const pane = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop') => {
   return top === -1 ? texts : texts.slice(0, top)
 }
 
-// The thinking summary, from its header down.
-const thoughts = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop') => {
-  const texts = await allTexts($, surface)
+// The thinking summary, from its header down, in a pane `columns` wide when
+// given.
+const thoughts = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop', columns?: number) => {
+  const ui = await mount($, surface, columns)
+  const texts = (await ui.findAll({ type: 'Text' })).map(one => one.text)
+  await ui.unmount()
   const top = texts.findIndex(SUMMARY_TOP)
 
   return top === -1 ? [] : texts.slice(top)
@@ -181,9 +192,10 @@ const buttons = async ($: Test$) => {
   return labels
 }
 
-// The person pressing a Button of the pane, by its key.
-const press = async ($: Test$, key: string) => {
-  const ui = await mount($)
+// The person pressing a Button of the pane, by its key, in a pane `columns`
+// wide when given.
+const press = async ($: Test$, key: string, columns?: number) => {
+  const ui = await mount($, 'desktop', columns)
   await $.ui.press({ plugin: 'session-weather', key } as never)
   await ui.unmount()
 }
@@ -794,8 +806,8 @@ test('the updates scroll in their own window, the weather stays, and a new updat
   await runStep($, steps, 't1', [thought(0, 'Second note.'), stop])
   await clock.advance(15 * SECOND)
 
-  // Newest first: "16s · Hai.", "→ Chạy test", a gap, then "1s · Một.".
-  expect(await wheel($, 3)).toEqual({})
+  // Newest first: "16s · Hai.", "→ Chạy test", then "1s · Một.".
+  expect(await wheel($, 2)).toEqual({})
   expect(await pane($)).toContain('Session cost $1.23')
   expect(await thoughts($)).toEqual([
     '🧭 Thinking · 16s',
@@ -803,13 +815,19 @@ test('the updates scroll in their own window, the weather stays, and a new updat
     '★ Chỉ sửa file A',
     'Summary cost $0.004 - Haiku 5.5',
   ])
-  expect(await buttons($)).toEqual(['↑ 1 newer update', 'Turn summary off'])
+  expect(await buttons($)).toEqual(['↑ 1 newer update', 'Turn summary off', '▲', '▼'])
 
   // A new update lands on top, and the window keeps showing the same lines.
   await runStep($, steps, 't1', [thought(0, 'Third note.'), stop])
   await clock.advance(15 * SECOND)
   expect((await thoughts($)).slice(1, 3)).toEqual(['1s · Một.', '★ Chỉ sửa file A'])
-  expect(await buttons($)).toEqual(['↑ 2 newer updates', 'Turn summary off'])
+  expect(await buttons($)).toEqual(['↑ 2 newer updates', 'Turn summary off', '▲', '▼'])
+
+  // The arrows step three rows at a time.
+  await press($, 'newer')
+  expect((await thoughts($)).slice(1, 2)).toEqual(['31s · Ba.'])
+  await press($, 'older')
+  expect((await thoughts($)).slice(1, 2)).toEqual(['1s · Một.'])
 
   // The window stops at either end, and the button goes back to the newest.
   await wheel($, -100)
@@ -823,6 +841,48 @@ test('the updates scroll in their own window, the weather stays, and a new updat
   await wheel($, 2)
   await $.turn.start({ text: 'next', turnId: 't2' })
   expect(await buttons($)).toEqual(['Turn summary off'])
+})
+
+test('in a narrow pane a key steps a row and an arrow about three, the lines wrapping as the surface wraps them', async ($, on) => {
+  const { replies, steps, clock } = engine(on)
+  replies.push(answer('GIST: Claude đang đọc file cấu hình rồi chạy lại toàn bộ test\nNEXT: Chạy lại test'), answer('GIST: Mới.'))
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, 'A note.'), stop])
+  await clock.advance(SECOND)
+
+  // One Text a line, for the surface to wrap at its full width. At 21
+  // columns a desktop row holds about 23 characters: the long line is three
+  // rows, starting at its 1st, 22nd and 45th characters.
+  expect(await thoughts($, 'desktop', 21)).toEqual([
+    '🧭 Thinking · 1s',
+    '1s · Claude đang đọc file cấu hình rồi chạy lại toàn bộ test',
+    '→ Chạy lại test',
+    'Summary cost $0.002 - Haiku 5.5',
+  ])
+
+  // A key moves a row: the long line shows from its second row, marked.
+  await wheel($, 1)
+  expect((await thoughts($, 'desktop', 21)).slice(1, -1)).toEqual([
+    '… file cấu hình rồi chạy lại toàn bộ test',
+    '→ Chạy lại test',
+  ])
+
+  // An update lands on top, and the window keeps its place.
+  await runStep($, steps, 't1', [thought(0, 'Another note.'), stop])
+  await clock.advance(15 * SECOND)
+  expect((await thoughts($, 'desktop', 21)).slice(1, -1)).toEqual([
+    '… file cấu hình rồi chạy lại toàn bộ test',
+    '→ Chạy lại test',
+  ])
+
+  // An arrow moves three rows: past the long line, to its next step; and
+  // back, to the long line's first row.
+  await press($, 'older', 21)
+  expect((await thoughts($, 'desktop', 21)).slice(1, -1)).toEqual(['→ Chạy lại test'])
+  await press($, 'newer', 21)
+  expect((await thoughts($, 'desktop', 21))[1]).toBe('1s · Claude đang đọc file cấu hình rồi chạy lại toàn bộ test')
 })
 
 test('a short pane body, or the summary off, scrolls whole as the engine does', async ($, on) => {

@@ -30,9 +30,13 @@ The pane opens beside the conversation when a session starts.
   and has Claude Haiku 5.5 sum them up in a few lines: what Claude is doing,
   the decisions it settled on (★), and what it says comes next (→).
 - At most one update every 15 seconds while new notes arrive. The prompt's
-  earlier updates stay, newest first, and scroll in their own window under
-  the weather. A recap closes a turn that had two updates or more. A new
-  prompt starts the list over.
+  earlier updates stay, newest first, in their own window under the weather.
+  A recap closes a turn that had two updates or more. A new prompt starts the
+  list over.
+- To scroll the updates and nothing else, press ▲ ▼ (about three rows at a
+  time; a line scrolled part-way shows from there, marked `…`), or click the
+  pane and use the arrow keys. The mouse wheel does not reach them: the
+  desktop scrolls the pane itself with it.
 - Claude Code receives summaries of Claude's reasoning only while the
   session's **Transcript view** is **Thinking** (or Verbose), from the next
   prompt on. In the Normal view only the short notes Claude writes between

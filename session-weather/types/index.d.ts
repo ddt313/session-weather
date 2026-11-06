@@ -70,9 +70,10 @@ declare module 'claude-code' {
       // What the summary's Haiku requests cost this session, in US dollars:
       // the engine leaves them out of the session's cost.
       summaryCost: number
-      // How many lines of the turn's updates the person scrolled past, the
-      // newest at 0: the updates scroll in their own window.
+      // Where the updates' window stands, the newest at 0: the line on top
+      // (lines scrolled past), and how many rows of it are above the window.
       summaryScroll: number
+      summaryRow: number
     }
   }
 }
