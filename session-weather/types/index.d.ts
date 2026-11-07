@@ -3,7 +3,7 @@
 // reading a compaction left, whose drop is the change shown.
 export type Reading = { tokens?: number; window: number; percent?: number; isCompacted?: true }
 
-// The window's fill at the end of one turn.
+// The window's fill where the main loop's turn began: the turn before's end.
 export type Sample = { tokens: number; percent: number }
 
 // One of the account's rate-limit windows as the engine reports it: which
@@ -40,12 +40,15 @@ export type TurnMark = { at: number; text: string }
 // The main loop's current or last turn, as the summary follows it. `notes`
 // are its thinking blocks that carried text, oldest first; `summarized`
 // counts the ones an update has read, and `seen` the ones Haiku has read,
-// an update or a WAIT; `actions` are its tool calls and `said` the text
+// an update or a WAIT; `dropped` counts the notes dropped from the front past
+// the cap, all turn long (absent is none), so a request's place in the notes
+// outlives the trimming; `actions` are its tool calls and `said` the text
 // Claude wrote to the person, oldest first; `entries` are the updates,
 // oldest first. `durationMs` is set once the turn ended; `failure` says why
 // the latest request gave no update; `waitingFor` is what Haiku said it
 // waits for at its last WAIT ('' when it did not say), until an update
-// comes. A change to this shape bumps the atom's shape tag.
+// comes. A change that values kept before it no longer fit bumps the atom's
+// shape tag; an optional field added needs none.
 export type Thinking = {
   turnId: string
   request: string
@@ -55,6 +58,7 @@ export type Thinking = {
   notes: TurnMark[]
   summarized: number
   seen: number
+  dropped?: number
   actions: TurnMark[]
   said: TurnMark[]
   entries: ThinkingEntry[]

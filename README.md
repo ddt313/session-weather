@@ -15,8 +15,11 @@ The pane opens beside the conversation when a session starts.
 
 **Weather**
 
-- A forecast from the context fill: ☀ Clear (under 25%), ☁ Cloudy, ☂ Showers,
-  ☇ Storm, ϟ Compact soon (90% and up, with a toast once on the way up).
+- A forecast from how far the context has filled toward where the engine
+  compacts on its own (toward the whole window where it does not): ☀ Clear
+  (under 25% of the way), ☁ Cloudy, ☂ Showers, ☇ Storm, ϟ Compact soon (90% of
+  the way and up, with a toast once on the way up). A 200k window compacts at
+  about 167k, before 90% of the window.
 - Tokens used out of the window, a bar, and where auto-compact runs.
 - The last turn: the tokens it added, how long it ran, its tool calls, and
   the share of its input the prompt cache served.
@@ -74,7 +77,9 @@ The pane opens beside the conversation when a session starts.
   Haiku's paraphrase of its summarized thinking, to check against the code
   or the transcript, not a record of what it decided.
 - The mod cannot delete files (its file API has no delete), so the logs stay
-  until you remove them; a turn takes a kilobyte or two.
+  until you remove them; a turn takes a kilobyte or two. The file API reads
+  and writes no file past 4 MiB, so past 3 MiB a session's thinking log
+  leaves its oldest turns out.
 - The summary is written in Vietnamese (fixed for now).
 - Each update or WAIT is one Haiku request on the session's own account,
   about $0.001; the pane shows what the summaries cost this session. The request

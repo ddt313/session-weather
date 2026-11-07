@@ -28,7 +28,8 @@ const TITLE = 'Session Weather'
 // terminal's main screen); a dock beside the transcript ignores it.
 const PANE_ROWS = 12
 
-// Where the forecast turns to Compact soon, and the toast warns.
+// How far toward compaction (`levelOf`) the forecast turns to Compact soon,
+// and the toast warns.
 const COMPACT_AT = 90
 
 // Monochrome text symbols, not emoji, so each draws one cell wide.
@@ -41,8 +42,10 @@ const forecast = (percent: number) => {
   return { icon: 'ϟ', label: 'Compact soon', color: 'error' }
 }
 
+// Thousands or millions, the unit picked after the rounding: 999,960 reads
+// 1M, not 1000k.
 const formatTokens = (n: number) =>
-  n >= 1_000_000
+  n >= 999_950
     ? `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
     : `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k`
 
@@ -58,7 +61,8 @@ const formatDuration = (ms: number) => {
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`
 }
 
-const formatCost = (usd: number) => (usd < 0.01 ? '<$0.01' : `$${usd.toFixed(2)}`)
+// "$1.23"; "<$0.01" for a cost under a cent, "$0.00" for none.
+const formatCost = (usd: number) => (usd > 0 && usd < 0.01 ? '<$0.01' : `$${usd.toFixed(2)}`)
 
 // "1 note", "3 notes".
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
@@ -86,6 +90,15 @@ const compactLineOf = (compactAt: AutoCompact | null, window: number) => {
 
   return `auto-compact at ${Math.round((compactAt.threshold / window) * 100)}% · ${formatTokens(compactAt.threshold)}`
 }
+
+// How far the fill has come toward compaction, in percent: of the threshold
+// where the engine compacts on its own (167k of a 200k window, so before 90%
+// of the window), else of the window. The forecast and the toast read it;
+// the bar and the share of the window stay the window's.
+const levelOf = (tokens: number, percent: number, compactAt: AutoCompact | null) =>
+  compactAt?.isEnabled === true && compactAt.threshold !== undefined && compactAt.threshold > 0
+    ? Math.round((tokens / compactAt.threshold) * 100)
+    : percent
 
 // 20 cells, filled to the share used.
 const bar = (percent: number) => {
@@ -222,6 +235,9 @@ const SAID_CHARS = 1_000
 const PROMPT_ACTIONS = 20
 const RECAP_ACTIONS = 30
 const SAID_BUDGET = 2_000
+// A turn keeps up to MAX_TURN_ENTRIES updates, every one of them for its
+// log; the pane draws the newest MAX_ENTRIES.
+const MAX_TURN_ENTRIES = 1_000
 const MAX_ENTRIES = 100
 const EARLIER_UPDATES = 8
 const MAX_DECISIONS = 2
@@ -258,9 +274,10 @@ const partsOf = (one: Update): UpdateLine[] => [
 // time into the turn.
 const stampOf = (turn: Thinking, entry: ThinkingEntry) => (entry.isRecap ? 'Recap' : intoTurn(turn, entry.at))
 
-// The turn's updates as the window scrolls over them, newest first.
+// The turn's updates as the window scrolls over them, newest first: the
+// newest MAX_ENTRIES.
 const updateLines = (turn: Thinking): UpdateLine[] =>
-  [...turn.entries].reverse().flatMap(entry => {
+  turn.entries.slice(-MAX_ENTRIES).reverse().flatMap(entry => {
     const stamp = stampOf(turn, entry)
 
     return partsOf(entry).map(line => (line.kind === 'gist' ? { ...line, text: `${stamp} · ${line.text}` } : line))
@@ -493,9 +510,10 @@ const sizeOfMark = (mark: TurnMark) => mark.text.length
 
 // What one request asks, settled once for the prompt and the debug log: the
 // recap (the turn has ended) or an update, whether WAIT is taken away, the
-// notes it reads (from `from` up to `covered`), and since when it tells what
-// Claude did and wrote.
-type Ask = { isRecap: boolean; isForced: boolean; from: number; covered: number; since: number }
+// notes it reads (from `from` up to `covered`, with `base` notes dropped
+// from the turn's front by then), and since when it tells what Claude did
+// and wrote.
+type Ask = { isRecap: boolean; isForced: boolean; from: number; covered: number; base: number; since: number }
 
 const askOf = (turn: Thinking, now: number): Ask => {
   const isRecap = turn.durationMs !== undefined
@@ -505,9 +523,15 @@ const askOf = (turn: Thinking, now: number): Ask => {
     isForced: isRecap || isSilent(turn, now),
     from: isRecap ? 0 : turn.summarized,
     covered: turn.notes.length,
+    base: turn.dropped ?? 0,
     since: isRecap ? turn.startedAt : lastUpdateAt(turn),
   }
 }
+
+// How many of the turn's notes now are the ones the request read: notes
+// dropped from the front past MAX_NOTES while it ran moved the rest up, and
+// those that came meanwhile are still to read.
+const readUpTo = (turn: Thinking, ask: Ask) => Math.max(0, ask.covered - ((turn.dropped ?? 0) - ask.base))
 
 // The request, the updates given so far, the end of the notes they read,
 // the notes to read (those no update has read, or for the recap the whole
@@ -519,7 +543,12 @@ const summaryPrompt = (turn: Thinking, ask: Ask) => {
   const kept = fitNewest(notes, NOTES_BUDGET, sizeOfMark)
   const left = notes.length - kept.length
   const context = isRecap ? [] : contextNotes(turn.notes.slice(0, turn.summarized).map(note => note.text))
-  const actions = turn.actions.filter(one => one.at >= since).slice(isRecap ? -RECAP_ACTIONS : -PROMPT_ACTIONS)
+  const done = turn.actions.filter(one => one.at >= since)
+  const actions = done.slice(isRecap ? -RECAP_ACTIONS : -PROMPT_ACTIONS)
+  // Calls left out: past the request's share, or past what the turn keeps
+  // (its list full, its oldest call after `since`).
+  const isCut =
+    actions.length < done.length || (turn.actions.length >= MAX_MARKS && (turn.actions[0]?.at ?? since) > since)
   const said = isRecap ? [] : fitNewest(turn.said.filter(one => one.at >= since), SAID_BUDGET, sizeOfMark)
   const earlier = turn.entries.slice(-EARLIER_UPDATES)
   const unsent = turn.entries.length - earlier.length
@@ -553,7 +582,7 @@ const summaryPrompt = (turn: Thinking, ask: Ask) => {
       ? []
       : [
           '',
-          `The tools Claude called ${isRecap ? 'this turn' : 'since your last update'}, oldest first:`,
+          `The tools Claude called ${isRecap ? 'this turn' : 'since your last update'}, oldest first${isCut ? ', the newest of them (earlier ones left out)' : ''}:`,
           `<actions>\n${actions.map(one => `${intoTurn(turn, one.at)} · ${one.text}`).join('\n')}\n</actions>`,
         ]),
     ...(said.length === 0
@@ -586,28 +615,53 @@ const parseSummary = (text: string, maxDecisions: number, isForced: boolean): Re
   let wait: string | undefined
   const decisions: string[] = []
   const assumptions: string[] = []
+  // The tag whose value the next untagged line goes on with, and whether the
+  // reply kept to the format at all.
+  let open: 'GIST' | 'DECISION' | 'ASSUMPTION' | 'NEXT' | null = null
+  let isTagged = false
+
+  // `value` under `tag`: a new line of it, or (`isMore`) the rest of the last.
+  const add = (tag: 'GIST' | 'DECISION' | 'ASSUMPTION' | 'NEXT', value: string, isMore: boolean) => {
+    const list = tag === 'DECISION' ? decisions : tag === 'ASSUMPTION' ? assumptions : null
+
+    if (tag === 'GIST') gist = gist === '' ? value : `${gist} ${value}`
+    else if (tag === 'NEXT') next = isMore && next !== undefined ? `${next} ${value}` : value
+    else if (list !== null && isMore && list.length > 0) list[list.length - 1] = `${list.at(-1)} ${value}`
+    else list?.push(value)
+  }
 
   for (const line of text.split('\n')) {
     const bare = line.trim().replace(/^[-*•]\s*/, '')
     const waiting = WAIT_LINE.exec(bare)
 
+    // A blank line ends a value.
+    if (bare === '') {
+      open = null
+      continue
+    }
+
     if (waiting !== null) {
       const reason = waiting[1]?.trim() ?? ''
       wait ??= NOTHING.test(reason) ? '' : reason
+      open = null
       continue
     }
 
     const match = /^(GIST|DECISION|ASSUMPTION|NEXT)\s*:\s*(.*)$/i.exec(bare)
-    const value = match?.[2]?.trim() ?? ''
 
-    if (match === null || value === '' || NOTHING.test(value)) continue
+    // A line of no tag goes on with the value above it ("GIST:" alone, its
+    // sentences on the lines under it); before any, it is left out.
+    if (match === null) {
+      if (open !== null) add(open, bare, true)
+      continue
+    }
 
-    const tag = (match[1] ?? '').toUpperCase()
+    isTagged = true
+    const tag = (match[1] ?? '').toUpperCase() as 'GIST' | 'DECISION' | 'ASSUMPTION' | 'NEXT'
+    const value = match[2]?.trim() ?? ''
+    open = NOTHING.test(value) ? null : tag
 
-    if (tag === 'GIST') gist = gist === '' ? value : `${gist} ${value}`
-    else if (tag === 'DECISION') decisions.push(value)
-    else if (tag === 'ASSUMPTION') assumptions.push(value)
-    else next = value
+    if (value !== '' && open !== null) add(tag, value, false)
   }
 
   // A WAIT beside an update is dropped. Where WAIT is not allowed, what it
@@ -620,7 +674,9 @@ const parseSummary = (text: string, maxDecisions: number, isForced: boolean): Re
   }
 
   // A reply that ignored the format still says something: its first line.
-  if (gist === '') gist = text.trim().split('\n')[0]?.trim() ?? ''
+  // One that kept to it and gave no gist gives no update: its lines are not
+  // the gist, and the notes go again with the next request.
+  if (gist === '' && !isTagged) gist = text.trim().split('\n')[0]?.trim() ?? ''
   if (gist === '') return null
 
   return {
@@ -672,11 +728,16 @@ const joinPath = (base: string, ...parts: string[]) => {
 
 // A file of the session's own in a folder of the mod's, in the configuration
 // directory as Claude Code finds it: the variable that moves it, else
-// `.claude` in the home directory (the profile's on Windows). Null where no
-// directory is known.
+// `.claude` in the home directory as Node reads it, the profile on Windows
+// (where every process has OS=Windows_NT) and HOME elsewhere: a USERPROFILE
+// that WSL passes on names the Windows profile, or no path of this host.
+// Null where no directory is known.
 const sessionFile = async ($: EngineInterface, folder: readonly string[], sessionId: string) => {
   const moved = present(await $.env.get('CLAUDE_CONFIG_DIR'))
-  const home = present(await $.env.get('USERPROFILE')) ?? present(await $.env.get('HOME'))
+  const isWindows = (await $.env.get('OS')) === 'Windows_NT'
+  const home = isWindows
+    ? (present(await $.env.get('USERPROFILE')) ?? present(await $.env.get('HOME')))
+    : present(await $.env.get('HOME'))
   const dir = moved ?? (home === undefined ? undefined : joinPath(home, '.claude'))
 
   return dir === undefined ? null : joinPath(dir, ...folder, `${sessionId.replace(/[^\w.-]/g, '_')}.md`)
@@ -788,6 +849,34 @@ const withSection = (text: string, turnId: string, section: string) => {
   return `${text.slice(0, at)}${section}${next === -1 ? '' : text.slice(next + 1)}`
 }
 
+// The most the log holds, in UTF-8 bytes: the file API reads and writes no
+// file past 4 MiB, and the log is read and written whole, so past this its
+// oldest turns go.
+const LOG_MAX_BYTES = 3 * 1024 * 1024
+
+const bytesOf = (text: string) => new TextEncoder().encode(text).length
+
+// The log within LOG_MAX_BYTES: its header kept, its oldest sections left
+// out, the newest kept whatever its size.
+const fitLog = (text: string) => {
+  const first = text.search(LOG_SECTION)
+  let excess = bytesOf(text) - LOG_MAX_BYTES
+  let cut = first
+
+  if (excess <= 0 || first === -1) return text
+
+  while (excess > 0) {
+    const next = text.indexOf(`\n${LOG_MARK}`, cut)
+
+    if (next === -1) break
+
+    excess -= bytesOf(text.slice(cut, next + 1))
+    cut = next + 1
+  }
+
+  return `${text.slice(0, first)}${text.slice(cut)}`
+}
+
 // The log's writes, one at a time: each reads the file and writes it whole.
 let logging: Promise<void> = Promise.resolve()
 
@@ -801,10 +890,12 @@ const logTurn = ($: EngineInterface, turn: Thinking) => {
   logging = logging
     .then(() =>
       rewrite($, LOG_FOLDER, async (text, sessionId) =>
-        withSection(
-          text === '' ? logHeader(sessionId, await $.session.root().catch(() => null)) : text,
-          turn.turnId,
-          logSection(turn),
+        fitLog(
+          withSection(
+            text === '' ? logHeader(sessionId, await $.session.root().catch(() => null)) : text,
+            turn.turnId,
+            logSection(turn),
+          ),
         ),
       ),
     )
@@ -892,8 +983,18 @@ const readLog = async ($: EngineInterface, input: { turns?: unknown; full?: unkn
 const DEBUG_FOLDER = ['session-weather', 'debug'] as const
 const DEBUG_REQUESTS = 30
 // Each request's entry opens with a mark of when it was sent: a rewrite
-// finds the entries by it.
-const DEBUG_MARK = /^(?=<!-- request [^\n]* -->$)/m
+// finds the entries by it. A line like the mark inside a fence (a prompt or
+// a reply as it was, which may quote this very log) is their text, not a
+// mark: each fence `fenced` writes is matched whole, its closing run of
+// backticks longer than any inside it.
+const DEBUG_PARTS = /^(`{3,})text\n[\s\S]*?\n\1$|^<!-- request [^\n]* -->$/gm
+
+// The log's entries, each from its mark to the next one; the header left out.
+const debugEntries = (text: string) => {
+  const starts = [...text.matchAll(DEBUG_PARTS)].filter(part => part[1] === undefined).map(part => part.index ?? 0)
+
+  return starts.map((start, at) => text.slice(start, starts[at + 1]))
+}
 
 // One Haiku request of the summary, as the debug log tells it.
 type DebugRequest = {
@@ -1023,7 +1124,7 @@ const logDebug = ($: EngineInterface, request: DebugRequest) => {
   debugging = debugging
     .then(() =>
       rewrite($, DEBUG_FOLDER, (text, sessionId) => {
-        const entries = [...text.split(DEBUG_MARK).slice(1), debugEntry(request)].slice(-DEBUG_REQUESTS)
+        const entries = [...debugEntries(text), debugEntry(request)].slice(-DEBUG_REQUESTS)
 
         return `${debugHeader(sessionId)}${entries.join('')}`
       }),
@@ -1037,6 +1138,17 @@ const logDebug = ($: EngineInterface, request: DebugRequest) => {
 let ticker: Timer | null = null
 let asking: AbortController | null = null
 let askedAt = Number.NEGATIVE_INFINITY
+// A due request (a turn's end, the person turning the summary on) asked for
+// while another ran: it runs once that one has settled.
+let isOwed = false
+// The main-loop turn whose end still owes its last word, until its recap is
+// asked, though the next prompt's turn has begun.
+let owedRecap: string | null = null
+// A recap that failed (an overloaded API, a timeout, a bare WAIT) is asked
+// again, SUMMARY_GAP apart, up to RECAP_RETRIES times: no tick follows a
+// turn's end.
+const RECAP_RETRIES = 2
+let retried = { turnId: '', count: 0 }
 
 // The main loop's thinking block still streaming: its text so far, and how
 // much of it notes hold already. Null between blocks. The surface shows the
@@ -1126,8 +1238,10 @@ const newTurn = (turnId: string, request: string, startedAt: number): Thinking =
 const updateTurn = ($: EngineInterface, turnId: string, change: (turn: Thinking) => Thinking) =>
   update($, thinking, turn => (turn?.turnId === turnId ? change(turn) : turn))
 
-// The updates with `entry` after them, the newest MAX_ENTRIES kept.
-const withEntry = (entries: readonly ThinkingEntry[], entry: ThinkingEntry) => [...entries, entry].slice(-MAX_ENTRIES)
+// The updates with `entry` after them, the newest MAX_TURN_ENTRIES kept: the
+// log is written from them, so a turn's first updates stay in it.
+const withEntry = (entries: readonly ThinkingEntry[], entry: ThinkingEntry) =>
+  [...entries, entry].slice(-MAX_TURN_ENTRIES)
 
 // When the pane last had an update on the turn, or the turn began.
 const lastUpdateAt = (turn: Thinking) => turn.entries.at(-1)?.at ?? turn.startedAt
@@ -1145,10 +1259,15 @@ const hasNews = (turn: Thinking, now: number) =>
     ? turn.notes.length > turn.seen || isSilent(turn, now)
     : turn.notes.length > turn.summarized || (turn.entries.length >= 2 && turn.entries.at(-1)?.isRecap !== true)
 
-// One request at a time: a tick that comes while one runs leaves it be.
-// `isDue` skips the gap: the turn's end, the person turning it on.
+// One request at a time: a tick that comes while one runs leaves it be, and
+// a due request waits for it. `isDue` skips the gap: the turn's end, the
+// person turning it on.
 const askSummary = async ($: EngineInterface, isDue: boolean) => {
-  if (asking !== null) return
+  if (asking !== null) {
+    if (isDue) isOwed = true
+
+    return
+  }
 
   const stop = new AbortController()
   asking = stop
@@ -1160,11 +1279,18 @@ const askSummary = async ($: EngineInterface, isDue: boolean) => {
     asking = null
   }
 
-  if (isAgain && !stop.signal.aborted) await askSummary($, true)
+  // Cut by the person turning the summary off, it asks nothing more of its
+  // own; one asked for meanwhile, as by turning it on again, still runs.
+  const isNext = (isAgain && !stop.signal.aborted) || isOwed
+  isOwed = false
+
+  if (isNext) await askSummary($, true)
 }
 
 // Asks Haiku for the next update on the turn and adds it to the earlier
-// ones; a WAIT leaves the notes for the next request. Resolves true when the
+// ones; a WAIT leaves the notes for the next request. The turn before the
+// current one goes first while it still owes its recap: the next prompt can
+// begin before the last one's end was summarized. Resolves true when the
 // turn ended meanwhile and still wants its recap, which no tick will ask
 // for.
 const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean) => {
@@ -1174,14 +1300,21 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
   // each second.
   if (!isDue && now - askedAt < SUMMARY_GAP) return false
 
-  const turn = await read($, thinking)
+  const before = previousTurn
+  const isPrevious =
+    before !== null && before.turnId === owedRecap && before.durationMs !== undefined && hasNews(before, now)
+  const turn = isPrevious ? before : await read($, thinking)
 
   if (turn === null || !hasNews(turn, now) || !(await read($, isSummaryOn))) return false
 
   askedAt = now
   const ask = askOf(turn, now)
 
-  await updateTurn($, turn.turnId, one => ({ ...one, isSummarizing: true }))
+  // A turn's recap is asked once: one that failed is not asked again over
+  // the turn that followed.
+  if (ask.isRecap && turn.turnId === owedRecap) owedRecap = null
+
+  if (!isPrevious) await updateTurn($, turn.turnId, one => ({ ...one, isSummarizing: true }))
 
   const prompt = summaryPrompt(turn, ask)
   let result: ModelCompleteResult | null = null
@@ -1213,37 +1346,52 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
   const entry: ThinkingEntry | null =
     told === null ? null : { at: now, ...told, ...(ask.isRecap ? { isRecap: true as const } : {}) }
 
-  await updateTurn($, turn.turnId, one => {
+  // What the reply makes of the turn, wherever it is kept by then.
+  const settle = (one: Thinking): Thinking => {
     const { failure: _, waitingFor, ...rest } = one
     const settled = { ...rest, isSummarizing: false }
+    const upTo = readUpTo(one, ask)
 
     if (entry !== null) {
-      return { ...settled, entries: withEntry(settled.entries, entry), summarized: ask.covered, seen: ask.covered }
+      return { ...settled, entries: withEntry(settled.entries, entry), summarized: upTo, seen: upTo }
     }
 
     // Haiku waits for more: these notes come back with the next ones.
-    if (reply !== null && 'wait' in reply) return { ...settled, seen: ask.covered, waitingFor: reply.wait }
+    if (reply !== null && 'wait' in reply) return { ...settled, seen: upTo, waitingFor: reply.wait }
 
     const kept = waitingFor === undefined ? settled : { ...settled, waitingFor }
 
     // Cut because the person turned the summary off: nothing went wrong.
     return signal.aborted ? kept : { ...kept, failure }
-  })
+  }
+
+  await updateTurn($, turn.turnId, settle)
+
+  if (ask.isRecap && entry === null && !signal.aborted) {
+    const count = retried.turnId === turn.turnId ? retried.count : 0
+
+    // A later turn's own recap owed goes first; this one is then let go.
+    if (count < RECAP_RETRIES && (owedRecap === null || owedRecap === turn.turnId)) {
+      retried = { turnId: turn.turnId, count: count + 1 }
+      owedRecap = turn.turnId
+      $.clock.after(SUMMARY_GAP, () => void askSummary($, true).catch(() => {}))
+    }
+  }
 
   if (await read($, isDebugOn)) {
     await logDebug($, { turn, ask, sentAt: now, answeredAt, prompt, result, failure, reply, isAborted: signal.aborted })
   }
 
-  // The new update goes on top: someone scrolled down keeps the lines they
-  // were reading where they were.
-  if (told !== null) {
+  const after = await read($, thinking)
+
+  // The new update goes on top of the turn shown: someone scrolled down
+  // keeps the lines they were reading where they were.
+  if (told !== null && after?.turnId === turn.turnId) {
     const added = partsOf(told).length
     await update($, summaryPlace, place =>
       place.line > 0 || place.row > 0 ? { line: place.line + added, row: place.row } : place,
     )
   }
-
-  const after = await read($, thinking)
 
   // The log takes the update on the turn it was asked on, the next prompt's
   // turn having begun meanwhile or not.
@@ -1251,7 +1399,14 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
     if (after?.turnId === turn.turnId) {
       await logTurn($, after)
     } else if (previousTurn?.turnId === turn.turnId) {
-      previousTurn = { ...previousTurn, entries: withEntry(previousTurn.entries, entry) }
+      // The next turn began from this one as it stood: with this update in
+      // it already, when that came after the update was kept.
+      const isKept = previousTurn.entries.some(
+        one => one.at === entry.at && one.isRecap === entry.isRecap && one.gist === entry.gist,
+      )
+
+      if (!isKept) previousTurn = settle(previousTurn)
+
       await logTurn($, previousTurn)
     }
   }
@@ -1259,17 +1414,20 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
   return (
     after?.turnId === turn.turnId &&
     after.durationMs !== undefined &&
-    (!ask.isRecap || after.notes.length > ask.covered)
+    (!ask.isRecap || (after.dropped ?? 0) + after.notes.length > ask.base + ask.covered)
   )
 }
 
 // A main-loop turn ended: the log takes how it ended, then the summary asks
-// for its last word.
-const endTurn = async ($: EngineInterface, turnId: string, isOn: boolean) => {
-  const turn = await read($, thinking)
+// for its last word. The next prompt's turn may have begun by now: the turn
+// is then the one before it.
+const endTurn = async ($: EngineInterface, turnId: string) => {
+  const current = await read($, thinking)
+  const turn = current?.turnId === turnId ? current : previousTurn?.turnId === turnId ? previousTurn : null
 
-  if (turn?.turnId === turnId) await logTurn($, turn)
-  if (isOn) await askSummary($, true)
+  if (turn !== null) await logTurn($, turn)
+
+  await askSummary($, true)
 }
 
 // The person's switch: off cuts a request under way and stops the clock;
@@ -1290,6 +1448,32 @@ const setSummary = async ($: EngineInterface, isOn: boolean) => {
   if (turn !== null && turn.durationMs === undefined) startTicker($)
 
   $.clock.after(0, () => void askSummary($, true).catch(() => {}))
+}
+
+// What the store keeps for the pane: the person's choices (the summary off,
+// the debug log on) and the last limits read. `$.state` holds them while the
+// session runs, but a /clear wipes it and starts no session.start: each
+// main-loop turn's start reads them again, as does the end of a /clear, so a
+// summary the person turned off stays off. Resolves whether it is on.
+const restore = async ($: EngineInterface) => {
+  const [isOff, isDebugging, wasOn, wasDebugging, shown] = await Promise.all([
+    $.store.get(STORED_SUMMARY_OFF).then(value => value === true),
+    $.store.get(STORED_DEBUG_ON).then(value => value === true),
+    read($, isSummaryOn),
+    read($, isDebugOn),
+    read($, limits),
+  ])
+
+  if (wasOn === isOff) await update($, isSummaryOn, () => !isOff)
+  if (wasDebugging !== isDebugging) await update($, isDebugOn, () => isDebugging)
+
+  if (shown.length === 0) {
+    const known = await storedLimits($)
+
+    if (known.length > 0) await update($, limits, () => known)
+  }
+
+  return !isOff
 }
 
 // One of the main loop's thinking blocks, or a part of a long one: a note of
@@ -1319,6 +1503,7 @@ const keepNote = async ($: EngineInterface, turnId: string, text: string) => {
         notes: notes.slice(dropped),
         summarized: Math.max(0, one.summarized - dropped),
         seen: Math.max(0, one.seen - dropped),
+        ...(dropped === 0 ? {} : { dropped: (one.dropped ?? 0) + dropped }),
       }
     })
 
@@ -1398,16 +1583,19 @@ export const register: Register = on => {
     // alone. A mod loaded mid-session counts the next turn's growth from this
     // reading, not from zero. What the engine and the store hold is read all
     // at once.
-    const [usage, compactAt, isOff, isDebugging, isClosed] = await Promise.all([
+    const [usage, compactAt, isClosed] = await Promise.all([
       $.session.usage(),
       readAutoCompact($),
-      $.store.get(STORED_SUMMARY_OFF).then(value => value === true),
-      $.store.get(STORED_DEBUG_ON).then(value => value === true),
       $.store.get(STORED_CLOSED).then(value => value === true),
     ])
     const { tokens, window, percent } = usage.context
     const now: Reading = { tokens, window, percent }
-    await update($, reading, () => now)
+    // A reload right after a compaction finds no fill yet: the reading keeps
+    // the compaction's mark, and its drop stays the change shown, until the
+    // next response.
+    await update($, reading, kept =>
+      tokens === undefined && kept?.isCompacted === true ? { window, isCompacted: true as const } : now,
+    )
 
     // Before the first response the engine has no windows: show the last ones
     // stored until it reports.
@@ -1425,11 +1613,10 @@ export const register: Register = on => {
     // The summary as the person left it. A reload drops the request under
     // way and the clock with the old module: a turn still running gets a
     // new clock.
-    await update($, isSummaryOn, () => !isOff)
-    await update($, isDebugOn, () => isDebugging)
+    const isOn = await restore($)
     const turn = await update($, thinking, one => (one?.isSummarizing === true ? { ...one, isSummarizing: false } : one))
 
-    if (!isOff && turn !== null && turn.durationMs === undefined) {
+    if (isOn && turn !== null && turn.durationMs === undefined) {
       startTicker($)
     }
 
@@ -1507,13 +1694,22 @@ export const register: Register = on => {
       askedAt = Number.NEGATIVE_INFINITY
       liveBlock = null
       await toNewest($)
-      // The turn before, for an update on it that lands from here on.
-      const before = await read($, thinking)
-      previousTurn = before === null ? null : { ...before, notes: [] }
+      // The turn before, for an update on it that lands from here on, or its
+      // recap, still owed.
+      previousTurn = await read($, thinking)
+      // The turn's growth counts from the fill it starts at: the turn
+      // before's end, measured at its end or inside it.
+      const fill = await read($, reading)
+
+      if (fill?.tokens !== undefined && fill.percent !== undefined && fill.isCompacted !== true) {
+        const { tokens, percent } = fill
+        await update($, samples, () => [{ tokens, percent }])
+      }
+
       const startedAt = await $.clock.now()
       await update($, thinking, () => newTurn(e.turnId, clip(e.text.trim(), MAX_REQUEST_CHARS), startedAt))
 
-      if (await read($, isSummaryOn)) {
+      if (await restore($)) {
         startTicker($)
       }
     }
@@ -1604,12 +1800,26 @@ export const register: Register = on => {
       }))
 
       await updateTurn($, e.turnId, turn => ({ ...turn, durationMs: e.durationMs, isAborted: e.isAborted }))
+      // Its last word is owed while the summary runs, even once the next
+      // prompt's turn has begun; a turn that ended with it off owes none.
+      owedRecap = (await read($, isSummaryOn)) ? e.turnId : null
       stopTicker()
+
+      // The turn's growth as far as measured: the engine raises no
+      // measurement at the end when the fill has not moved since one inside
+      // the turn, and none for a turn cut before any response, which shows
+      // none. A measurement after the end counts it again.
+      const [fill, start] = await Promise.all([read($, reading), read($, samples)])
+      const from = start.at(-1)?.tokens
+
+      if (fill?.tokens !== undefined && from !== undefined && fill.isCompacted !== true) {
+        const to = fill.tokens
+        await update($, delta, () => (to === from ? null : to - from))
+      }
 
       // The log takes the end, then the turn's last word is asked, past the
       // gap: no tick follows the end.
-      const isOn = await read($, isSummaryOn)
-      $.clock.after(0, () => void endTurn($, e.turnId, isOn).catch(() => {}))
+      $.clock.after(0, () => void endTurn($, e.turnId).catch(() => {}))
     }
 
     return next(e)
@@ -1627,40 +1837,54 @@ export const register: Register = on => {
   on('session.measure', async ($, e, next) => {
     if (e.changed.includes('context')) {
       const { tokens, window, percent } = e.context
-      const now: Reading = { tokens, window, percent }
-      const before = await read($, reading)
+      const [before, turn] = await Promise.all([read($, reading), read($, thinking)])
+      // A measurement while the main loop's turn runs (a rate-limit window
+      // moved) shows the fill; the turn's growth is counted at its end.
+      const isMidTurn = turn !== null && turn.durationMs === undefined
+      // A compaction's mark stays while the engine has no fill yet, and
+      // through the turn it ran in: its drop is the change shown at the end.
+      const isCompacted = before?.isCompacted === true && (tokens === undefined || isMidTurn)
+      const now: Reading = { tokens, window, percent, ...(isCompacted ? { isCompacted: true as const } : {}) }
       await update($, reading, () => now)
 
-      if (tokens !== undefined && percent !== undefined) {
-        // The last sample is the previous turn's end; after a compaction the
-        // hook below did not see, it is still the fuller window, so the drop
-        // shows. After one it saw, the drop it counted stays the change shown
-        // for this first reading.
-        const previous = (await read($, samples)).at(-1)
+      // Where the engine compacts on its own, read again at each turn's end
+      // (a switch of model changes the window, /config the setting; the read
+      // is local) and before the toast, which warns on the way there.
+      let compactAt = await read($, autoCompact)
 
-        if (!before?.isCompacted) {
-          const from = previous?.tokens ?? before?.tokens ?? 0
+      if (!isMidTurn || window !== before?.window || compactAt === null) {
+        const fresh = await readAutoCompact($)
+        await update($, autoCompact, () => fresh)
+        compactAt = fresh
+      }
+
+      if (tokens !== undefined && percent !== undefined) {
+        // The last sample is the fill the turn began at (the turn before's
+        // end); after a compaction the hook below did not see, it is still
+        // the fuller window, so the drop shows. After one it saw, the drop it
+        // counted stays the change shown for this first reading.
+        if (!isMidTurn && !before?.isCompacted) {
+          const from = (await read($, samples)).at(-1)?.tokens ?? before?.tokens ?? 0
           await update($, delta, () => tokens - from)
         }
 
-        // Warn once on the way up: staying above the line, or a hot reload,
-        // toasts nothing.
-        if (percent >= COMPACT_AT && (previous === undefined || previous.percent < COMPACT_AT)) {
+        // Warn once on the way up toward compaction: staying above the line,
+        // or a hot reload, toasts nothing; after a compaction it may again.
+        const level = levelOf(tokens, percent, compactAt)
+        const was =
+          before?.tokens === undefined || before.percent === undefined
+            ? undefined
+            : levelOf(before.tokens, before.percent, compactAt)
+
+        if (level >= COMPACT_AT && (was === undefined || was < COMPACT_AT)) {
           $.ui.toast(
-            `${forecast(percent).icon} Context ${percent}% full (${formatTokens(tokens)} / ${formatTokens(window)}): time to /compact`,
+            `${forecast(level).icon} Context ${percent}% full (${formatTokens(tokens)} / ${formatTokens(window)}): time to /compact`,
             { timeoutMs: 10_000 },
           )
         }
 
-        // Only the previous turn's end is ever read back.
-        await update($, samples, list => [...list, { tokens, percent }].slice(-1))
-      }
-
-      // A switch of model changes the window, and with it where compaction
-      // runs.
-      if (window !== before?.window || (await read($, autoCompact)) === null) {
-        const compactAt = await readAutoCompact($)
-        await update($, autoCompact, () => compactAt)
+        // Only a turn's end is read back, as where the next one begins.
+        if (!isMidTurn) await update($, samples, () => [{ tokens, percent }])
       }
     }
 
@@ -1672,6 +1896,36 @@ export const register: Register = on => {
 
     if (e.changed.includes('cost')) {
       await update($, cost, () => e.cost?.usd ?? null)
+    }
+
+    return next(e)
+  })
+
+  // A /clear (or a resume of another session in this process) goes on under
+  // a new session id, with no session.start: the old conversation's weather
+  // and thinking go with it, and a request under way on its turn is cut, so
+  // nothing of it reaches the new conversation's log. The host wipes the
+  // pane's values too, the person's choices among them.
+  on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear' || e.reason === 'resume') {
+      stopTicker()
+      asking?.abort()
+      liveBlock = null
+      previousTurn = null
+      owedRecap = null
+      const window = (await read($, reading))?.window
+      await update($, reading, () => (window === undefined ? null : { window }))
+      await update($, samples, () => [])
+      await update($, delta, () => null)
+      await update($, lastTurn, () => null)
+      await update($, turnTools, () => 0)
+      await update($, thinking, () => null)
+      await toNewest($)
+      isOwed = false
+      askedAt = Number.NEGATIVE_INFINITY
+      // The host wipes the pane's values once the session has ended: the
+      // person's choices and the limits come back from the store after it.
+      $.clock.after(SECOND, () => void restore($).catch(() => {}))
     }
 
     return next(e)
@@ -1736,17 +1990,19 @@ export const register: Register = on => {
     ].filter((part): part is string => part !== null)
 
     // The fill: read, unknown after a compaction until the next response, or
-    // not yet reported in a session that has not had one.
+    // not yet reported in a session that has not had one. The sky reads how
+    // far it has come toward compaction.
+    const sky = tokens !== undefined && percent !== undefined ? forecast(levelOf(tokens, percent, compactAt)) : null
     const context =
-      now !== null && tokens !== undefined && percent !== undefined ? (
+      now !== null && tokens !== undefined && percent !== undefined && sky !== null ? (
         <Box flexDirection="column">
-          <Text bold color={forecast(percent).color}>
-            {forecast(percent).icon} {forecast(percent).label}
+          <Text bold color={sky.color}>
+            {sky.icon} {sky.label}
           </Text>
           <Text>
             {percent}% of context · {formatTokens(tokens)} / {formatTokens(now.window)}
           </Text>
-          <Text color={forecast(percent).color}>{bar(percent)}</Text>
+          <Text color={sky.color}>{bar(percent)}</Text>
           {compactLine !== null && <Text dimColor>{compactLine}</Text>}
           {turnParts.length > 0 && <Text dimColor>Last turn {turnParts.join(' · ')}</Text>}
         </Box>
