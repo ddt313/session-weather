@@ -15,13 +15,20 @@ The pane opens beside the conversation when a session starts.
 or the terminal is too narrow to show it, a status line under the prompt
 keeps its key figures.
 
+![The Session Weather pane in the Claude desktop app, part-way through a turn](session-weather/screenshot.png)
+
+The pane in the desktop app, 42 seconds into a turn: the weather on top,
+then Haiku's updates on Claude's thinking, newest first, each with its gist,
+a decision (★), what Claude takes as true unchecked (?) and its next step
+(→).
+
 **Weather**
 
 - A forecast from how far the context has filled toward where the engine
   compacts on its own (toward the whole window where it does not): ☀ Clear
   (under 25% of the way), ☁ Cloudy, ☂ Showers, ☇ Storm, ϟ Compact soon (90% of
-  the way and up, with a toast once on the way up). A 200k window compacts at
-  about 167k, before 90% of the window.
+  the way and up unless you set it otherwise, with a toast once on the way
+  up). A 200k window compacts at about 167k, before 90% of the window.
 - Tokens used out of the window, a bar, and where auto-compact runs.
 - The last turn: the tokens it added, how long it ran, its tool calls, and
   the share of its input the prompt cache served.
@@ -78,11 +85,11 @@ keeps its key figures.
   and has Claude Haiku 5.5 sum them up in a few lines: what is new in what
   Claude is doing, the decisions it made (★), what it takes as true without
   having checked it (?), and what it says comes next (→).
-- At most one Haiku request every 15 seconds while new notes arrive. A long
-  stretch of thinking does not wait for its end: what it wrote since the
-  last request (200 characters or more, cut at a sentence's end) is read
-  while it goes on, each note with its time into the turn. Each request also
-  carries:
+- At most one Haiku request every 15 seconds (a setting) while new notes
+  arrive. A long stretch of thinking does not wait for its end: what it
+  wrote since the last request (200 characters or more, cut at a sentence's
+  end) is read while it goes on, each note with its time into the turn. Each
+  request also carries:
   - the last thousand characters or so of what the previous update read, so
     Haiku can follow where the new notes pick up;
   - the main loop's tool calls since the last update, in a few words: a
@@ -93,9 +100,11 @@ keeps its key figures.
 - An update tells only what is new since the earlier ones, and says so when
   Claude changes course. With nothing new yet (Claude only begins a thought,
   still weighs its options, or goes over what was reported) Haiku replies
-  WAIT: the pane says what it waits for (`Đợi thêm: …`), and those notes go
-  again with the next ones. After 45 seconds without an update, and for the
-  turn's recap, WAIT is not allowed.
+  WAIT: the pane says what it waits for (`Waiting: …`, or `Đợi thêm: …`
+  while the summary is in Vietnamese), and those notes go again with the
+  next ones. After three times the gap between requests
+  without an update (45 seconds by default), and for the turn's recap, WAIT
+  is not allowed.
 - The prompt's earlier updates stay, newest first, in their own window under
   the weather. A recap closes a turn that had two updates or more since the
   last recap, or that ended with notes no update read. A new prompt of yours
@@ -140,7 +149,7 @@ keeps its key figures.
   until you remove them; a turn takes a kilobyte or two. The file API reads
   and writes no file past 4 MiB, so past 3 MiB a session's thinking log
   leaves its oldest turns out.
-- The summary is written in Vietnamese (fixed for now).
+- The summary is written in English unless you set another language.
 - Each update or WAIT is one Haiku request on the session's own account,
   about $0.001; the pane shows what the summaries cost this session. The request
   carries your prompt, Claude's thinking notes, its tool calls in a few words
@@ -154,6 +163,39 @@ keeps its key figures.
   a dim line in the transcript, which Claude is not sent. The pane's footer
   says `debug log on` while it is. The file holds your prompts and Claude's
   thinking notes, and stays until you remove it.
+
+**Settings**
+
+Three rows in `/config`, kept in settings.json under
+`pluginConfigs["session-weather@ddt313-mods"].options`. A change there takes
+effect at once: Claude Code loads the mod again with the new value, as
+`/reload-plugins` would. The pane and the turn's updates stay; a Haiku request
+under way is dropped, and the next one is asked on the new terms.
+
+- **Thinking summary language** (`summaryLanguage`, default `English`):
+  the language Haiku writes the updates and recaps in, named as you would to
+  a person (`Vietnamese`, `Japanese`, …). The mod tells Haiku to write in it
+  and translates nothing itself: the pane's own labels are English, and its
+  word for a WAIT is `Đợi thêm` only while the language is Vietnamese (also
+  written `Tiếng Việt` or `vi`), `Waiting` for any other. The thinking log
+  tool's description and the debug log's system prompt name the language
+  too. Updates written before a change stay in their language. A blank value
+  is the default; a long one is cut to one line of 40 characters.
+- **Seconds between summary requests** (`summaryGapSeconds`, default 15): at
+  most one Haiku request this often while a turn runs, from 5 to 120. WAIT
+  is taken away after three of these without an update, and a recap that
+  failed is asked again after one, 30 seconds at most.
+- **Compact soon at** (`compactSoonPercent`, default 90): how far toward
+  compaction, in percent of the way, the forecast turns to ϟ Compact soon,
+  the toast warns and the status line's sky turns ϟ. The bands under it stay
+  at 25, 50 and 75, so it runs from 76 to 100: Storm keeps at least 75.
+
+A number outside its range is held to the range, never refused: as you set
+it in `/config`, where the row then shows the value in use, and as the mod
+loads one that settings.json holds from an edit by hand. The manifest
+declares no minimum or maximum, which would keep the mod from loading over
+such a value. A value of the wrong type there (text for a number) still
+does: Claude Code then names the field.
 
 ## Install
 

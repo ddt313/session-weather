@@ -3,5 +3,25 @@
   "version": "0.2.0",
   "license": "MIT",
   "description": "A pane with the session's weather: context fill and auto-compact point, the last turn, the 5-hour and weekly limits and this session's part of each, the cost, and a Haiku summary of what Claude is thinking",
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "summaryLanguage": {
+      "type": "string",
+      "title": "Thinking summary language",
+      "description": "The language Haiku writes the thinking summary in, named as you would to a person: English, Vietnamese, Japanese… The pane's own labels stay in English, but for Vietnamese.",
+      "default": "English"
+    },
+    "summaryGapSeconds": {
+      "type": "number",
+      "title": "Seconds between summary requests",
+      "description": "At most one Haiku request this often while a turn runs, from 5 to 120; a value outside that is held to it. Notes left without an update for three times this long get one.",
+      "default": 15
+    },
+    "compactSoonPercent": {
+      "type": "number",
+      "title": "Compact soon at (% of the way to compaction)",
+      "description": "Where the forecast turns to Compact soon and a toast warns, in percent of the way to the auto-compact point, from 76 to 100; a value outside that is held to it, so Storm (from 75) keeps its band.",
+      "default": 90
+    }
+  }
 }

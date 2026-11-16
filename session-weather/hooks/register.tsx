@@ -1,9 +1,11 @@
 import { atom, read, update } from 'claude-code'
 import type {
   AgentStatus,
+  ConfigValue,
   EngineInterface,
   ModelCompleteResult,
   ModelUsage,
+  PluginOptions,
   Register,
   Timer,
   UiLogOptions,
@@ -37,16 +39,96 @@ const TITLE = 'Session Weather'
 // terminal's main screen); a dock beside the transcript ignores it.
 const PANE_ROWS = 12
 
-// How far toward compaction (`levelOf`) the forecast turns to Compact soon,
-// and the toast warns.
-const COMPACT_AT = 90
+// The person's settings: the manifest's `userConfig` fields, each a row in
+// `/config`. The language Haiku writes the thinking summary in, the seconds
+// between its requests, and how far toward compaction (`levelOf`) the
+// forecast turns to Compact soon and the toast warns. A load reads them as
+// `register` begins, and a change in `/config` reloads the mod with the new
+// values, so it takes effect at once.
+//
+// A value of the right type outside its range is held to the range, here
+// and as it is set in `/config`, never refused: the manifest declares no
+// `min` or `max`, which would stop the whole mod from loading over a typo in
+// settings.json.
+type Settings = { language: string; gapSeconds: number; compactAt: number }
+
+const DEFAULT_LANGUAGE = 'English'
+// Room for any language's name; a longer value is cut.
+const MAX_LANGUAGE = 40
+// Under 5 seconds a typo would ask Haiku nearly every tick (each second);
+// over 120, three gaps (`maxSilence`) would leave the pane silent for more
+// than six minutes while notes wait.
+const GAP_SECONDS = { fallback: 15, min: 5, max: 120 }
+// The bands under it stay where they are: under 76 it would swallow Storm,
+// from 75, whole, so a lower value counts as 76.
+const COMPACT_SOON = { fallback: 90, min: 76, max: 100 }
+
+// The language named, on one trimmed line; the default where none is.
+const languageOf = (value: unknown) => {
+  const named = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, MAX_LANGUAGE).trim() : ''
+
+  return named === '' ? DEFAULT_LANGUAGE : named
+}
+
+// A whole number held to `range`; its fallback where the value is no number.
+const numberIn = (value: unknown, range: { fallback: number; min: number; max: number }) =>
+  typeof value === 'number' && Number.isFinite(value)
+    ? Math.min(range.max, Math.max(range.min, Math.round(value)))
+    : range.fallback
+
+// Each setting by its manifest field, and how a value given for it is held
+// to what the mod uses.
+const FIELDS: Record<string, (value: unknown) => string | number> = {
+  summaryLanguage: languageOf,
+  summaryGapSeconds: value => numberIn(value, GAP_SECONDS),
+  compactSoonPercent: value => numberIn(value, COMPACT_SOON),
+}
+
+// The settings in `options`, a field left out or of the wrong type at its
+// default.
+const settingsOf = (options: PluginOptions): Settings => ({
+  language: languageOf(options.summaryLanguage),
+  gapSeconds: numberIn(options.summaryGapSeconds, GAP_SECONDS),
+  compactAt: numberIn(options.compactSoonPercent, COMPACT_SOON),
+})
+
+// The settings this load runs with; `register` takes them first. The
+// module's own: the defaults until then.
+let settings = settingsOf({})
+
+// The setting a `/config` row's key names, `session-weather.<field>`, the
+// plugin's name with or without its marketplace; undefined for any other row.
+const SETTING_KEY = /^session-weather(?:@[^.]+)?\.(\w+)$/
+
+const settingFieldOf = (key: string) => {
+  const field = SETTING_KEY.exec(key)?.[1]
+
+  return field !== undefined && field in FIELDS ? field : undefined
+}
+
+// A value set for one of the settings, held as a load holds it: a number to
+// its range, a language to one trimmed line. A value of another kind goes on
+// as it came, for the engine to refuse.
+const heldValue = (field: string, value: ConfigValue): ConfigValue => {
+  const hold = FIELDS[field]
+  const isText = field === 'summaryLanguage'
+
+  if (hold === undefined || typeof value !== (isText ? 'string' : 'number')) return value
+
+  return hold(value)
+}
+
+// Whether the summary's language is Vietnamese, by any of its usual names:
+// the pane's few words about the summary (`statusOf`) follow it there, and
+// are English otherwise, as the rest of the pane is.
+const isVietnamese = (language: string) => /^(?:vietnamese|tiếng việt|tieng viet|vi(?:-vn)?)$/iu.test(language)
 
 // Monochrome text symbols, not emoji, so each draws one cell wide.
 const forecast = (percent: number) => {
   if (percent < 25) return { icon: '☀', label: 'Clear', color: 'warning' }
   if (percent < 50) return { icon: '☁', label: 'Cloudy', color: undefined }
   if (percent < 75) return { icon: '☂', label: 'Showers', color: 'permission' }
-  if (percent < COMPACT_AT) return { icon: '☇', label: 'Storm', color: 'error' }
+  if (percent < settings.compactAt) return { icon: '☇', label: 'Storm', color: 'error' }
 
   return { icon: 'ϟ', label: 'Compact soon', color: 'error' }
 }
@@ -302,17 +384,25 @@ const hideStatus = ($: EngineInterface) => inStatusOrder(() => setStatus($, unde
 
 // The thinking summary: Claude Haiku 5.5 reads the main loop's thinking
 // notes and says in a few lines what Claude is at, at most once per
-// SUMMARY_GAP while a turn runs, and once more as it ends. While the notes
+// `summaryGap` while a turn runs, and once more as it ends. While the notes
 // say nothing new yet, it replies WAIT, and reads them again with the next.
 const HAIKU = 'claude-haiku-5-5'
 const HAIKU_NAME = 'Haiku 5.5'
-const SUMMARY_GAP = 15_000
 // How long one request may take; the next tick may ask again after it.
 const SUMMARY_TIMEOUT = 30_000
-// How long the pane may go without an update while notes wait for one: past
-// it, Haiku may not reply WAIT.
-const MAX_SILENCE = 45_000
 const SECOND = 1000
+
+// The gap between summary requests, as set: 15 seconds unless changed.
+const summaryGap = () => settings.gapSeconds * SECOND
+
+// How long the pane may go without an update while notes wait for one: past
+// it, Haiku may not reply WAIT. Three gaps, 45 seconds at the default.
+const maxSilence = () => 3 * summaryGap()
+
+// How long a recap that failed waits before it is asked again: a gap, at
+// most RECAP_WAIT_MAX, so a long gap does not hold back a turn's last word.
+const RECAP_WAIT_MAX = 30_000
+const recapWait = () => Math.min(summaryGap(), RECAP_WAIT_MAX)
 
 // Set when the person turns the summary off, so later sessions keep it off.
 const STORED_SUMMARY_OFF = 'isSummaryOff'
@@ -527,7 +617,8 @@ const inputTokens = (usage: ModelUsage) =>
 // "$0.004"; "<$0.001" below half of that last digit.
 const formatSummaryCost = (usd: number) => (usd > 0 && usd < 0.0005 ? '<$0.001' : `$${usd.toFixed(3)}`)
 
-const SUMMARY_SYSTEM = [
+// The summary's system prompt, Haiku told to write in `language`.
+const summarySystem = (language: string) => [
   'You watch an AI coding assistant, Claude, work through one turn, and keep the person who asked posted on what Claude is thinking, one short update at a time.',
   "You get the person's request, the updates you already gave on this turn, and what Claude did since your last update:",
   '- <context>, when there is one: the end of the thinking your earlier updates already cover. Use it to follow where the new notes pick up; never report it as new.',
@@ -542,7 +633,7 @@ const SUMMARY_SYSTEM = [
   'Reply WAIT when there is nothing new to tell yet: Claude only begins a thought, is still weighing options, or goes over what was already reported. These notes come back to you with the next ones.',
   'When told that WAIT is not allowed this time, give an update from what there is.',
   '',
-  'Write in Vietnamese, plainly, for someone glancing at a narrow side panel.',
+  `Write in ${language}, plainly, for someone glancing at a narrow side panel.`,
   'Use only what the context, the notes, the actions and <said> say: no guesses, no advice, no verdict on whether Claude is right.',
   'Keep file names, code names and commands as written.',
   '',
@@ -562,7 +653,7 @@ const RECAP = [
 ].join('\n')
 
 // The line that takes WAIT away: the turn's recap, a request while Claude
-// waits for its subagents, and one past MAX_SILENCE.
+// waits for its subagents, and one past `maxSilence`.
 const NO_WAIT = 'WAIT is not allowed this time.'
 
 // What a request asked while the turn waits on its subagents adds.
@@ -1238,12 +1329,13 @@ const logTurn = ($: EngineInterface, turn: Thinking) => {
   return logging
 }
 
-const LOG_TOOL_SPEC = {
+// The tool as the model sees it, the summary's language as set.
+const logToolSpec = () => ({
   name: LOG_TOOL,
   description: [
     "This session's thinking log: for each earlier turn, the user's request and what Claude Haiku said of your thinking notes (the gist, the decisions marked ★, what you took as true unchecked marked ?, the next step marked →), the turn's recap first.",
     'Call it to recall what you weighed or settled on in a turn the conversation no longer holds in detail, as after a compaction, or when the user asks about an earlier turn.',
-    "It is Haiku's paraphrase of your summarized thinking, in Vietnamese: a lead to check against the code, the transcript or the user, never a record of what you decided.",
+    `It is Haiku's paraphrase of your summarized thinking, in ${settings.language}: a lead to check against the code, the transcript or the user, never a record of what you decided.`,
     `By default the last ${LOG_TURNS} turns, each with its recap, or its last update when it has none.`,
   ].join(' '),
   inputSchema: {
@@ -1260,7 +1352,7 @@ const LOG_TOOL_SPEC = {
     additionalProperties: false,
   },
   isDeferred: true,
-}
+})
 
 // A section cut to the turn's last word: its heading and request, then its
 // recap, or its last update when it has none.
@@ -1352,8 +1444,23 @@ const fingerprint = (text: string) => {
   return hash.toString(16).padStart(8, '0')
 }
 
-// The mark each request names the system prompt by.
-const SYSTEM_MARK = fingerprint(SUMMARY_SYSTEM)
+// The system prompt in `language`, and the mark each request names it by.
+const systemOf = (language: string) => {
+  const text = summarySystem(language)
+
+  return { text, mark: fingerprint(text) }
+}
+
+// The system prompt this load sends, in the summary's language as set; the
+// module's own, worked out again as each load takes its settings.
+let system = systemOf(settings.language)
+
+// Takes the settings a load runs with, and the system prompt in their
+// language: `register` calls it first.
+const useSettings = (options: PluginOptions) => {
+  settings = settingsOf(options)
+  system = systemOf(settings.language)
+}
 
 // `text` in a Markdown fence longer than any run of backticks in it.
 const fenced = (text: string) => {
@@ -1411,9 +1518,9 @@ const debugHeader = (sessionId: string) =>
     '',
     `Session \`${sessionId}\`: each request the Session Weather mod sent ${HAIKU_NAME} for its thinking summary, as sent, and the reply, oldest first; the last ${DEBUG_REQUESTS} are kept. \`/${DEBUG_COMMAND}\` turns it off.`,
     '',
-    `The system prompt, \`${SYSTEM_MARK}\`, which each request names by that mark (Claude Code puts its own identity block before it):`,
+    `The system prompt, \`${system.mark}\`, which each request names by that mark (Claude Code puts its own identity block before it):`,
     '',
-    fenced(SUMMARY_SYSTEM),
+    fenced(system.text),
     '',
     '',
   ].join('\n')
@@ -1432,7 +1539,7 @@ const debugEntry = (request: DebugRequest) => {
     `<!-- request ${new Date(request.sentAt).toISOString()} -->`,
     `## ${formatClock(request.sentAt)} · ${intoTurn(request.turn, request.sentAt)} into turn \`${request.turn.turnId}\``,
     '',
-    `- Asked for ${askedFor(request)}: ${notesRead(request)} of the turn, ${formatChars(request.prompt.length)}, system prompt \`${SYSTEM_MARK}\`.`,
+    `- Asked for ${askedFor(request)}: ${notesRead(request)} of the turn, ${formatChars(request.prompt.length)}, system prompt \`${system.mark}\`.`,
     `- Answered in ${((request.answeredAt - request.sentAt) / 1000).toFixed(1)} s${spent}.`,
     `- Outcome: ${outcomeOf(request)}`,
     '',
@@ -1481,7 +1588,7 @@ let isOwed = false
 // asked, though the next prompt's turn has begun.
 let owedRecap: string | null = null
 // A recap that failed (an overloaded API, a timeout, a bare WAIT) is asked
-// again, SUMMARY_GAP apart, up to RECAP_RETRIES times: no tick follows a
+// again, `recapWait` apart, up to RECAP_RETRIES times: no tick follows a
 // turn's end.
 const RECAP_RETRIES = 2
 let retried = { turnId: '', count: 0 }
@@ -1658,7 +1765,7 @@ const tick = async ($: EngineInterface) => {
 
   // When a summary is due, what the streaming block wrote since its last
   // part becomes a part of its own, for the summary to read.
-  if (asking === null && (await $.clock.now()) - askedAt >= SUMMARY_GAP) {
+  if (asking === null && (await $.clock.now()) - askedAt >= summaryGap()) {
     await cutLive($)
   }
 
@@ -1733,9 +1840,10 @@ const withEntry = (entries: readonly ThinkingEntry[], entry: ThinkingEntry) =>
 // When the pane last had an update on the turn, or the turn began.
 const lastUpdateAt = (turn: Thinking) => turn.entries.at(-1)?.at ?? turn.startedAt
 
-// Notes have waited for an update past MAX_SILENCE: Haiku may not reply WAIT.
+// Notes have waited for an update past `maxSilence`: Haiku may not reply
+// WAIT.
 const isSilent = (turn: Thinking, now: number) =>
-  turn.notes.length > turn.summarized && now - lastUpdateAt(turn) >= MAX_SILENCE
+  turn.notes.length > turn.summarized && now - lastUpdateAt(turn) >= maxSilence()
 
 // How many updates came after the turn's latest recap, or all of them while
 // it has none.
@@ -1748,7 +1856,7 @@ const sinceRecap = (turn: Thinking) => {
 }
 
 // Something to say. While the turn runs: notes Haiku has not read yet, as an
-// update or a WAIT, or notes that waited past MAX_SILENCE. While it waits on
+// update or a WAIT, or notes that waited past `maxSilence`. While it waits on
 // its subagents: notes no update has read, nothing more coming until a
 // result wakes Claude. Once it ended: those, or two updates or more since
 // the last recap (a turn a result reopened has one). One update and nothing
@@ -1799,7 +1907,7 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
 
   // The gap first: it needs no read of the turn, which ticks would make
   // each second.
-  if (!isDue && now - askedAt < SUMMARY_GAP) return false
+  if (!isDue && now - askedAt < summaryGap()) return false
 
   const before = previousTurn
   const isPrevious =
@@ -1823,7 +1931,7 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
 
   try {
     result = await $.model.complete(
-      { model: HAIKU, system: SUMMARY_SYSTEM, prompt, effort: 'low', timeoutMs: SUMMARY_TIMEOUT },
+      { model: HAIKU, system: system.text, prompt, effort: 'low', timeoutMs: SUMMARY_TIMEOUT },
       { signal },
     )
     failure = failureOf(result)
@@ -1879,7 +1987,7 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
     if (count < RECAP_RETRIES && (owedRecap === null || owedRecap === turn.turnId)) {
       retried = { turnId: turn.turnId, count: count + 1 }
       owedRecap = turn.turnId
-      $.clock.after(SUMMARY_GAP, () => void askSummary($, true).catch(() => {}))
+      $.clock.after(recapWait(), () => void askSummary($, true).catch(() => {}))
     }
   }
 
@@ -2063,12 +2171,15 @@ const keepMark = async ($: EngineInterface, key: 'actions' | 'said', text: strin
 }
 
 // A line on where the summary stands, when the updates do not say it:
-// after a WAIT, what Haiku waits for, in the summary's language.
+// after a WAIT, what Haiku waits for, in the summary's language, under a
+// word in Vietnamese where that is the language, else in English.
 const statusOf = (turn: Thinking | null) => {
   if (turn === null) return 'Waiting for the next turn.'
 
   if (turn.waitingFor !== undefined && turn.failure === undefined) {
-    return turn.waitingFor === '' ? 'Đợi thêm…' : `Đợi thêm: ${turn.waitingFor}`
+    const waiting = isVietnamese(settings.language) ? 'Đợi thêm' : 'Waiting'
+
+    return turn.waitingFor === '' ? `${waiting}…` : `${waiting}: ${turn.waitingFor}`
   }
 
   if (turn.entries.length > 0) return turn.failure === undefined ? null : `Update failed: ${turn.failure}`
@@ -2082,7 +2193,19 @@ const statusOf = (turn: Thinking | null) => {
   return `Summarizing ${plural(turn.notes.length, 'note')}…`
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  // A change in `/config` reloads the mod, and this runs again with it.
+  useSettings(options)
+
+  // A setting changed in `/config` is held to what the mod will use, a gap
+  // of 1 stored as 5, so the row shows the value in effect. A value written
+  // into settings.json by hand is held the same way as it loads.
+  on('config.set', ($, e, next) => {
+    const field = settingFieldOf(e.key)
+
+    return field === undefined ? next(e) : next({ ...e, value: heldValue(field, e.value) })
+  })
+
   on('session.start', async ($, e, next) => {
     // Also runs on every hot reload: seed the reading, but leave the samples
     // alone. A mod loaded mid-session counts the next turn's growth from this
@@ -2150,7 +2273,7 @@ export const register: Register = on => {
 
     // The log's tool, listed for the model from the first prompt on.
     try {
-      await $.tool.register(LOG_TOOL_SPEC)
+      await $.tool.register(logToolSpec())
     } catch {
       // No tool: the log is still written, for the person to read.
     }
@@ -2454,7 +2577,7 @@ export const register: Register = on => {
             ? undefined
             : levelOf(before.tokens, before.percent, compactAt)
 
-        if (level >= COMPACT_AT && (was === undefined || was < COMPACT_AT)) {
+        if (level >= settings.compactAt && (was === undefined || was < settings.compactAt)) {
           $.ui.toast(
             `${forecast(level).icon} Context ${percent}% full (${formatTokens(tokens)} / ${formatTokens(window)}): time to /compact`,
             { timeoutMs: 10_000 },
