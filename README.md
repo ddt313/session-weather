@@ -30,6 +30,8 @@ a decision (★), what Claude takes as true unchecked (?) and its next step
   with the rest of the width and the pane's whole height. Narrower, or with
   the summary off, the weather stands above the summary, as in the picture.
   Drag the pane wider or narrower and it changes over.
+- From 90 columns the weather also says more, in the room its column has:
+  see **Wide layout**.
 - Minimized to a widget on the desktop app, the pane shows what reads at a
   glance, with no buttons: `☁ Cloudy · 42%`, `5h 30% · Week 74% · $1.23`, and
   the summary's newest update.
@@ -66,6 +68,60 @@ a decision (★), what Claude takes as true unchecked (?) and its next step
   remove them, a few kilobytes each; one last written before the week
   began is no longer read.
 - The session's cost at API prices, as `/cost` reports it.
+
+**Wide layout**
+
+From 90 columns the weather says more, in what was the empty part of its
+column. That goes by the pane's width alone: with the summary off the pane
+keeps one column, and these stand in it, as wide as the pane. Narrower than
+90 columns, minimized to a widget, and on the status line, none of it shows,
+and the pane is drawn again no more often than before while nothing happens.
+Each row is cut to the column, never wrapped.
+
+- The pace of each limit. A `│` on the bar marks how much of the window's
+  time has gone: a fill past it runs ahead of the window, one short of it
+  behind. Beside the bar, where the share used would stand at the reset at
+  this pace: `~84% at reset` for a week 75% used with 89% of it gone, or
+  `>100% at reset` where it would run out first. Under a fifth of the way
+  into a window a few points say little, and the bar has the mark alone.
+- What fills the context, under the auto-compact line, as the branches of a
+  tree: the largest of the rows `/context` counts as in use, each with its
+  share of the window (`├ Messages 52.1k · 26%`, the system tools, the system
+  prompt…), past four the rest in one row, `└ Other`. Never the free space, the compaction buffer
+  or the tools loaded on demand. Estimated locally, with no request, and read
+  again where the auto-compact point is: at each turn's end, and after a
+  compaction.
+- The session's line, in place of its cost: `Fable 5.2 · since 09:12 · 23
+  turns · 2 compactions · $16.17`, the model, when the session began (the
+  day, for one begun before today), the prompts it has had as Claude Code
+  counts them, its compactions and its cost, in two rows where one is too
+  short. When it began rather than how long it has run: the pane is not drawn
+  again while nothing happens, and a running time would go stale. Claude
+  Code keeps no count of compactions, so the mod counts those it sees; in a
+  session it loaded into part-way (enabled or installed mid-session, or a
+  resumed one) it reads `1+ compactions`, there may have been more before. A
+  `/clear` starts the session, and the count, over.
+- The subagents at work, while there are any: one row each, five at most
+  and the rest said in one (`and 3 more`), with its task's description,
+  where it stands (`pending`, `running`, `waiting`) and how long it has run,
+  to the minute (not for one started before the mod loaded).
+  Only those the main loop started; listed again as one starts or ends, each
+  minute, and every ten seconds while a turn runs or waits with the summary
+  on.
+- The recent turns, newest first: your last eight prompts' turns, a
+  subagent's hand-back going on with the prompt it answers. When each began,
+  how long it ran (or that it runs, or waits on its subagents), the tokens it
+  added to the context, its tool calls (its subagents' included), and
+  whether you interrupted it. Press one to show its updates beside the
+  weather (`🧭 Turn at 14:32 · 2m 14s · done`), marked ▸: the current turn
+  shows until you press another, and your next prompt shows its own again.
+  With the summary off they are figures alone. A pane too short for them all
+  leaves the oldest out.
+- The recent turns are kept with the session's other values, each with its
+  figures and its newest 100 updates: reloading the mod keeps them, a
+  `/clear` starts the list over with the new conversation, and a session
+  resumed in a new Claude Code process starts it empty (its thinking log
+  still holds the earlier turns' updates, for Claude to read).
 
 **Status line**
 
@@ -120,7 +176,8 @@ a decision (★), what Claude takes as true unchecked (?) and its next step
 - The prompt's earlier updates stay, newest first, in their own window under
   the weather, or beside it in a wide pane. A recap closes a turn that had two updates or more since the
   last recap, or that ended with notes no update read. A new prompt of yours
-  starts the list over.
+  starts the list over; in a wide pane the recent turns bring an earlier
+  one's back.
 - A turn that a subagent's result begins (its hand-back, which the engine
   delivers as another Claude session's message) or a background task's
   notification is no new prompt: its updates join the list of the prompt

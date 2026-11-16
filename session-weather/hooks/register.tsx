@@ -1,7 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type {
+  AgentInfo,
   AgentStatus,
   ConfigValue,
+  ContextCategory,
   EngineInterface,
   ModelCompleteResult,
   ModelUsage,
@@ -11,7 +13,20 @@ import type {
   UiLogOptions,
 } from 'claude-code'
 
-import type { AutoCompact, Limit, Reading, Share, Thinking, ThinkingEntry, TurnMark } from '../types'
+import type {
+  AutoCompact,
+  Compactions,
+  Facts,
+  Fill,
+  Limit,
+  Reading,
+  RecentTurn,
+  Share,
+  Subagent,
+  Thinking,
+  ThinkingEntry,
+  TurnMark,
+} from '../types'
 
 const reading = atom({ plugin: 'session-weather', key: 'reading' } as const, null)
 const samples = atom({ plugin: 'session-weather', key: 'samples' } as const, [])
@@ -19,12 +34,20 @@ const delta = atom({ plugin: 'session-weather', key: 'delta' } as const, null)
 const limits = atom({ plugin: 'session-weather', key: 'limits' } as const, [])
 const shares = atom({ plugin: 'session-weather', key: 'shares' } as const, [])
 const turnTools = atom({ plugin: 'session-weather', key: 'turnTools' } as const, 0)
+const subagents = atom({ plugin: 'session-weather', key: 'subagents' } as const, [])
 const lastTurn = atom({ plugin: 'session-weather', key: 'lastTurn' } as const, null)
 const autoCompact = atom({ plugin: 'session-weather', key: 'autoCompact' } as const, null)
+const fills = atom({ plugin: 'session-weather', key: 'fills' } as const, null)
 const cost = atom({ plugin: 'session-weather', key: 'cost' } as const, null)
+const facts = atom({ plugin: 'session-weather', key: 'facts' } as const, null)
+const compactions = atom({ plugin: 'session-weather', key: 'compactions' } as const, null)
 // Tagged: a turn an earlier version kept in another shape is declined, not
 // read. Bump the tag whenever the shape of `Thinking` changes.
 const thinking = atom({ plugin: 'session-weather', key: 'thinking' } as const, null, { shape: 'thinking-entries-2' })
+// Tagged as `thinking` is: bump it whenever the shape of `RecentTurn`, or of
+// the updates it keeps, changes.
+const recentTurns = atom({ plugin: 'session-weather', key: 'recentTurns' } as const, [], { shape: 'recent-turns-1' })
+const pickedTurn = atom({ plugin: 'session-weather', key: 'pickedTurn' } as const, null)
 const isSummaryOn = atom({ plugin: 'session-weather', key: 'isSummaryOn' } as const, true)
 const summaryCost = atom({ plugin: 'session-weather', key: 'summaryCost' } as const, 0)
 const summaryPlace = atom({ plugin: 'session-weather', key: 'summaryPlace' } as const, { line: 0, row: 0 })
@@ -158,18 +181,157 @@ const formatCost = (usd: number) => (usd > 0 && usd < 0.01 ? '<$0.01' : `$${usd.
 // "1 note", "3 notes".
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
-// Where the engine compacts on its own, from the window's breakdown. The
-// `summary` breakdown is estimated locally and sends no request.
-const readAutoCompact = async ($: EngineInterface): Promise<AutoCompact | null> => {
+// The rows of what fills the context the wide layout shows: the largest,
+// and past them the rest in one.
+const FILL_ROWS = 5
+const REST = 'Other'
+
+// What fills the context, from the breakdown's rows of content in use (never
+// the free space, the compaction buffer or tools loaded on demand): largest
+// first, FILL_ROWS rows at most, the last of them the rest folded together.
+const fillsOf = (categories: readonly ContextCategory[]): Fill[] => {
+  const used = categories
+    .filter(row => row.kind === 'used' && row.tokens > 0)
+    .map(({ name, tokens }) => ({ name, tokens }))
+    .sort((a, b) => b.tokens - a.tokens)
+
+  if (used.length <= FILL_ROWS) return used
+
+  const rest = used.slice(FILL_ROWS - 1).reduce((sum, row) => sum + row.tokens, 0)
+
+  return [...used.slice(0, FILL_ROWS - 1), { name: REST, tokens: rest }]
+}
+
+// What the window's breakdown says: where the engine compacts on its own,
+// what fills the context, and the main loop's model; each null where the
+// engine gave none. The `summary` breakdown is estimated locally and sends
+// no request.
+const readBreakdown = async ($: EngineInterface) => {
   try {
     const breakdown = (await $.session.usage({ breakdown: 'summary' })).context.breakdown
 
-    return breakdown === undefined
-      ? null
-      : { threshold: breakdown.autoCompactThreshold, isEnabled: breakdown.isAutoCompactEnabled }
+    if (breakdown === undefined) return { compactAt: null, fills: null, model: null }
+
+    return {
+      compactAt: { threshold: breakdown.autoCompactThreshold, isEnabled: breakdown.isAutoCompactEnabled },
+      fills: Array.isArray(breakdown.categories) ? fillsOf(breakdown.categories) : null,
+      model: typeof breakdown.model === 'string' && breakdown.model !== '' ? breakdown.model : null,
+    }
+  } catch {
+    return { compactAt: null, fills: null, model: null }
+  }
+}
+
+// What a breakdown read keeps: where the engine compacts, what fills the
+// context, and the model on the session's line.
+const keepBreakdown = async (
+  $: EngineInterface,
+  { compactAt, fills: filled, model }: Awaited<ReturnType<typeof readBreakdown>>,
+) => {
+  await update($, autoCompact, () => compactAt)
+  await update($, fills, () => filled)
+
+  if (model !== null) await update($, facts, one => (one === null || one.model === model ? one : { ...one, model }))
+}
+
+// "├ Messages 52.1k · 26%": a row of what fills the context, its share of the
+// window, on a branch of a tree, the last row's (`isLast`) closing it: the
+// rows read as parts of the fill above them, not lines of their own. Glyphs,
+// not spaces, which a surface may fold away.
+const fillLine = (fill: Fill, window: number, isLast: boolean) =>
+  `${isLast ? '└' : '├'} ${fill.name} ${formatTokens(fill.tokens)} · ${formatPart((fill.tokens / window) * 100)}`
+
+// The prompts the person has sent this session, as the engine counts them;
+// null where it cannot say.
+const readTurns = async ($: EngineInterface) => {
+  try {
+    const turns = await $.session.turns()
+
+    return Number.isFinite(turns) ? turns : null
   } catch {
     return null
   }
+}
+
+// The engine's count of prompts read again, kept where it moved.
+const recountTurns = async ($: EngineInterface) => {
+  const turns = await readTurns($)
+
+  if (turns !== null) await update($, facts, one => (one === null || one.turns === turns ? one : { ...one, turns }))
+}
+
+// The session as its line tells it, read anew: when it began and how many
+// prompts it has had, the model kept. Its compactions start counting where
+// none are counted yet: all of them in a session with no prompt so far,
+// else those from here on.
+const readFacts = async ($: EngineInterface) => {
+  const [{ startedAt }, turns] = await Promise.all([$.session.usage(), readTurns($)])
+
+  await update($, facts, one => ({
+    startedAt,
+    ...(turns === null ? {} : { turns }),
+    ...(one?.model === undefined ? {} : { model: one.model }),
+  }))
+  await update($, compactions, one => one ?? { count: 0, isWhole: turns === 0 })
+}
+
+// "Fable 5.2" for the id `claude-fable-5-2`, a date or a mark after it left
+// out; a model the engine names some other way stays as named.
+const modelNameOf = (model: string) => {
+  const id = /^claude-([a-z]+)-(\d+)-(\d+)\b/i.exec(model)
+
+  if (id === null) return model
+
+  const [, family = '', major = '', minor = ''] = id
+
+  return `${family.charAt(0).toUpperCase()}${family.slice(1)} ${major}.${minor}`
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const
+
+// "since 09:12", the host's time, for a session begun today; "since Nov 14"
+// for one begun before. A time the session began, not how long it has run:
+// that would go stale while the pane waits undrawn between turns.
+const sinceOf = (startedAt: number, now: number) => {
+  const began = new Date(startedAt)
+  const isToday = began.toDateString() === new Date(now).toDateString()
+
+  return `since ${isToday ? formatTime(startedAt) : `${MONTHS[began.getMonth()]} ${began.getDate()}`}`
+}
+
+// "2 compactions"; "2+ compactions" where the mod loaded into the session
+// under way, and may have missed some before; none where none were counted.
+const compactionsOf = (counted: Compactions | null) => {
+  if (counted === null || counted.count === 0) return null
+
+  return counted.isWhole ? plural(counted.count, 'compaction') : `${counted.count}+ compactions`
+}
+
+// The session in a few parts, for its line: its model, since when it runs,
+// the prompts sent it, its compactions and its cost; a part not known, or
+// none yet, left out.
+const sessionParts = (known: Facts | null, counted: Compactions | null, spent: number | null, now: number) =>
+  [
+    known?.model === undefined ? null : modelNameOf(known.model),
+    known === null ? null : sinceOf(known.startedAt, now),
+    known?.turns === undefined || known.turns === 0 ? null : plural(known.turns, 'turn'),
+    compactionsOf(counted),
+    spent === null ? null : formatCost(spent),
+  ].filter((part): part is string => part !== null)
+
+// Parts joined by " · " into rows of `chars` at most, a part that does not
+// fit on a row starting the next, and a part longer than a row cut.
+const packRows = (parts: readonly string[], chars: number) => {
+  const rows: string[] = []
+
+  for (const part of parts) {
+    const last = rows.at(-1)
+
+    if (last !== undefined && last.length + 3 + part.length <= chars) rows[rows.length - 1] = `${last} · ${part}`
+    else rows.push(part)
+  }
+
+  return rows.map(row => clip(row, chars))
 }
 
 // "auto-compact at 92% · 920k" in a window of `window` tokens, or that it is
@@ -209,6 +371,50 @@ const barParts = (percent: number, mine: number) => {
   const own = Math.min(filled, Math.round(Math.max(0, mine) / 5))
 
   return { others: '█'.repeat(filled - own), own: '█'.repeat(own), free: '░'.repeat(20 - filled) }
+}
+
+// A run of a window's bar as the wide layout draws it: cells others used
+// (dim), this session's part (yellow), cells free (dim), and the pace mark.
+type BarRun = { kind: 'others' | 'own' | 'free' | 'mark'; text: string }
+
+// The bar of `barParts` with the cell where `elapsed` of the window's time
+// falls drawn as │: a fill that has passed the mark runs ahead of the
+// window's time, one short of it behind. The runs in order, each kind's
+// cells together.
+const barRuns = (percent: number, mine: number, elapsed: number): BarRun[] => {
+  const { others, own, free } = barParts(percent, mine)
+  const kinds: BarRun['kind'][] = [
+    ...Array.from(others, () => 'others' as const),
+    ...Array.from(own, () => 'own' as const),
+    ...Array.from(free, () => 'free' as const),
+  ]
+  kinds[Math.max(0, Math.min(19, Math.floor(elapsed * 20)))] = 'mark'
+  const cell = { others: '█', own: '█', free: '░', mark: '│' } as const
+
+  return kinds.reduce<BarRun[]>((runs, kind) => {
+    const last = runs.at(-1)
+
+    if (last?.kind === kind) last.text += cell[kind]
+    else runs.push({ kind, text: cell[kind] })
+
+    return runs
+  }, [])
+}
+
+// From this share of a window's time on, the pace says where the share used
+// would stand at the reset: earlier, a few points over a short time say
+// little.
+const PACE_FROM = 0.2
+
+// "~84% at reset": the share used at this pace when the window resets, its
+// share used over the share of its time gone; ">100% at reset" where it would
+// run out first. Null before PACE_FROM, or where the reset is not known.
+const paceOf = (percent: number, elapsed: number | undefined) => {
+  if (elapsed === undefined || elapsed < PACE_FROM) return null
+
+  const projected = percent / elapsed
+
+  return projected > 100 ? '>100% at reset' : `~${Math.round(projected)}% at reset`
 }
 
 // "8%"; "<1%" under half a point.
@@ -263,9 +469,9 @@ const formatLeft = (ms: number) => {
 }
 
 // The windows to show, in order: each one's share used, rounded and as read,
-// the time left until its reset, and when it began, where the reset is
-// known. Past its reset the share read before is stale: that window is left
-// out until the next reading.
+// the time left until its reset, and when it began and the share of its time
+// gone (0 to 1), where the reset is known. Past its reset the share read
+// before is stale: that window is left out until the next reading.
 const liveWindows = (readings: readonly Limit[], now: number) =>
   WINDOWS.flatMap(({ kind, name, length }) => {
     const limit = readings.find(one => one.kind === kind)
@@ -280,9 +486,11 @@ const liveWindows = (readings: readonly Limit[], now: number) =>
       return []
     }
 
-    const start = left === undefined || Number.isNaN(left) ? undefined : now + left - length
+    const isKnown = left !== undefined && !Number.isNaN(left)
+    const start = isKnown ? now + left - length : undefined
+    const elapsed = isKnown ? Math.max(0, Math.min(1, 1 - left / length)) : undefined
 
-    return [{ kind, name, used: Math.round(limit.percentUsed), percent: limit.percentUsed, left, start }]
+    return [{ kind, name, used: Math.round(limit.percentUsed), percent: limit.percentUsed, left, start, elapsed }]
   })
 
 // What the countdowns read now; the pane is drawn again only when it
@@ -628,11 +836,14 @@ const layUpdates = (turn: Thinking | null, width: number, place: { line: number;
 }
 
 // Moves the updates' window `by` rows (negative toward the newest), within
-// the turn's rows at the `width` the pane was drawn at. The place is kept as
-// a line and the rows into it, so an update added on top, or another width,
+// the shown turn's rows at the `width` the pane was drawn at: beside the
+// weather (`isWide`) the turn picked from the list. The place is kept as a
+// line and the rows into it, so an update added on top, or another width,
 // keeps the reader where they were.
-const moveUpdates = async ($: EngineInterface, by: number, width: number) => {
-  const { rows, starts, top } = layUpdates(await read($, thinking), width, await read($, summaryPlace))
+const moveUpdates = async ($: EngineInterface, by: number, width: number, isWide: boolean) => {
+  const current = await read($, thinking)
+  const shown = isWide ? shownTurnOf(current, await read($, pickedTurn), await read($, recentTurns)).turn : current
+  const { rows, starts, top } = layUpdates(shown, width, await read($, summaryPlace))
   const to = Math.max(0, Math.min(rows.length - 1, top + by))
 
   // At either end (or with no rows) a held arrow keeps asking: nothing to
@@ -1378,6 +1589,133 @@ const logTurn = ($: EngineInterface, turn: Thinking) => {
   return logging
 }
 
+// The recent turns, as the wide layout lists them: the person's last
+// MAX_RECENT turns in `$.state`, where a reload finds them and a /clear,
+// which starts another conversation, lets them go. Each keeps its figures
+// and its newest updates, so a turn picked from the list shows them without
+// reading its log back.
+const MAX_RECENT = 8
+
+// The turn as it now stands into its row, added where it has none (rows in
+// the order the turns began, the oldest let go past MAX_RECENT): how long it
+// ran, how it ended or whether it waits, and its newest updates. Its fill
+// and its tool calls stay as counted.
+const recordTurn = ($: EngineInterface, turn: Thinking) =>
+  update($, recentTurns, list => {
+    const before = list.find(one => one.turnId === turn.turnId)
+    const record: RecentTurn = {
+      turnId: turn.turnId,
+      startedAt: turn.startedAt,
+      ...(turn.durationMs === undefined ? {} : { durationMs: turn.durationMs }),
+      ...(turn.isAborted === true ? { isAborted: true as const } : {}),
+      ...(turn.paused !== undefined && turn.durationMs === undefined ? { isWaiting: true as const } : {}),
+      ...(before?.fromTokens === undefined ? {} : { fromTokens: before.fromTokens }),
+      ...(before?.toTokens === undefined ? {} : { toTokens: before.toTokens }),
+      tools: before?.tools ?? 0,
+      entries: turn.entries.slice(-MAX_ENTRIES),
+    }
+
+    return before === undefined
+      ? [...list, record].sort((a, b) => a.startedAt - b.startedAt).slice(-MAX_RECENT)
+      : list.map(one => (one === before ? record : one))
+  })
+
+// The turn kept, in its row of the recent turns and in its log: wherever
+// the log takes a turn, as it ends, waits or gets an update, its row does.
+const keepTurn = async ($: EngineInterface, turn: Thinking) => {
+  await recordTurn($, turn).catch(() => {})
+  await logTurn($, turn)
+}
+
+// A prompt of the person's begins a turn: its row, newest, from the fill
+// the window holds. Right after a compaction that is not known, and the row
+// says nothing of tokens; before anything was read the turn counts from
+// empty, as the pane's first growth does.
+const openRecord = ($: EngineInterface, turnId: string, startedAt: number, fill: Reading | null) => {
+  const fromTokens = fill?.tokens ?? (fill?.isCompacted === true ? undefined : 0)
+
+  return update($, recentTurns, list =>
+    [
+      ...list.filter(one => one.turnId !== turnId),
+      { turnId, startedAt, ...(fromTokens === undefined ? {} : { fromTokens }), tools: 0, entries: [] },
+    ].slice(-MAX_RECENT),
+  )
+}
+
+// A tool call while the newest turn runs or waits counts toward it.
+const countTool = ($: EngineInterface) =>
+  update($, recentTurns, list => {
+    const last = list.at(-1)
+
+    return last === undefined || last.durationMs !== undefined
+      ? list
+      : [...list.slice(0, -1), { ...last, tools: last.tools + 1 }]
+  })
+
+// The fill as measured: the newest turn has added what lies past its start.
+const measureRecord = ($: EngineInterface, tokens: number) =>
+  update($, recentTurns, list => {
+    const last = list.at(-1)
+
+    return last === undefined || last.toTokens === tokens ? list : [...list.slice(0, -1), { ...last, toTokens: tokens }]
+  })
+
+// "14:32", the host's time.
+const formatTime = (ms: number) => `${pad(new Date(ms).getHours())}:${pad(new Date(ms).getMinutes())}`
+
+// "14:32 · 2m 14s · ▲ +9.7k · 18 tools": a recent turn's row. When it began,
+// how long it ran (the newest: that it runs, or waits on its subagents), the
+// tokens it added to the context, its tool calls, and whether it was
+// interrupted; a part not known left out.
+const recentLine = (one: RecentTurn, isNewest: boolean) =>
+  [
+    formatTime(one.startedAt),
+    one.durationMs !== undefined
+      ? formatDuration(one.durationMs)
+      : isNewest
+        ? one.isWaiting === true
+          ? 'waiting'
+          : 'running'
+        : null,
+    one.fromTokens === undefined || one.toTokens === undefined ? null : formatDelta(one.toTokens - one.fromTokens),
+    plural(one.tools, 'tool'),
+    one.isAborted === true ? 'interrupted' : null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(' · ')
+
+// A turn of the list as the summary draws one: its updates, when it began,
+// how long it ran and how it ended.
+const pastTurnOf = (one: RecentTurn): Thinking => ({
+  turnId: one.turnId,
+  request: '',
+  startedAt: one.startedAt,
+  ...(one.durationMs === undefined ? {} : { durationMs: one.durationMs }),
+  ...(one.isAborted === true ? { isAborted: true } : {}),
+  notes: [],
+  summarized: 0,
+  seen: 0,
+  actions: [],
+  said: [],
+  entries: one.entries,
+  isSummarizing: false,
+})
+
+// The turn whose updates the summary shows beside the weather: the one
+// picked from the list while it is still listed, else the current one.
+const shownTurnOf = (current: Thinking | null, picked: string | null, recent: readonly RecentTurn[]) => {
+  const one = picked === null || picked === current?.turnId ? undefined : recent.find(row => row.turnId === picked)
+
+  return one === undefined ? { turn: current, isPast: false } : { turn: pastTurnOf(one), isPast: true }
+}
+
+// The person presses a turn of the list: its updates show, from the newest.
+// The current one is picked as null, so that the next prompt's follows.
+const pickTurn = async ($: EngineInterface, turnId: string | null) => {
+  await update($, pickedTurn, () => turnId)
+  await toNewest($)
+}
+
 // The tool as the model sees it, the summary's language as set.
 const logToolSpec = () => ({
   name: LOG_TOOL,
@@ -1704,19 +2042,81 @@ const isResumedBy = (text: string) => {
 // turn, or held on its own background work.
 const AT_WORK: ReadonlySet<AgentStatus> = new Set(['pending', 'running', 'waiting'])
 
+// When each subagent the main loop started was spawned, as `agent.spawn` saw
+// it, until a list of the agents shows it. The module's own: a reload loses
+// only a spawn not listed yet.
+const spawnedAt = new Map<string, number>()
+
+// The subagents of `agents` at work as the pane lists them: what each is
+// called, where it stands, and since when it runs, kept from the last list
+// or taken from its spawn. Written only where it changed.
+const keepSubagents = async ($: EngineInterface, agents: readonly AgentInfo[]) => {
+  const before = await read($, subagents)
+  const fresh: Subagent[] = agents.map(agent => {
+    const startedAt = before.find(one => one.id === agent.id)?.startedAt ?? spawnedAt.get(agent.id)
+    spawnedAt.delete(agent.id)
+
+    return {
+      id: agent.id,
+      label: agent.description.trim() || agent.name || agent.type,
+      status: agent.status,
+      ...(startedAt === undefined ? {} : { startedAt }),
+    }
+  })
+
+  if (JSON.stringify(before) !== JSON.stringify(fresh)) await update($, subagents, () => fresh)
+}
+
 // How many subagents the main loop started that still work: the model's, not
 // a plugin's, and not idle between turns, as a teammate waiting for a message
-// is. Their results wake Claude again. None where the list cannot be read.
+// is. Their results wake Claude again. The pane keeps the list it read. None
+// where the list cannot be read.
 const runningSubagents = async ($: EngineInterface) => {
   try {
-    const agents = await $.agent.list()
-
-    return agents.filter(
+    const agents = (await $.agent.list()).filter(
       agent => agent.parentId === undefined && agent.spawnedBy === undefined && AT_WORK.has(agent.status),
-    ).length
+    )
+    await keepSubagents($, agents)
+
+    return agents.length
   } catch {
     return 0
   }
+}
+
+// The subagents shown listed again, where any are: one may have ended.
+const relistSubagents = async ($: EngineInterface) => {
+  if ((await read($, subagents)).length > 0) await runningSubagents($)
+}
+
+// Whether the pane was last drawn with room for the subagents' rows, and
+// with the summary beside the weather, where a turn may be picked from the
+// list; the module's own, set as it draws.
+let isRoomyDrawn = false
+let isWideDrawn = false
+
+// Each minute, as no ticker runs while the summary is off: the subagents
+// shown listed again, and, drawn, their times moved on a minute.
+const minuteSubagents = async ($: EngineInterface) => {
+  await relistSubagents($)
+
+  if (isRoomyDrawn && (await read($, subagents)).some(agent => agent.startedAt !== undefined)) {
+    $.ui.invalidate('ui.render')
+  }
+}
+
+// The subagents' rows the weather shows at most, the rest said in one more:
+// a workflow's dozens would push the recent turns out of the column.
+const MAX_SUBAGENT_ROWS = 5
+
+// "fix the tests · running · 3m": a subagent's row in `chars`, its words cut
+// to leave room for where it stands and, where its spawn was seen, how long
+// it has run, to the minute.
+const subagentLine = (agent: Subagent, now: number, chars: number) => {
+  const tail = ` · ${agent.status}${agent.startedAt === undefined ? '' : ` · ${formatLeft(Math.max(0, now - agent.startedAt))}`}`
+  const label = clip(agent.label.replace(/\s+/g, ' '), Math.max(8, chars - tail.length)).replace(/\s+…$/, '…')
+
+  return { label, tail }
 }
 
 // While the turn waits on its subagents, the tick counts them again each
@@ -1739,11 +2139,14 @@ const ended = (turn: Thinking, durationMs: number, isAborted: boolean): Thinking
 // result or another background message began: no longer waiting, reopened
 // if it had ended, its recap no longer owed.
 const goOn = async ($: EngineInterface, turn: Thinking, turnId: string) => {
-  await updateTurn($, turn.turnId, one => {
+  const reopened = await updateTurn($, turn.turnId, one => {
     const { durationMs: _, isAborted: __, paused: ___, ...rest } = one
 
     return { ...rest, lastTurnId: turnId }
   })
+
+  // Its row in the recent turns runs again too.
+  if (reopened !== null && isTurnOf(reopened, turnId)) await recordTurn($, reopened).catch(() => {})
 
   if (owedRecap === turn.turnId) owedRecap = null
   if (retried.turnId === turn.turnId) retried = { turnId: '', count: 0 }
@@ -1762,6 +2165,9 @@ const checkWait = async ($: EngineInterface) => {
 
   if (turn?.paused === undefined || turn.durationMs !== undefined) {
     drainedAt = null
+    // While the turn runs, the subagents the pane shows are listed again at
+    // the same pace.
+    await relistSubagents($)
 
     return
   }
@@ -2047,8 +2453,11 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
   const after = await read($, thinking)
 
   // The new update goes on top of the turn shown: someone scrolled down
-  // keeps the lines they were reading where they were.
-  if (told !== null && after?.turnId === turn.turnId) {
+  // keeps the lines they were reading where they were. Beside the weather
+  // a turn picked from the list may be shown instead, its lines unmoved.
+  const picked = isWideDrawn ? await read($, pickedTurn) : null
+
+  if (told !== null && after?.turnId === turn.turnId && (picked === null || picked === turn.turnId)) {
     const added = partsOf(told).length
     await update($, summaryPlace, place =>
       place.line > 0 || place.row > 0 ? { line: place.line + added, row: place.row } : place,
@@ -2059,7 +2468,7 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
   // turn having begun meanwhile or not.
   if (entry !== null) {
     if (after?.turnId === turn.turnId) {
-      await logTurn($, after)
+      await keepTurn($, after)
     } else if (previousTurn?.turnId === turn.turnId) {
       // The next turn began from this one as it stood: with this update in
       // it already, when that came after the update was kept.
@@ -2069,7 +2478,7 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
 
       if (!isKept) previousTurn = settle(previousTurn)
 
-      await logTurn($, previousTurn)
+      await keepTurn($, previousTurn)
     }
   }
 
@@ -2087,7 +2496,7 @@ const endTurn = async ($: EngineInterface, turnId: string) => {
   const current = await read($, thinking)
   const turn = current?.turnId === turnId ? current : previousTurn?.turnId === turnId ? previousTurn : null
 
-  if (turn !== null) await logTurn($, turn)
+  if (turn !== null) await keepTurn($, turn)
 
   await askSummary($, true)
 }
@@ -2260,10 +2669,11 @@ export const register: Register = (on, options) => {
     // alone. A mod loaded mid-session counts the next turn's growth from this
     // reading, not from zero. What the engine and the store hold is read all
     // at once.
-    const [usage, compactAt, isClosed] = await Promise.all([
+    const [usage, breakdown, isClosed] = await Promise.all([
       $.session.usage(),
-      readAutoCompact($),
+      readBreakdown($),
       $.store.get(STORED_CLOSED).then(value => value === true),
+      readFacts($),
     ])
     const { tokens, window, percent } = usage.context
     const now: Reading = { tokens, window, percent }
@@ -2285,7 +2695,7 @@ export const register: Register = (on, options) => {
     }
 
     await update($, cost, () => usage.cost?.usd ?? null)
-    await update($, autoCompact, () => compactAt)
+    await keepBreakdown($, breakdown)
 
     // What the session spent so far, and its part of each window.
     const spentSoFar = usage.cost?.usd
@@ -2308,7 +2718,10 @@ export const register: Register = (on, options) => {
       void recount($).catch(() => {})
       void recountShares($).catch(() => {})
       void showStatus($).catch(() => {})
+      void minuteSubagents($).catch(() => {})
     })
+    // Subagents at work since before a reload show at once.
+    void runningSubagents($).catch(() => {})
     await $.command.register({
       name: COMMAND,
       description: 'Open the Session Weather pane',
@@ -2414,6 +2827,8 @@ export const register: Register = (on, options) => {
       }
 
       const isOn = await restore($)
+      // The prompt the turn began with counts toward the session's.
+      await recountTurns($)
 
       if (isResumed && current !== null) {
         // A subagent's result, or another background message: the updates
@@ -2435,11 +2850,15 @@ export const register: Register = (on, options) => {
         if (previousTurn !== null && previousTurn !== current) {
           if (isOn) owedRecap = previousTurn.turnId
 
-          void logTurn($, previousTurn)
+          void keepTurn($, previousTurn)
         }
 
         const startedAt = await $.clock.now()
         await update($, thinking, () => newTurn(e.turnId, clip(e.text.trim(), MAX_REQUEST_CHARS), startedAt))
+        // It heads the recent turns, picked: beside the weather its updates
+        // show, whichever turn was picked before.
+        await openRecord($, e.turnId, startedAt, fill)
+        await update($, pickedTurn, () => null)
       }
 
       if (isOn) {
@@ -2512,6 +2931,7 @@ export const register: Register = (on, options) => {
   // words, for the summary to read what Claude did beside what it thought.
   on('tool.call', async ($, e, next) => {
     await update($, turnTools, n => n + 1)
+    await countTool($)
 
     if (e.agentId === undefined) {
       await keepMark($, 'actions', actionOf(e.tool, e as unknown as Readonly<Record<string, unknown>>))
@@ -2546,6 +2966,9 @@ export const register: Register = (on, options) => {
       const turnId = turn !== null && isTurnOf(turn, e.turnId) ? turn.turnId : e.turnId
       const isWaiting = turn !== null && isTurnOf(turn, e.turnId) && turn.paused !== undefined
 
+      // Its row in the recent turns ends, or waits, at once.
+      if (turn !== null && isTurnOf(turn, e.turnId)) await recordTurn($, turn).catch(() => {})
+
       // Its last word is owed while the summary runs, even once the next
       // prompt's turn has begun; a turn that ended with it off owes none.
       if (!isWaiting) {
@@ -2569,10 +2992,35 @@ export const register: Register = (on, options) => {
       // gap: no tick follows the end. A turn that waits takes an update of
       // where it stands.
       $.clock.after(0, () => void endTurn($, turnId).catch(() => {}))
+
+      return next(e)
     }
 
-    return next(e)
+    // A subagent's turn ended, and with its last the subagent: the rows of
+    // those at work are listed again once the engine has taken it.
+    const done = await next(e)
+    await relistSubagents($).catch(() => {})
+
+    return done
   })
+
+  // A subagent the main loop starts: when, for its row's time, and the list
+  // read again so its row shows at once. The spawn stands whatever this
+  // bookkeeping does, and a failed hook's spawn is not asked again.
+  on('agent.spawn', async ($, e, next) => {
+    const done = await next(e)
+
+    try {
+      if (e.parentAgentId === undefined && done.agentId !== undefined) {
+        spawnedAt.set(done.agentId, await $.clock.now())
+        await runningSubagents($)
+      }
+    } catch {
+      // Its row waits for the next list.
+    }
+
+    return done
+  }).catch(($, e, next) => next(e))
 
   // The model reading the log, through the tool registered at the start.
   on('tool.call', { tool: LOG_TOOL_NAME }, async ($, e) => {
@@ -2597,15 +3045,20 @@ export const register: Register = (on, options) => {
       const now: Reading = { tokens, window, percent, ...(isCompacted ? { isCompacted: true as const } : {}) }
       await update($, reading, () => now)
 
+      if (tokens !== undefined) await measureRecord($, tokens)
+
       // Where the engine compacts on its own, read again at each turn's end
       // (a switch of model changes the window, /config the setting; the read
-      // is local) and before the toast, which warns on the way there.
-      let compactAt = await read($, autoCompact)
+      // is local) and before the toast, which warns on the way there. What
+      // fills the context and the model come with it, and a compaction,
+      // having emptied what filled it, has it read again at once.
+      const [kept, filled] = await Promise.all([read($, autoCompact), read($, fills)])
+      let compactAt = kept
 
-      if (!isMidTurn || window !== before?.window || compactAt === null) {
-        const fresh = await readAutoCompact($)
-        await update($, autoCompact, () => fresh)
-        compactAt = fresh
+      if (!isMidTurn || window !== before?.window || compactAt === null || filled === null) {
+        const fresh = await readBreakdown($)
+        await keepBreakdown($, fresh)
+        compactAt = fresh.compactAt
       }
 
       if (tokens !== undefined && percent !== undefined) {
@@ -2676,6 +3129,13 @@ export const register: Register = (on, options) => {
       await update($, lastTurn, () => null)
       await update($, turnTools, () => 0)
       await update($, thinking, () => null)
+      await update($, fills, () => null)
+      await update($, facts, () => null)
+      await update($, compactions, () => null)
+      await update($, subagents, () => [])
+      spawnedAt.clear()
+      await update($, recentTurns, () => [])
+      await update($, pickedTurn, () => null)
       await showStatus($).catch(() => {})
       await toNewest($)
       isOwed = false
@@ -2688,11 +3148,17 @@ export const register: Register = (on, options) => {
       costCounted = null
       // The host wipes the pane's values once the session has ended: the
       // person's choices and the limits come back from the store after it,
-      // the parts are counted for the next session, and the status line
-      // reads what is left.
+      // the parts are counted for the next session, the new session's facts
+      // and breakdown are read, and the status line reads what is left.
       $.clock.after(SECOND, () =>
         void restore($)
-          .then(() => Promise.all([recountShares($), showStatus($)]))
+          .then(() =>
+            Promise.all([
+              recountShares($),
+              showStatus($),
+              readFacts($).then(async () => keepBreakdown($, await readBreakdown($))),
+            ]),
+          )
           .catch(() => {}),
       )
     }
@@ -2712,8 +3178,12 @@ export const register: Register = (on, options) => {
       return done
     }
 
-    // The compaction stands whatever this bookkeeping does.
+    // The compaction stands whatever this bookkeeping does. It counts toward
+    // the session's (one loaded mid-session counts from there), and what
+    // filled the context is read again with the next measurement.
     try {
+      await update($, compactions, one => ({ count: (one?.count ?? 0) + 1, isWhole: one?.isWhole ?? false }))
+      await update($, fills, () => null)
       const { window } = (await $.session.usage()).context
       const drop =
         done.tokensBefore === undefined || done.tokensAfter === undefined
@@ -2791,6 +3261,28 @@ export const register: Register = (on, options) => {
       read($, cost),
       read($, isSummaryOn),
     ])
+    // From WIDE_FROM columns the weather says more (`isRoomy`): the pace on
+    // the limits, what fills the context, the session, the subagents at work
+    // and the recent turns. That goes by the width alone, the summary on or
+    // off; the two columns need the summary on as well. What only a roomy
+    // pane shows is read only there: a narrower one redraws for none of it.
+    const isRoomy = e.props.bodyColumns >= WIDE_FROM
+    const isWide = isOn && isRoomy
+    const [filled, known, counted, atWork, recent, picked] = isRoomy
+      ? await Promise.all([
+          read($, fills),
+          read($, facts),
+          read($, compactions),
+          read($, subagents),
+          read($, recentTurns),
+          read($, pickedTurn),
+        ])
+      : ([null, null, null, [] as Subagent[], [] as RecentTurn[], null] as const)
+    isRoomyDrawn = isRoomy
+    isWideDrawn = isWide
+    // The characters a row of the weather holds, what it adds cut to them
+    // rather than wrapped: its column's beside the summary, else the body's.
+    const weatherChars = isWide ? WEATHER_CHARS : widthOf(e.props.bodyColumns, e.surface)
     const hasTurns = lastSamples.length > 0
     // Each window, with this session's part of its share in points.
     const windows = liveWindows(readings, at).map(window => ({
@@ -2810,6 +3302,10 @@ export const register: Register = (on, options) => {
       turn?.cacheRate === undefined ? null : `cache ${Math.round(turn.cacheRate * 100)}%`,
     ].filter((part): part is string => part !== null)
 
+    // Roomy, the session's cost goes on its line: "Fable 5.2 · since 09:12 ·
+    // 23 turns · 2 compactions · $16.17", in as many rows as the column needs.
+    const sessionRows = isRoomy ? packRows(sessionParts(known, counted, spent, at), weatherChars) : []
+
     // The fill: read, unknown after a compaction until the next response, or
     // not yet reported in a session that has not had one. The sky reads how
     // far it has come toward compaction.
@@ -2825,6 +3321,11 @@ export const register: Register = (on, options) => {
           </Text>
           <Text color={sky.color}>{bar(percent)}</Text>
           {compactLine !== null && <Text dimColor>{compactLine}</Text>}
+          {filled?.map((fill, index) => (
+            <Text dimColor wrap="truncate">
+              {clip(fillLine(fill, now.window, index === filled.length - 1), weatherChars)}
+            </Text>
+          ))}
           {turnParts.length > 0 && <Text dimColor>Last turn {turnParts.join(' · ')}</Text>}
         </Box>
       ) : now?.isCompacted || hasTurns ? (
@@ -2844,23 +3345,34 @@ export const register: Register = (on, options) => {
       ? await Promise.all([read($, thinking), read($, summaryCost), read($, isDebugOn), read($, summaryPlace)])
       : ([null, 0, false, { line: 0, row: 0 }] as const)
 
+    // Beside the weather the summary shows the turn picked from the list of
+    // recent turns, the current one unless the person pressed another.
+    const view = isWide ? shownTurnOf(turnNow, picked, recent) : { turn: turnNow, isPast: false }
+    const turnShown = view.turn
+
     // "🧭 Thinking · 1m 46s", the turn's whole length once it ended; "·
-    // waiting for 2 subagents" while their results are still to come.
+    // waiting for 2 subagents" while their results are still to come. A turn
+    // picked from the list says when it began: "🧭 Turn at 14:32 · 2m 14s ·
+    // done".
     const header =
-      turnNow === null
+      turnShown === null
         ? '🧭 Thinking'
         : [
-            '🧭 Thinking',
-            formatDuration(Math.max(0, turnNow.durationMs ?? at - turnNow.startedAt)),
-            ...(turnNow.durationMs !== undefined
-              ? [turnNow.isAborted ? 'interrupted' : 'done']
-              : turnNow.paused !== undefined
-                ? [waitingFor(turnNow.paused.subagents)]
+            view.isPast ? `🧭 Turn at ${formatTime(turnShown.startedAt)}` : '🧭 Thinking',
+            formatDuration(Math.max(0, turnShown.durationMs ?? at - turnShown.startedAt)),
+            ...(turnShown.durationMs !== undefined
+              ? [turnShown.isAborted ? 'interrupted' : 'done']
+              : turnShown.paused !== undefined
+                ? [waitingFor(turnShown.paused.subagents)]
                 : []),
-            ...(turnNow.isSummarizing ? ['summarizing…'] : []),
+            ...(turnShown.isSummarizing ? ['summarizing…'] : []),
           ].join(' · ')
 
-    const status = statusOf(turnNow)
+    const status = view.isPast
+      ? turnShown?.entries.length === 0
+        ? 'No updates on this turn.'
+        : null
+      : statusOf(turnNow)
 
     // A body tall enough pins the weather on top and the summary's cost at
     // the bottom; the turn's updates scroll in the window between, moved by
@@ -2869,7 +3381,6 @@ export const register: Register = (on, options) => {
     // has the summary's whole column but its header and footer.
     const rows = e.props.scroll.bodyRows
     const isPinned = isOn && rows >= MIN_PINNED_ROWS
-    const isWide = isOn && e.props.bodyColumns >= WIDE_FROM
     const weatherWidth = weatherColumns(e.surface)
     // The summary's columns: the body's, less the weather's column and the
     // gap beside it where the two stand side by side.
@@ -2877,7 +3388,7 @@ export const register: Register = (on, options) => {
     // The lines measured in rows at the summary's width, the measure the
     // arrows then step through.
     const width = widthOf(summaryColumns, e.surface)
-    const { lines, ...laid } = layUpdates(turnNow, width, place)
+    const { lines, ...laid } = layUpdates(turnShown, width, place)
     const top = isPinned ? laid.top : 0
     const topLine = laid.rows[top]?.line ?? 0
     const topChar = laid.rows[top]?.start ?? 0
@@ -2959,10 +3470,20 @@ export const register: Register = (on, options) => {
     const canScroll = isPinned && laid.rows.length > 1
     const step = pageStep(rows, isWide ? WIDE_OVERHEAD : PANE_OVERHEAD)
 
-    // The weather: the fill, the limits and the session's cost; a column of
-    // its own when wide.
+    // The weather: the fill, the limits and the session's cost; roomy, the
+    // pace on the limits, what fills the context, the session's line, the
+    // subagents at work and the recent turns too. A column of its own beside
+    // the summary, which, pinned, cuts what runs past the body's height: the
+    // oldest turns go first.
     const weather = (
-      <Box key="weather" flexDirection="column" gap={1} flexShrink={0} {...(isWide ? { width: weatherWidth } : {})}>
+      <Box
+        key="weather"
+        flexDirection="column"
+        gap={1}
+        flexShrink={0}
+        {...(isWide ? { width: weatherWidth } : {})}
+        {...(isWide && isPinned ? { overflow: 'hidden' as const } : {})}
+      >
         {context}
         {windows.length > 0 && (
           <Box flexDirection="column">
@@ -2971,6 +3492,9 @@ export const register: Register = (on, options) => {
               // "5h 30% · this session 8% · reset in 4h 38m", the part in
               // yellow, as its cells are: the last of the bar's filled ones.
               const cells = barParts(window.used, window.mine)
+              // Roomy, the bar marks how much of the window's time has gone,
+              // and says where the share used would stand at the reset.
+              const pace = isRoomy ? paceOf(window.percent, window.elapsed) : null
 
               return (
                 <Box flexDirection="column">
@@ -2980,7 +3504,20 @@ export const register: Register = (on, options) => {
                     {window.mine > 0 && <Text color={MINE}>this session {formatPart(window.mine)}</Text>}
                     {window.left === undefined ? '' : ` · reset in ${formatLeft(window.left)}`}
                   </Text>
-                  {cells.own === '' ? (
+                  {isRoomy && window.elapsed !== undefined ? (
+                    <Text wrap="truncate">
+                      {barRuns(window.used, window.mine, window.elapsed).map(run =>
+                        run.kind === 'mark' ? (
+                          <Text>{run.text}</Text>
+                        ) : run.kind === 'own' ? (
+                          <Text color={MINE}>{run.text}</Text>
+                        ) : (
+                          <Text dimColor>{run.text}</Text>
+                        ),
+                      )}
+                      {pace !== null && <Text dimColor>{` ${pace}`}</Text>}
+                    </Text>
+                  ) : cells.own === '' ? (
                     <Text dimColor>{bar(window.used)}</Text>
                   ) : (
                     <Text>
@@ -2994,7 +3531,65 @@ export const register: Register = (on, options) => {
             })}
           </Box>
         )}
-        {spent !== null && <Text dimColor>Session cost {formatCost(spent)}</Text>}
+        {isRoomy
+          ? sessionRows.length > 0 && (
+              <Box flexDirection="column">
+                {sessionRows.map(row => (
+                  <Text dimColor wrap="truncate">
+                    {row}
+                  </Text>
+                ))}
+              </Box>
+            )
+          : spent !== null && <Text dimColor>Session cost {formatCost(spent)}</Text>}
+        {atWork.length > 0 && (
+          <Box flexDirection="column">
+            <Text dimColor>Subagents at work</Text>
+            {atWork.slice(0, MAX_SUBAGENT_ROWS).map(agent => {
+              const { label, tail } = subagentLine(agent, at, weatherChars)
+
+              return (
+                <Text wrap="truncate">
+                  {label}
+                  <Text dimColor>{tail}</Text>
+                </Text>
+              )
+            })}
+            {atWork.length > MAX_SUBAGENT_ROWS && <Text dimColor>and {atWork.length - MAX_SUBAGENT_ROWS} more</Text>}
+          </Box>
+        )}
+        {recent.length > 0 && (
+          <Box flexDirection="column">
+            <Text dimColor>Recent turns</Text>
+            {[...recent].reverse().map((one, index) => {
+              // Newest first, so that a column too short for them all cuts
+              // the oldest. Beside the summary each is pressed to show its
+              // updates there, the one shown marked ▸; with the summary off
+              // they are figures alone.
+              const text = recentLine(one, index === 0)
+
+              if (!isWide) {
+                return (
+                  <Text dimColor wrap="truncate">
+                    {clip(text, weatherChars)}
+                  </Text>
+                )
+              }
+
+              const isShown = one.turnId === turnShown?.turnId
+
+              return (
+                <Button
+                  key={`turn-${one.turnId}`}
+                  plain
+                  dimColor={!isShown}
+                  label={clip(`${isShown ? '▸ ' : ''}${text}`, weatherChars)}
+                  onPress={() => pickTurn($, one.turnId === turnNow?.turnId ? null : one.turnId).catch(() => {})}
+                />
+              )
+            })}
+          </Box>
+        )}
       </Box>
     )
 
@@ -3019,7 +3614,7 @@ export const register: Register = (on, options) => {
               plain
               dimColor
               label="▲"
-              onPress={() => moveUpdates($, -step, width).catch(() => {})}
+              onPress={() => moveUpdates($, -step, width, isWide).catch(() => {})}
             />
           )}
           {canScroll && (
@@ -3028,7 +3623,7 @@ export const register: Register = (on, options) => {
               plain
               dimColor
               label="▼"
-              onPress={() => moveUpdates($, step, width).catch(() => {})}
+              onPress={() => moveUpdates($, step, width, isWide).catch(() => {})}
             />
           )}
         </Box>

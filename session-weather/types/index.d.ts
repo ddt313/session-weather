@@ -22,6 +22,27 @@ export type LastTurn = { durationMs: number; tools: number; cacheRate?: number; 
 // When the engine compacts on its own: at `threshold` tokens, or not at all.
 export type AutoCompact = { threshold?: number; isEnabled: boolean }
 
+// A row of what fills the context, as the engine's breakdown estimates it:
+// its name as /context prints it, and its tokens.
+export type Fill = { name: string; tokens: number }
+
+// The session as the wide layout's line tells it: when it began (ms since
+// the epoch, a /clear starting it over), how many prompts the person has sent
+// it as the engine counts them, and the main loop's model as the context
+// breakdown names it; each one absent until read.
+export type Facts = { startedAt: number; turns?: number; model?: string }
+
+// A subagent the main loop started, at work: its id, the words its row
+// gives it (the task's description, else its name or type), where its loop
+// stands (`pending`, `running` or `waiting`), and when it was spawned (ms
+// since the epoch), where the mod saw it spawn.
+export type Subagent = { id: string; label: string; status: string; startedAt?: number }
+
+// The compactions of the session the mod has seen: how many, and whether it
+// has seen the session from its first prompt (`isWhole`), or only since it
+// loaded into one under way, which may have had more before.
+export type Compactions = { count: number; isWhole: boolean }
+
 // One update Haiku gave on a turn's thinking, written at `at` (ms since the
 // epoch): what Claude is at, the decisions it settled on since the update
 // before, what it takes as true without having checked it, and what it says
@@ -79,6 +100,27 @@ export type Thinking = {
   waitingFor?: string
 }
 
+// One of the person's recent turns, as the wide layout lists them: the turn
+// a prompt of theirs began, with every turn that went on with it, grouped as
+// `Thinking` groups them, `turnId` the first one's id. When it began, how
+// long it ran once it ended, whether it was interrupted or waits on its
+// subagents; the context's fill where it began (absent where not known, as
+// right after a compaction) and as last measured while it was the newest;
+// the tool calls made while it ran, its subagents' included; and its
+// summary's updates, the newest of them as the pane draws them. A change
+// that values kept before it no longer fit bumps the atom's shape tag.
+export type RecentTurn = {
+  turnId: string
+  startedAt: number
+  durationMs?: number
+  isAborted?: true
+  isWaiting?: true
+  fromTokens?: number
+  toTokens?: number
+  tools: number
+  entries: ThinkingEntry[]
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'session-weather': {
@@ -95,15 +137,35 @@ declare module 'claude-code' {
       shares: Share[]
       // Tool calls since the main loop's turn began.
       turnTools: number
+      // The main loop's subagents at work as last listed, oldest first; empty
+      // while none is, or until listed.
+      subagents: Subagent[]
       lastTurn: LastTurn | null
       // Null until read, or where the engine gave no breakdown.
       autoCompact: AutoCompact | null
+      // What fills the context, largest first, the rest folded into the last
+      // row; read with `autoCompact`. Null until read, where the engine gave
+      // no breakdown, or after a compaction until read again.
+      fills: Fill[] | null
       // The session's cost in US dollars at API prices; null where the host
       // keeps no ledger.
       cost: number | null
+      // Null until the session starts while the mod is loaded, and from a
+      // /clear until read again.
+      facts: Facts | null
+      // Null until the session starts while the mod is loaded, and from a
+      // /clear until counted again.
+      compactions: Compactions | null
       // Null until the main loop starts a turn while the mod is loaded.
       // Shaped: a turn an earlier version kept in another shape is declined.
       thinking: Shaped<Thinking | null>
+      // The person's last few turns, oldest first, the newest the one under
+      // way or last ended; from the first the mod saw begin, and from a
+      // /clear on. Shaped as `thinking` is.
+      recentTurns: Shaped<RecentTurn[]>
+      // The turn of `recentTurns` whose updates the wide layout shows, by its
+      // id; null for the newest, which a new prompt picks again.
+      pickedTurn: string | null
       // Whether the thinking summary runs; the person turns it off and on.
       isSummaryOn: boolean
       // What the summary's Haiku requests cost this session, in US dollars:

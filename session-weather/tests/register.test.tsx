@@ -68,9 +68,10 @@ const UNASKED_FLOOR = 144
 // stores; `stored` is what earlier sessions left in the mod's store, `files`
 // what the disk holds (`written` when each of them was written, the test's
 // start unless given), `env` the variables the process has (a home directory
-// unless given), `startedAt` when the session began, `columns` how wide the
-// terminal is (wide enough to place the pane unless given), and `beforeWrite`
-// runs as a file is about to be written.
+// unless given), `startedAt` when the session began, `turns` how many prompts
+// it has had (none unless given), `columns` how wide the terminal is (wide
+// enough to place the pane unless given), and `beforeWrite` runs as a file is
+// about to be written.
 const engine = (
   on: On,
   usage: {
@@ -84,10 +85,14 @@ const engine = (
     written?: Record<string, number>
     env?: Record<string, string>
     startedAt?: number
+    turns?: number
     columns?: number
     beforeWrite?: (path: string) => Promise<unknown>
   } = {},
 ) => {
+  // The prompts the session has had, as the engine counts them; a test moves
+  // it on.
+  let turns = usage.turns ?? 0
   const opens: unknown[] = []
   const toasts: string[] = []
   // The status lines the mod set, in order, undefined where it removed its
@@ -117,7 +122,15 @@ const engine = (
   const replies: unknown[] = []
   // The session's subagents, as `$.agent.list()` gives them; a test moves
   // their status along.
-  const agents: { id: string; description: string; type: string; status: string }[] = []
+  const agents: {
+    id: string
+    description: string
+    type: string
+    status: string
+    name?: string
+    parentId?: string
+    spawnedBy?: string
+  }[] = []
   let redraws = 0
   const { tokens, percent, rateLimits = [], stored = {}, cost } = usage
   const clock = mock.clock(on, { now: NOW })
@@ -220,6 +233,7 @@ const engine = (
   mock.env(on, usage.env ?? { HOME: '/home/me' })
   on('session.id', () => ({ value: sessionId }))
   on('session.root', () => ({ value: '/work/app' }))
+  on('session.turns', () => ({ value: turns }))
   on('fs.exists', ($, e) => ({ value: files.has(key(e.path)) }))
   on('fs.read', ($, e) => ({ value: files.get(key(e.path)) ?? '' }))
   on('fs.write', async ($, e) => {
@@ -302,6 +316,11 @@ const engine = (
     useSession: (id: string) => {
       sessionId = id
     },
+    // The person sends the session another prompt, or a /clear starts the
+    // count over.
+    setTurns: (count: number) => {
+      turns = count
+    },
   }
 }
 
@@ -348,9 +367,10 @@ const allTexts = async (
 // Where the thinking summary begins: its header, or the line saying it is off.
 const SUMMARY_TOP = (text: string) => text.startsWith('🧭')
 
-// The weather: what the pane shows above the thinking summary.
-const pane = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop') => {
-  const texts = await allTexts($, surface)
+// The weather: what the pane shows above the thinking summary, or beside it,
+// in a pane `columns` wide when given.
+const pane = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop', columns?: number) => {
+  const texts = await allTexts($, surface, columns)
   const top = texts.findIndex(SUMMARY_TOP)
 
   return top === -1 ? texts : texts.slice(0, top)
@@ -390,6 +410,23 @@ const layout = async ($: Test$, surface: 'desktop' | 'terminal', columns: number
     weather: weather?.text,
     summary: summary?.text,
   }
+}
+
+// The lines of `part` that `whole` lacks, each looked for after the one
+// before it was found: none where `whole` holds them all in that order, with
+// any others between them.
+const missingFrom = (part: readonly string[], whole: readonly string[]) => {
+  let from = 0
+
+  return part.filter(line => {
+    const found = whole.indexOf(line, from)
+
+    if (found === -1) return true
+
+    from = found + 1
+
+    return false
+  })
 }
 
 // The pane minimized to a widget on the desktop app, anchored in the chat's
@@ -621,13 +658,16 @@ const others = { files: { [OTHER]: spendFile(OTHER_SPANS, 69) }, written: { [OTH
 const spent = (usd: number) => ({ context: { window: 200_000 }, rateLimits: LIVE, cost: { usd }, changed: ['cost' as const] })
 
 // The pane's limits under "Usage limits": each Text's shown text, with its
-// color where it has one, or [dim].
-const limitsShown = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop') => {
-  const ui = await mount($, surface)
+// color where it has one, or [dim]; in a pane `columns` wide when given.
+const limitsShown = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop', columns?: number) => {
+  const ui = await mount($, surface, columns)
   const texts = (await ui.findAll({ type: 'Text' })) as unknown as { text: string; props: { color?: string; dimColor?: boolean } }[]
   await ui.unmount()
   const top = texts.findIndex(one => one.text === 'Usage limits')
-  const end = texts.findIndex(one => one.text.startsWith('Session cost') || SUMMARY_TOP(one.text))
+  // A window's line, its part, its bar and the bar's runs, until what comes
+  // after the limits.
+  const isLimit = (text: string) => /^(?:5h |Week |this session|[█░│]| [~>])/.test(text)
+  const end = texts.findIndex((one, at) => at > top && !isLimit(one.text))
 
   return texts
     .slice(top + 1, end === -1 ? undefined : end)
@@ -1597,8 +1637,11 @@ test('from WIDE_FROM columns the weather stands in a column of its own, the summ
     expect(wide.summary).toContain('Summary cost $0.002 - Haiku 5.5')
   }
 
-  // Nothing is lost or added on the way: the same lines, in the same order.
-  expect(await allTexts($, 'desktop', WIDE_FROM)).toEqual(await allTexts($, 'desktop', WIDE_FROM - 1))
+  // Nothing is lost on the way: each line one column shows stands beside the
+  // weather in the same order, but the limits' bars, which gain their pace.
+  const isBar = (text: string) => /^[█░]/.test(text)
+  const narrow = (await allTexts($, 'desktop', WIDE_FROM - 1)).filter(text => !isBar(text))
+  expect(missingFrom(narrow, await allTexts($, 'desktop', WIDE_FROM))).toEqual([])
 })
 
 test('beside the weather the rule spans the summary, and a click moves half its taller window', async ($, on) => {
@@ -1649,6 +1692,501 @@ test('with the summary off the weather keeps one column at any width', async ($,
     weather: expect.stringContaining('Week 25% · reset in 2d 5h'),
     summary: undefined,
   })
+})
+
+// The windows the wide layout's additions were asked from: the 5-hour window
+// 11% used with 2h 22m left, 53% of its time gone; the week 75% used with
+// 18h 52m left, 89% of it gone.
+const PACED = [
+  { kind: 'five_hour', percentUsed: 11, resetsAt: at(2 * HOUR + 22 * MINUTE) },
+  { kind: 'seven_day', percentUsed: 75, resetsAt: at(18 * HOUR + 52 * MINUTE) },
+]
+
+test('from WIDE_FROM columns each limit bar marks the share of its time gone, and says where its share would stand at the reset', async ($, on) => {
+  engine(on, { rateLimits: PACED })
+
+  await $.session.start(start)
+
+  for (const surface of ['desktop', 'terminal'] as const) {
+    // A column short of it: the bars as they were, no mark, no pace.
+    expect(await limitsShown($, surface, WIDE_FROM - 1)).toEqual([
+      '5h 11% · reset in 2h 22m',
+      `${bar(2)} [dim]`,
+      'Week 75% · reset in 18h 52m',
+      `${bar(15)} [dim]`,
+    ])
+
+    // From it: the cell where the time gone falls is │ (the 11th of the 5-hour
+    // bar, the 18th of the week's), and 11% over 53% of the time reads 21% at
+    // the reset, 75% over 89% of it 84%.
+    expect(await limitsShown($, surface, WIDE_FROM)).toEqual([
+      '5h 11% · reset in 2h 22m',
+      `██${'░'.repeat(8)}│${'░'.repeat(9)} ~21% at reset`,
+      '██ [dim]',
+      `${'░'.repeat(8)} [dim]`,
+      '│',
+      `${'░'.repeat(9)} [dim]`,
+      ' ~21% at reset [dim]',
+      'Week 75% · reset in 18h 52m',
+      `${'█'.repeat(15)}░░│░░ ~84% at reset`,
+      `${'█'.repeat(15)} [dim]`,
+      '░░ [dim]',
+      '│',
+      '░░ [dim]',
+      ' ~84% at reset [dim]',
+    ])
+  }
+})
+
+test('early in a window the bar has its mark and no pace; a share on its way past the limit reads >100%', async ($, on) => {
+  // The 5-hour window 4h 30m from its reset, a tenth of its time gone; the
+  // week 60% used half way through.
+  engine(on, {
+    rateLimits: [
+      { kind: 'five_hour', percentUsed: 9, resetsAt: at(4 * HOUR + 30 * MINUTE) },
+      { kind: 'seven_day', percentUsed: 60, resetsAt: at(3 * DAY + 12 * HOUR) },
+    ],
+  })
+
+  await $.session.start(start)
+  expect(await limitsShown($, 'terminal', WIDE_FROM)).toEqual([
+    '5h 9% · reset in 4h 30m',
+    `█│${'░'.repeat(18)}`,
+    '█ [dim]',
+    '│',
+    `${'░'.repeat(18)} [dim]`,
+    'Week 60% · reset in 3d 12h',
+    // The fill runs past the mark: ahead of the window's time.
+    `${'█'.repeat(9)}│██${'░'.repeat(8)} >100% at reset`,
+    `${'█'.repeat(9)} [dim]`,
+    '│',
+    '██ [dim]',
+    `${'░'.repeat(8)} [dim]`,
+    ' >100% at reset [dim]',
+  ])
+})
+
+// A row of the window's breakdown: what it is, its tokens, and its kind.
+const category = (name: string, tokens: number, kind = 'used') => ({
+  name,
+  tokens,
+  color: 'inactive',
+  isDeferred: kind === 'deferred',
+  kind,
+})
+
+// The window's breakdown as the engine estimates it: six rows of content in
+// use, and the rows that are not (tools loaded on demand, the compaction
+// buffer, the free space); the model it was counted for.
+const BREAKDOWN = {
+  autoCompactThreshold: 184_000,
+  isAutoCompactEnabled: true,
+  model: 'claude-fable-5-2',
+  categories: [
+    category('System prompt', 3_200),
+    category('System tools', 17_100),
+    category('MCP tools', 1_400),
+    category('Memory files', 2_400),
+    category('Skills', 900),
+    category('Messages', 64_000),
+    category('MCP tools (deferred)', 30_000, 'deferred'),
+    category('Autocompact buffer', 16_000, 'buffer'),
+    category('Free space', 95_000, 'free'),
+  ],
+}
+
+// "08:00", the host's time at `ms`.
+const clockOf = (ms: number) => `${two(new Date(ms).getHours())}:${two(new Date(ms).getMinutes())}`
+
+// The weather from WIDE_FROM columns down to its session's line: what stands
+// above the subagents at work and the recent turns.
+const sessionShown = async ($: Test$, surface: 'desktop' | 'terminal') => {
+  const texts = await pane($, surface, WIDE_FROM)
+  const end = texts.findIndex(text => text === 'Subagents at work' || text === 'Recent turns')
+
+  return end === -1 ? texts : texts.slice(0, end)
+}
+
+// The session ended, as by a /clear.
+const endSession = async ($: unknown, reason: string) =>
+  ($ as { session: { end: (e: unknown) => Promise<unknown> } }).session.end({
+    reason,
+    sessionId: 'session-1',
+    resume: { id: 'session-1' },
+  })
+
+test('from WIDE_FROM columns what fills the context stands under the auto-compact line, largest first, the rest in one', async ($, on) => {
+  const breakdown = { ...BREAKDOWN }
+  engine(on, { breakdown })
+  on('session.compact', () => ({ messages: SUMMARY, tokensBefore: 180_000, tokensAfter: 20_000 }))
+
+  await $.session.start(start)
+  await $.session.measure(measure(90_000, 45))
+
+  for (const surface of ['desktop', 'terminal'] as const) {
+    // A column short of it, as it was.
+    expect(await pane($, surface, WIDE_FROM - 1)).toEqual([
+      '☁ Cloudy',
+      '45% of context · 90k / 200k',
+      bar(9),
+      'auto-compact at 92% · 184k',
+      'Last turn ▲ +90k',
+    ])
+
+    // From it: the rows in use, never the free space, the buffer or the tools
+    // loaded on demand; past four, the rest in one (MCP tools and Skills);
+    // the rows on the branches of a tree.
+    const shown = await pane($, surface, WIDE_FROM)
+    expect(shown.slice(shown.indexOf('auto-compact at 92% · 184k'), shown.indexOf('Last turn ▲ +90k') + 1)).toEqual([
+      'auto-compact at 92% · 184k',
+      '├ Messages 64k · 32%',
+      '├ System tools 17.1k · 9%',
+      '├ System prompt 3.2k · 2%',
+      '├ Memory files 2.4k · 1%',
+      '└ Other 2.3k · 1%',
+      'Last turn ▲ +90k',
+    ])
+  }
+
+  // A compaction empties what filled it: the next measurement, inside the
+  // next turn, reads it again.
+  await $.session.compact({ trigger: 'manual', messages: SUMMARY })
+  breakdown.categories = [category('System prompt', 3_200), category('Messages', 12_000), category('Free space', 160_000, 'free')]
+  await $.turn.start({ text: 'go on', turnId: 't2' })
+  await $.session.measure(measure(20_000, 10))
+  const after = await pane($, 'desktop', WIDE_FROM)
+  expect(after.slice(after.indexOf('auto-compact at 92% · 184k') + 1, after.indexOf('auto-compact at 92% · 184k') + 3)).toEqual([
+    '├ Messages 12k · 6%',
+    '└ System prompt 3.2k · 2%',
+  ])
+})
+
+test("from WIDE_FROM columns the session cost becomes the session's line: its model, since when, its prompts and compactions", async ($, on) => {
+  const { setTurns } = engine(on, { breakdown: BREAKDOWN, cost: 16.17, startedAt: NOW })
+  on('session.compact', () => ({ messages: SUMMARY, tokensBefore: 180_000, tokensAfter: 20_000 }))
+  const since = `since ${clockOf(NOW)}`
+
+  await $.session.start(start)
+
+  for (const surface of ['desktop', 'terminal'] as const) {
+    // A column short of it, the cost as it was.
+    const narrow = await pane($, surface, WIDE_FROM - 1)
+    expect(narrow.at(-1)).toBe('Session cost $16.17')
+    expect(narrow.some(text => text.includes('Fable'))).toBe(false)
+
+    // From it, no prompt yet: none said.
+    expect((await sessionShown($, surface)).at(-1)).toBe(`Fable 5.2 · ${since} · $16.17`)
+  }
+
+  // 23 prompts and two compactions on, the line takes a second row.
+  setTurns(23)
+  await $.turn.start({ text: 'go on', turnId: 't1' })
+  await $.session.compact({ trigger: 'manual', messages: SUMMARY })
+  await $.session.compact({ trigger: 'auto', messages: SUMMARY })
+
+  for (const surface of ['desktop', 'terminal'] as const) {
+    expect((await sessionShown($, surface)).slice(-2)).toEqual([`Fable 5.2 · ${since} · 23 turns`, '2 compactions · $16.17'])
+    expect((await pane($, surface, WIDE_FROM - 1)).at(-1)).toBe('Session cost $16.17')
+  }
+})
+
+test('a session the mod loads into under way counts its compactions from there, as 1+; after /clear it counts them all', async ($, on) => {
+  const { clock, setTurns, useSession } = engine(on, { breakdown: BREAKDOWN, turns: 5, startedAt: NOW - 3 * DAY })
+  on('session.compact', () => ({ messages: SUMMARY, tokensBefore: 180_000, tokensAfter: 20_000 }))
+  on('session.end', ($$, e) => ({ sessionId: e.sessionId }))
+
+  // Begun three days ago: the day it began, not its time.
+  await $.session.start(start)
+  const began = `since Oct ${new Date(NOW - 3 * DAY).getDate()}`
+  expect((await sessionShown($, 'terminal')).at(-1)).toBe(`Fable 5.2 · ${began} · 5 turns`)
+
+  await $.session.compact({ trigger: 'manual', messages: SUMMARY })
+  expect((await sessionShown($, 'terminal')).slice(-2)).toEqual([`Fable 5.2 · ${began} · 5 turns`, '1+ compactions'])
+
+  // A /clear starts the session over, now: the mod sees it whole.
+  await endSession($, 'clear')
+  useSession('session-2')
+  setTurns(0)
+  await clock.advance(SECOND)
+  await $.session.compact({ trigger: 'manual', messages: SUMMARY })
+  expect((await sessionShown($, 'terminal')).at(-1)).toBe(`Fable 5.2 · ${began} · 1 compaction`)
+})
+
+// What the weather shows under "Subagents at work", in a pane `columns`
+// wide; none where it shows no such section.
+const subagentsShown = async ($: Test$, surface: 'desktop' | 'terminal', columns: number) => {
+  const texts = await pane($, surface, columns)
+  const top = texts.indexOf('Subagents at work')
+  // Each row's own Text, not the dim part inside it.
+  const rows = texts.slice(top + 1).filter(text => !text.startsWith(' · '))
+  const end = rows.findIndex(text => !/ · (?:pending|running|waiting)(?: · |$)/.test(text))
+
+  return top === -1 ? [] : rows.slice(0, end === -1 ? undefined : end)
+}
+
+test('from WIDE_FROM columns the subagents at work show while there are any: each one, where it stands, how long it has run', async ($, on) => {
+  const { agents, clock } = engine(on)
+  on('agent.spawn', ($$, e) => ({ model: 'claude-haiku-5-5', agentId: e.description === 'Find the flaky test' ? 'a1' : 'a2' }))
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+
+  // Spawned by the main loop: its row shows at once. Another plugin's, and a
+  // subagent's own, do not.
+  agents.push(
+    { id: 'a1', description: 'Find the flaky test', type: 'Explore', status: 'running' },
+    { id: 'p1', description: "A plugin's helper", type: 'general-purpose', status: 'running', spawnedBy: 'other' },
+    { id: 'c1', description: "A subagent's own", type: 'Explore', status: 'running', parentId: 'a1' },
+  )
+  await $.agent.spawn({ prompt: 'Find it.', description: 'Find the flaky test' } as never)
+
+  for (const surface of ['desktop', 'terminal'] as const) {
+    expect(await subagentsShown($, surface, WIDE_FROM)).toEqual(['Find the flaky test · running · <1m'])
+    expect((await pane($, surface, WIDE_FROM - 1)).includes('Subagents at work')).toBe(false)
+  }
+
+  // Three minutes on, a second, its description long: cut to leave room for
+  // the rest.
+  await clock.advance(3 * MINUTE)
+  const long = 'Read every file of the hooks module and list each helper that has no comment over it'
+  agents.push({ id: 'a2', description: long, type: 'general-purpose', status: 'pending' })
+  await $.agent.spawn({ prompt: 'Read it.', description: long } as never)
+  expect(await subagentsShown($, 'terminal', WIDE_FROM)).toEqual([
+    'Find the flaky test · running · 3m',
+    'Read every file of the hooks… · pending · <1m',
+  ])
+
+  // The first ends with its last turn: its row goes; the last to end takes
+  // the section with it.
+  agents[0]!.status = 'completed'
+  await $.turn.complete(turnDone({ agentId: 'a1', durationMs: 200_000 }) as never)
+  expect(await subagentsShown($, 'terminal', WIDE_FROM)).toEqual(['Read every file of the hooks… · pending · <1m'])
+
+  agents[3]!.status = 'completed'
+  await $.turn.complete(turnDone({ agentId: 'a2', durationMs: 5_000 }) as never)
+  expect((await pane($, 'terminal', WIDE_FROM)).includes('Subagents at work')).toBe(false)
+
+  // A workflow's many, listed as one more starts: five rows, the rest in one.
+  for (let at = 1; at <= 8; at += 1) {
+    agents.push({ id: `w${at}`, description: `Step ${at}`, type: 'general-purpose', status: 'running' })
+  }
+  await $.agent.spawn({ prompt: 'Run it.', description: 'Step 9' } as never)
+  const shown = await pane($, 'terminal', WIDE_FROM)
+  const rows = shown.slice(shown.indexOf('Subagents at work') + 1, shown.indexOf('Recent turns'))
+  expect(rows.filter(text => !text.startsWith(' · '))).toEqual([
+    'Step 1 · running',
+    'Step 2 · running',
+    'Step 3 · running',
+    'Step 4 · running',
+    'Step 5 · running',
+    'and 3 more',
+  ])
+})
+
+test('drawn wide and idle, the pane redraws no more often than before', async ($, on) => {
+  const { clock, redraws } = engine(on, {
+    breakdown: BREAKDOWN,
+    rateLimits: [{ kind: 'seven_day', percentUsed: 40, resetsAt: at(2 * DAY + 5 * HOUR + 30 * MINUTE) }],
+  })
+
+  await $.session.start(start)
+  await allTexts($, 'desktop', WIDE_FROM)
+  await clock.advance(MINUTE)
+  const after = redraws()
+
+  await clock.advance(5 * MINUTE)
+  expect(redraws()).toBe(after)
+})
+
+// The recent turns' rows, newest first, as the Buttons of a pane `columns`
+// wide label them.
+const turnRows = async ($: Test$, surface: 'desktop' | 'terminal', columns = WIDE_FROM) => {
+  const ui = await mount($, surface, columns)
+  const labels = (await ui.findAll({ type: 'Button' })).map(one => one.text)
+  await ui.unmount()
+
+  return labels.filter(text => /^(?:▸ )?\d\d:\d\d · /.test(text))
+}
+
+test('from WIDE_FROM columns the recent turns are listed, newest first: when each began, how long it ran, what it added, its tool calls', async ($, on) => {
+  const { clock } = engine(on)
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  for (const command of ['ls', 'pwd', 'git status']) {
+    await $.tool.call({ tool: 'Bash', command })
+  }
+
+  // Under way: it runs, the fill measured so far its growth.
+  await $.session.measure(measure(60_000, 30))
+  expect(await turnRows($, 'terminal')).toEqual([`▸ ${clockOf(NOW)} · running · ▲ +60k · 3 tools`])
+
+  await $.turn.complete(turnDone() as never)
+  await $.session.measure(measure(90_000, 45))
+  await clock.advance(5 * MINUTE)
+  await $.turn.start({ text: 'and this', turnId: 't2' })
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  await $.turn.complete(turnDone({ turnId: 't2', durationMs: 9_000, isAborted: true }) as never)
+  await $.session.measure(measure(97_000, 49))
+
+  for (const surface of ['desktop', 'terminal'] as const) {
+    expect(await turnRows($, surface)).toEqual([
+      `▸ ${clockOf(NOW + 5 * MINUTE)} · 9s · ▲ +7k · 1 tool · interrupted`,
+      `${clockOf(NOW)} · 2m 14s · ▲ +90k · 3 tools`,
+    ])
+    // A column short of it, no list.
+    expect(await turnRows($, surface, WIDE_FROM - 1)).toEqual([])
+    expect((await pane($, surface, WIDE_FROM - 1)).includes('Recent turns')).toBe(false)
+  }
+
+  // With the summary off there is nothing beside the weather to show a turn
+  // in: the rows are figures alone, unmarked, as wide as the body.
+  await press($, 'summary-toggle')
+  const shown = await pane($, 'terminal', WIDE_FROM)
+  expect(shown.slice(shown.indexOf('Recent turns'))).toEqual([
+    'Recent turns',
+    `${clockOf(NOW + 5 * MINUTE)} · 9s · ▲ +7k · 1 tool · interrupted`,
+    `${clockOf(NOW)} · 2m 14s · ▲ +90k · 3 tools`,
+  ])
+  expect(await turnRows($, 'terminal')).toEqual([])
+})
+
+test('a recent turn pressed shows its updates beside the weather; a new prompt shows its own again', async ($, on) => {
+  const { replies, steps, clock } = engine(on)
+  replies.push(answer('GIST: Một.'), answer('GIST: Hai.'))
+
+  await $.session.start(start)
+  await oneTurn($, steps, clock, 't1', 'fix it')
+  await clock.advance(MINUTE)
+  await oneTurn($, steps, clock, 't2', 'and this')
+  const [first, second] = [clockOf(NOW), clockOf(NOW + MINUTE + SECOND)]
+
+  // The newest is shown, marked.
+  expect(await turnRows($, 'desktop')).toEqual([`▸ ${second} · 2s · 0 tools`, `${first} · 2s · 0 tools`])
+  expect(await thoughts($, 'desktop', WIDE_FROM)).toEqual([
+    '🧭 Thinking · 2s · done',
+    '1s · Hai.',
+    'Summary cost $0.004 - Haiku 5.5',
+  ])
+
+  // The one before, pressed: its updates, the turn said by when it began.
+  await press($, 'turn-t1', WIDE_FROM)
+  expect(await turnRows($, 'desktop')).toEqual([`${second} · 2s · 0 tools`, `▸ ${first} · 2s · 0 tools`])
+  expect(await thoughts($, 'desktop', WIDE_FROM)).toEqual([
+    `🧭 Turn at ${first} · 2s · done`,
+    '1s · Một.',
+    'Summary cost $0.004 - Haiku 5.5',
+  ])
+  // In one column the current turn shows, as it always has.
+  expect((await thoughts($, 'desktop'))[1]).toBe('1s · Hai.')
+
+  // The newest pressed again: back to it.
+  await press($, 'turn-t2', WIDE_FROM)
+  expect((await thoughts($, 'desktop', WIDE_FROM))[1]).toBe('1s · Hai.')
+
+  // An earlier turn picked, the next prompt shows its own turn.
+  await press($, 'turn-t1', WIDE_FROM)
+  await $.turn.start({ text: 'next', turnId: 't3' })
+  expect(await thoughts($, 'desktop', WIDE_FROM)).toEqual([
+    '🧭 Thinking · 0s',
+    'No thinking notes yet.',
+    'Summary cost $0.004 - Haiku 5.5',
+  ])
+  expect((await turnRows($, 'desktop'))[0]).toBe(`▸ ${second} · running · 0 tools`)
+})
+
+test("a hand-back goes on in its turn's row; the list keeps the last eight turns, and a /clear empties it", async ($, on) => {
+  const { agents, clock } = engine(on)
+  on('session.end', ($$, e) => ({ sessionId: e.sessionId }))
+
+  await $.session.start(start)
+  await $.prompt.submit(submit('review it'))
+  await $.turn.start({ text: 'review it', turnId: 't1' })
+  agents.push(subagent('a1'))
+  await $.turn.complete(turnDone({ durationMs: 5_000 }) as never)
+  await clock.settle()
+  expect(await turnRows($, 'terminal')).toEqual([`▸ ${clockOf(NOW)} · waiting · 0 tools`])
+
+  // Its subagent hands back half a minute on: the same row runs again, then
+  // ends, the whole of it from the person's prompt.
+  await clock.advance(30 * SECOND)
+  agents[0]!.status = 'completed'
+  await resume($, handBack('a1'), 't2')
+  expect(await turnRows($, 'terminal')).toEqual([`▸ ${clockOf(NOW)} · running · 0 tools`])
+  await $.turn.complete(turnDone({ turnId: 't2', durationMs: 1_000 }) as never)
+  await clock.settle()
+  expect(await turnRows($, 'terminal')).toEqual([`▸ ${clockOf(NOW)} · 30s · 0 tools`])
+
+  // Eight more prompts: the first turn goes from the list.
+  for (let at = 1; at <= 8; at += 1) {
+    await $.turn.start({ text: `prompt ${at}`, turnId: `u${at}` })
+    await $.turn.complete(turnDone({ turnId: `u${at}`, durationMs: 1_000 }) as never)
+  }
+
+  const rows = await turnRows($, 'terminal')
+  expect(rows.length).toBe(8)
+  expect(rows.some(row => row.includes('30s'))).toBe(false)
+
+  // A /clear starts another conversation: its turns are listed from there.
+  await endSession($, 'clear')
+  expect(await turnRows($, 'terminal')).toEqual([])
+  expect((await pane($, 'terminal', WIDE_FROM)).includes('Recent turns')).toBe(false)
+})
+
+test('under WIDE_FROM columns, in a widget and on the status line, nothing of the wide layout shows', async ($, on) => {
+  // Everything the wide layout's additions read is there: the breakdown and
+  // its model, prompts and a compaction, a subagent at work, recent turns,
+  // windows far enough in for their pace.
+  const { agents, clock, status, steps } = engine(on, {
+    breakdown: BREAKDOWN,
+    rateLimits: PACED,
+    cost: 1.234,
+    turns: 3,
+    startedAt: NOW,
+    columns: 120,
+  })
+  on('agent.spawn', () => ({ model: 'claude-haiku-5-5', agentId: 'a1' }))
+  on('session.compact', () => ({ messages: SUMMARY, tokensBefore: 180_000, tokensAfter: 20_000 }))
+
+  await $.session.start(start)
+  await oneTurn($, steps, clock, 't0', 'first')
+  await $.session.compact({ trigger: 'manual', messages: SUMMARY })
+  await $.session.measure(measure(90_000, 45))
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  agents.push({ id: 'a1', description: 'Find it', type: 'Explore', status: 'running' })
+  await $.agent.spawn({ prompt: 'Find it.', description: 'Find it' } as never)
+  expect((await pane($, 'terminal', WIDE_FROM)).includes('Subagents at work')).toBe(true)
+
+  for (const surface of ['desktop', 'terminal'] as const) {
+    expect(await pane($, surface, WIDE_FROM - 1)).toEqual([
+      '☁ Cloudy',
+      '45% of context · 90k / 200k',
+      bar(9),
+      'auto-compact at 92% · 184k',
+      'Last turn ▼ -160k · 2s · 0 tools · cache 96%',
+      'Usage limits',
+      // Alone in the spend files, the session takes the whole of each.
+      '5h 11% · this session 11% · reset in 2h 22m',
+      'this session 11%',
+      bar(2),
+      '██',
+      '░'.repeat(18),
+      'Week 75% · this session 75% · reset in 18h 52m',
+      'this session 75%',
+      bar(15),
+      '█'.repeat(15),
+      '░'.repeat(5),
+      'Session cost $1.23',
+    ])
+    expect(await turnRows($, surface, WIDE_FROM - 1)).toEqual([])
+  }
+
+  expect(await allTexts($, 'desktop', undefined, WIDGET)).toEqual(['☁ Cloudy · 45%', '5h 11% · Week 75% · $1.23'])
+
+  // On a terminal too narrow to place the pane unasked, the line stands in,
+  // as it reads at the next minute.
+  await clock.advance(MINUTE)
+  expect(status()).toBe('☁ 45% · 5h 11% (2h 21m) · $1.23')
 })
 
 test('minimized to a widget, the pane reads at a glance: the sky, the windows and the cost, the newest update', async ($, on) => {
