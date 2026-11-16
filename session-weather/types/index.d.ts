@@ -10,6 +10,10 @@ export type Sample = { tokens: number; percent: number }
 // one, its share used, and when it resets (ISO 8601).
 export type Limit = { kind: string; percentUsed: number; resetsAt?: string }
 
+// This session's part of what every session spent in one rate-limit window
+// since it began, 0 to 1, by the window's kind.
+export type Share = { kind: string; ratio: number }
+
 // The main loop's last finished turn: how long it ran, how many tool calls
 // it made (its subagents' included), and the share of its input the prompt
 // cache served, when it reported usage.
@@ -37,7 +41,13 @@ export type ThinkingEntry = {
 // of the text Claude wrote to the person.
 export type TurnMark = { at: number; text: string }
 
-// The main loop's current or last turn, as the summary follows it. `notes`
+// The main loop's current or last turn, as the summary follows it: the
+// turn a prompt of the person's own began, and every turn a subagent's
+// result or a background task's notification began after it, which go on
+// with it. `turnId` is the first turn's id, and `lastTurnId` the latest of
+// those that went on with it (absent while there is none). `paused` is set
+// while it waits on subagents it started: since when (its last turn's end),
+// and how many still ran at the last count. `notes`
 // are its thinking blocks that carried text, oldest first; `summarized`
 // counts the ones an update has read, and `seen` the ones Haiku has read,
 // an update or a WAIT; `dropped` counts the notes dropped from the front past
@@ -51,10 +61,12 @@ export type TurnMark = { at: number; text: string }
 // shape tag; an optional field added needs none.
 export type Thinking = {
   turnId: string
+  lastTurnId?: string
   request: string
   startedAt: number
   durationMs?: number
   isAborted?: boolean
+  paused?: { at: number; subagents: number }
   notes: TurnMark[]
   summarized: number
   seen: number
@@ -78,6 +90,9 @@ declare module 'claude-code' {
       // The account's windows as last reported; empty off a subscription,
       // where no window has a reading.
       limits: Limit[]
+      // This session's part of each window's spend, as last counted; empty
+      // off a subscription, or until counted.
+      shares: Share[]
       // Tool calls since the main loop's turn began.
       turnTools: number
       lastTurn: LastTurn | null

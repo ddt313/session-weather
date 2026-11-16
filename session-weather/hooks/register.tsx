@@ -1,12 +1,21 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, ModelCompleteResult, ModelUsage, Register, Timer, UiLogOptions } from 'claude-code'
+import type {
+  AgentStatus,
+  EngineInterface,
+  ModelCompleteResult,
+  ModelUsage,
+  Register,
+  Timer,
+  UiLogOptions,
+} from 'claude-code'
 
-import type { AutoCompact, Limit, Reading, Thinking, ThinkingEntry, TurnMark } from '../types'
+import type { AutoCompact, Limit, Reading, Share, Thinking, ThinkingEntry, TurnMark } from '../types'
 
 const reading = atom({ plugin: 'session-weather', key: 'reading' } as const, null)
 const samples = atom({ plugin: 'session-weather', key: 'samples' } as const, [])
 const delta = atom({ plugin: 'session-weather', key: 'delta' } as const, null)
 const limits = atom({ plugin: 'session-weather', key: 'limits' } as const, [])
+const shares = atom({ plugin: 'session-weather', key: 'shares' } as const, [])
 const turnTools = atom({ plugin: 'session-weather', key: 'turnTools' } as const, 0)
 const lastTurn = atom({ plugin: 'session-weather', key: 'lastTurn' } as const, null)
 const autoCompact = atom({ plugin: 'session-weather', key: 'autoCompact' } as const, null)
@@ -107,12 +116,33 @@ const bar = (percent: number) => {
   return '█'.repeat(filled) + '░'.repeat(20 - filled)
 }
 
+// This session's part of a window, in the theme's yellow.
+const MINE = 'warning'
+
+// A window's bar split where this session's part of the share used (`mine`
+// points of it) begins: the last of the filled cells, rounded as they are,
+// so a part under half a cell has none.
+const barParts = (percent: number, mine: number) => {
+  const filled = Math.max(0, Math.min(20, Math.round(percent / 5)))
+  const own = Math.min(filled, Math.round(Math.max(0, mine) / 5))
+
+  return { others: '█'.repeat(filled - own), own: '█'.repeat(own), free: '░'.repeat(20 - filled) }
+}
+
+// "8%"; "<1%" under half a point.
+const formatPart = (points: number) => (points < 0.5 ? '<1%' : `${Math.round(points)}%`)
+
+const MINUTE = 60_000
+const HOUR = 60 * MINUTE
+const DAY = 24 * HOUR
+
 // The account's windows as the rate-limit notices name them, in the order
-// shown. The engine reports each one's share used and its reset, never a
-// count of tokens.
+// shown, and how long each runs: one began its length before its reset. The
+// engine reports each one's share used and its reset, never a count of
+// tokens.
 const WINDOWS = [
-  { kind: 'five_hour', name: '5h' },
-  { kind: 'seven_day', name: 'Week' },
+  { kind: 'five_hour', name: '5h', length: 5 * HOUR },
+  { kind: 'seven_day', name: 'Week', length: 7 * DAY },
 ] as const
 
 // The last windows any session read, kept across sessions: the engine has
@@ -141,10 +171,6 @@ const storedLimits = async ($: EngineInterface) => {
   return Array.isArray(value) ? value.filter(isLimit) : []
 }
 
-const MINUTE = 60_000
-const HOUR = 60 * MINUTE
-const DAY = 24 * HOUR
-
 // "5d 7h", "4h 38m", "12m", "<1m".
 const formatLeft = (ms: number) => {
   if (ms >= DAY) return `${Math.floor(ms / DAY)}d ${Math.floor((ms % DAY) / HOUR)}h`
@@ -154,10 +180,12 @@ const formatLeft = (ms: number) => {
   return '<1m'
 }
 
-// The windows to show, in order. Past its reset the share read before is
-// stale: that window is left out until the next reading.
+// The windows to show, in order: each one's share used, rounded and as read,
+// the time left until its reset, and when it began, where the reset is
+// known. Past its reset the share read before is stale: that window is left
+// out until the next reading.
 const liveWindows = (readings: readonly Limit[], now: number) =>
-  WINDOWS.flatMap(({ kind, name }) => {
+  WINDOWS.flatMap(({ kind, name, length }) => {
     const limit = readings.find(one => one.kind === kind)
 
     if (limit === undefined) {
@@ -170,7 +198,9 @@ const liveWindows = (readings: readonly Limit[], now: number) =>
       return []
     }
 
-    return [{ name, used: Math.round(limit.percentUsed), left }]
+    const start = left === undefined || Number.isNaN(left) ? undefined : now + left - length
+
+    return [{ kind, name, used: Math.round(limit.percentUsed), percent: limit.percentUsed, left, start }]
   })
 
 // What the countdowns read now; the pane is drawn again only when it
@@ -256,6 +286,11 @@ const MIN_PINNED_ROWS = 24
 
 // "1m 5s" into the turn.
 const intoTurn = (turn: Thinking, at: number) => formatDuration(Math.max(0, at - turn.startedAt))
+
+// Where a turn stands that waits on its subagents: "waiting for 2
+// subagents", or, the last of them ended and its result not yet in,
+// "waiting".
+const waitingFor = (subagents: number) => (subagents > 0 ? `waiting for ${plural(subagents, 'subagent')}` : 'waiting')
 
 // One line of an update: its gist, a decision, an assumption, or its next
 // step.
@@ -446,9 +481,13 @@ const RECAP = [
   'GIST sums up what Claude did and where it stopped, in two or three sentences; DECISION lines give the key decisions of the turn, at most three, reported before or not; ASSUMPTION lines give what Claude still takes on trust, at most two; NEXT says only what Claude left to do.',
 ].join('\n')
 
-// The line that takes WAIT away: the turn's recap, and a request past
-// MAX_SILENCE.
+// The line that takes WAIT away: the turn's recap, a request while Claude
+// waits for its subagents, and one past MAX_SILENCE.
 const NO_WAIT = 'WAIT is not allowed this time.'
+
+// What a request asked while the turn waits on its subagents adds.
+const WAITING =
+  'Claude has ended its turn to wait for subagents it started, which still run; their results will wake it again.'
 
 // The tag each kind of line goes under in a reply, and in the earlier
 // updates a request sends back.
@@ -509,18 +548,29 @@ const noteTag = (text: string, time?: string) => `<note${time === undefined ? ''
 const sizeOfMark = (mark: TurnMark) => mark.text.length
 
 // What one request asks, settled once for the prompt and the debug log: the
-// recap (the turn has ended) or an update, whether WAIT is taken away, the
-// notes it reads (from `from` up to `covered`, with `base` notes dropped
-// from the turn's front by then), and since when it tells what Claude did
-// and wrote.
-type Ask = { isRecap: boolean; isForced: boolean; from: number; covered: number; base: number; since: number }
+// recap (the turn has ended) or an update, whether Claude waits for its
+// subagents, whether WAIT is taken away, the notes it reads (from `from` up
+// to `covered`, with `base` notes dropped from the turn's front by then),
+// and since when it tells what Claude did and wrote.
+type Ask = {
+  isRecap: boolean
+  isWaiting: boolean
+  isForced: boolean
+  from: number
+  covered: number
+  base: number
+  since: number
+}
 
 const askOf = (turn: Thinking, now: number): Ask => {
   const isRecap = turn.durationMs !== undefined
+  // Nothing more comes until a result wakes Claude: no WAIT.
+  const isWaiting = !isRecap && turn.paused !== undefined
 
   return {
     isRecap,
-    isForced: isRecap || isSilent(turn, now),
+    isWaiting,
+    isForced: isRecap || isWaiting || isSilent(turn, now),
     from: isRecap ? 0 : turn.summarized,
     covered: turn.notes.length,
     base: turn.dropped ?? 0,
@@ -593,6 +643,7 @@ const summaryPrompt = (turn: Thinking, ask: Ask) => {
           `<said>\n${said.map(one => one.text).join('\n\n')}\n</said>`,
         ]),
     ...(isRecap ? ['', RECAP] : []),
+    ...(ask.isWaiting ? ['', WAITING] : []),
     ...(ask.isForced ? ['', NO_WAIT] : []),
   ].join('\n')
 }
@@ -726,13 +777,13 @@ const joinPath = (base: string, ...parts: string[]) => {
   return [base.replace(/[\\/]+$/, ''), ...parts].join(separator)
 }
 
-// A file of the session's own in a folder of the mod's, in the configuration
-// directory as Claude Code finds it: the variable that moves it, else
-// `.claude` in the home directory as Node reads it, the profile on Windows
-// (where every process has OS=Windows_NT) and HOME elsewhere: a USERPROFILE
-// that WSL passes on names the Windows profile, or no path of this host.
-// Null where no directory is known.
-const sessionFile = async ($: EngineInterface, folder: readonly string[], sessionId: string) => {
+// A folder of the mod's in the configuration directory as Claude Code finds
+// it: the variable that moves it, else `.claude` in the home directory as
+// Node reads it, the profile on Windows (where every process has
+// OS=Windows_NT) and HOME elsewhere: a USERPROFILE that WSL passes on names
+// the Windows profile, or no path of this host. Null where no directory is
+// known.
+const modFolder = async ($: EngineInterface, folder: readonly string[]) => {
   const moved = present(await $.env.get('CLAUDE_CONFIG_DIR'))
   const isWindows = (await $.env.get('OS')) === 'Windows_NT'
   const home = isWindows
@@ -740,7 +791,18 @@ const sessionFile = async ($: EngineInterface, folder: readonly string[], sessio
     : present(await $.env.get('HOME'))
   const dir = moved ?? (home === undefined ? undefined : joinPath(home, '.claude'))
 
-  return dir === undefined ? null : joinPath(dir, ...folder, `${sessionId.replace(/[^\w.-]/g, '_')}.md`)
+  return dir === undefined ? null : joinPath(dir, ...folder)
+}
+
+// The name of the session's own file of a kind: its id, made safe.
+const fileNameOf = (sessionId: string, extension: string) => `${sessionId.replace(/[^\w.-]/g, '_')}.${extension}`
+
+// A file of the session's own in a folder of the mod's, Markdown unless
+// said; null where no directory is known.
+const sessionFile = async ($: EngineInterface, folder: readonly string[], sessionId: string, extension = 'md') => {
+  const dir = await modFolder($, folder)
+
+  return dir === null ? null : joinPath(dir, fileNameOf(sessionId, extension))
 }
 
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error))
@@ -771,6 +833,196 @@ const rewrite = async (
   const text = (await $.fs.exists(path)) ? await $.fs.read(path) : ''
   await $.fs.write(path, await change(text, sessionId))
 }
+
+// This session's part of each rate-limit window. The engine reports a
+// window's share used for the whole account, and never what used it: each
+// session writes what it spends, at API prices, to a file of its own, and
+// this session's part of a window is its spend there over what every
+// session's file spent there, times the window's share. Spend the files do
+// not see (claude.ai, another computer, a session without the mod) counts
+// toward the sessions here in proportion.
+const SPEND_FOLDER = ['session-weather', 'spend'] as const
+
+// A stretch of spend, spread evenly over it: from and to (ms since the
+// epoch), and US dollars. Each minute a session spent in is one; what it
+// spent before the mod counted it is one over its life until then.
+type Span = [number, number, number]
+
+// A session's spend file: its spans, and the session's cost, as the engine
+// totals it, that they count up to (absent until a total was counted).
+type SpendFile = { seen?: number; spans: Span[] }
+
+// The longest window: a span that ended before it began counts in none, and
+// is dropped as the file is written again.
+const LONGEST = Math.max(...WINDOWS.map(window => window.length))
+
+const isSpan = (value: unknown): value is Span =>
+  Array.isArray(value) &&
+  value.length === 3 &&
+  value.every(n => typeof n === 'number' && Number.isFinite(n)) &&
+  value[0] < value[1] &&
+  value[2] >= 0
+
+// A spend file's text; null for one that holds none, or is not whole yet
+// (its session writing it as it is read).
+const parseSpend = (text: string): SpendFile | null => {
+  try {
+    const value = JSON.parse(text) as { seen?: unknown; spans?: unknown } | null
+
+    if (typeof value !== 'object' || value === null || !Array.isArray(value.spans)) return null
+
+    const { seen } = value
+
+    return {
+      ...(typeof seen === 'number' && Number.isFinite(seen) ? { seen } : {}),
+      spans: value.spans.filter(isSpan),
+    }
+  } catch {
+    return null
+  }
+}
+
+// What the spans spent from `start` on: each one's part that lies past it.
+const spentSince = (spans: readonly Span[], start: number) =>
+  spans.reduce((sum, [from, to, usd]) => (to <= start ? sum : sum + (usd * (to - Math.max(from, start))) / (to - from)), 0)
+
+// Dollars to the millionth, so a file holds no long fractions.
+const toMillionth = (usd: number) => Math.round(usd * 1_000_000) / 1_000_000
+
+// The session's cost as last counted in this process, so that a session yet
+// to spend writes no file; and after a /clear, the total the session before
+// reached, from which a total that kept counting goes on.
+let costCounted: { sessionId: string; cost: number } | null = null
+let costCarried: number | null = null
+// The spend files are written and read one call at a time, in order: each
+// reads what the one before it wrote.
+let spendQueue: Promise<unknown> = Promise.resolve()
+// The spend files read, by name: when each was written and its size, and
+// its spans. One is read again only once either changed, and the session's
+// own after each write of its own.
+const spendRead = new Map<string, { stamp: string; spans: Span[] }>()
+
+const queued = <T,>(work: () => Promise<T>) => {
+  const run = spendQueue.then(work)
+  spendQueue = run.catch(() => {})
+
+  return run
+}
+
+// Counts this session's part of each window with a reading: its spend from
+// the window's start on, over what every session's file spent from there. A
+// file last written before the earliest start holds nothing in any window,
+// and is not read.
+const countShares = async ($: EngineInterface) => {
+  const now = await $.clock.now()
+  const windows = liveWindows(await read($, limits), now).flatMap(({ kind, start }) =>
+    start === undefined ? [] : [{ kind, start, own: 0, total: 0 }],
+  )
+  const folder = windows.length === 0 ? null : await modFolder($, SPEND_FOLDER)
+  const entries = folder === null ? [] : await $.fs.list(folder).catch(() => [])
+  const earliest = Math.min(...windows.map(window => window.start))
+  const ownName = fileNameOf(await $.session.id(), 'json')
+
+  for (const entry of entries) {
+    if (folder === null || entry.kind !== 'file' || !entry.name.endsWith('.json')) continue
+
+    if (entry.mtimeMs < earliest) {
+      spendRead.delete(entry.name)
+      continue
+    }
+
+    const stamp = `${entry.mtimeMs}:${entry.size}`
+
+    if (spendRead.get(entry.name)?.stamp !== stamp) {
+      const file = await $.fs.read(joinPath(folder, entry.name)).then(parseSpend, () => null)
+
+      // One not whole yet counts what it held when last read whole.
+      if (file !== null) spendRead.set(entry.name, { stamp, spans: file.spans })
+    }
+
+    const spans = spendRead.get(entry.name)?.spans ?? []
+
+    for (const window of windows) {
+      const spent = spentSince(spans, window.start)
+      window.total += spent
+
+      if (entry.name === ownName) window.own += spent
+    }
+  }
+
+  const fresh: Share[] = windows.map(({ kind, own, total }) => ({
+    kind,
+    ratio: total > 0 ? Math.round((own / total) * 1000) / 1000 : 0,
+  }))
+
+  if (JSON.stringify(await read($, shares)) !== JSON.stringify(fresh)) await update($, shares, () => fresh)
+}
+
+const recountShares = ($: EngineInterface) => queued(() => countShares($))
+
+// What the session spent since the last count: `cost`, its total as the
+// engine counts it, past what its file counted already, and `extra`, spent
+// beside it (the summary's requests, which the engine leaves out of that
+// total), each kept in the minute it came; then the parts are counted
+// again. Off a subscription no window has a reading, and nothing is kept.
+const addSpend = ($: EngineInterface, spend: { cost?: number; extra?: number }) =>
+  queued(async () => {
+    if ((await read($, limits)).length === 0) return
+
+    const sessionId = await $.session.id()
+    const path = await sessionFile($, SPEND_FOLDER, sessionId, 'json')
+
+    if (path === null) return
+
+    const now = await $.clock.now()
+    const file = (await $.fs.exists(path)) ? parseSpend(await $.fs.read(path)) : null
+    let spans = (file?.spans ?? []).filter(([, to]) => to > now - LONGEST)
+    let seen = file?.seen ?? (costCounted?.sessionId === sessionId ? costCounted.cost : undefined)
+    let added = spend.extra ?? 0
+    const { cost } = spend
+
+    if (cost !== undefined) {
+      // After a /clear the total went on from the session before's, or
+      // started over.
+      if (seen === undefined && costCarried !== null) seen = cost >= costCarried ? costCarried : 0
+
+      if (seen === undefined) {
+        // Counted for the first time, as in a session that ran before the
+        // mod loaded: what it spent until now, spread over its life so far.
+        const { startedAt } = await $.session.usage()
+
+        if (cost > 0) spans = [...spans, [Math.min(startedAt, now - MINUTE), now, cost]]
+      } else {
+        // A total that went down started over.
+        added += cost >= seen ? cost - seen : cost
+      }
+
+      seen = cost
+      costCounted = { sessionId, cost }
+      costCarried = null
+    }
+
+    if (added > 0) {
+      const from = Math.floor(now / MINUTE) * MINUTE
+      const last = spans.at(-1)
+      spans =
+        last !== undefined && last[0] === from && last[1] === from + MINUTE
+          ? [...spans.slice(0, -1), [from, from + MINUTE, last[2] + added]]
+          : [...spans, [from, from + MINUTE, added]]
+    }
+
+    // A session yet to spend writes no file.
+    if (file !== null || spans.length > 0) {
+      const kept: SpendFile = {
+        ...(seen === undefined ? {} : { seen: toMillionth(seen) }),
+        spans: spans.map(([from, to, usd]) => [from, to, toMillionth(usd)]),
+      }
+      await $.fs.write(path, JSON.stringify(kept))
+      spendRead.delete(fileNameOf(sessionId, 'json'))
+    }
+
+    await countShares($)
+  })
 
 const pad = (n: number) => String(n).padStart(2, '0')
 
@@ -816,9 +1068,11 @@ const logSection = (turn: Thinking) => {
   const recaps = turn.entries.filter(entry => entry.isRecap === true).reverse()
   const updates = turn.entries.filter(entry => entry.isRecap !== true)
   const ending =
-    turn.durationMs === undefined
-      ? ['in progress']
-      : [formatDuration(turn.durationMs), turn.isAborted === true ? 'interrupted' : 'done']
+    turn.durationMs !== undefined
+      ? [formatDuration(turn.durationMs), turn.isAborted === true ? 'interrupted' : 'done']
+      : turn.paused !== undefined
+        ? [waitingFor(turn.paused.subagents)]
+        : ['in progress']
 
   return [
     sectionMark(turn.turnId),
@@ -1045,9 +1299,11 @@ const notesRead = ({ ask }: DebugRequest) => `notes ${ask.from + 1}–${ask.cove
 const askedFor = ({ ask, sentAt }: DebugRequest) =>
   ask.isRecap
     ? 'the recap, WAIT not allowed'
-    : ask.isForced
-      ? `an update, WAIT not allowed after ${formatDuration(sentAt - ask.since)} without one`
-      : 'an update or WAIT'
+    : ask.isWaiting
+      ? 'an update, WAIT not allowed while Claude waits for its subagents'
+      : ask.isForced
+        ? `an update, WAIT not allowed after ${formatDuration(sentAt - ask.since)} without one`
+        : 'an update or WAIT'
 
 // What the request came to, in a few words.
 const outcomeOf = (request: DebugRequest) => {
@@ -1159,13 +1415,159 @@ let liveBlock: { turnId: string; text: string; kept: number } | null = null
 // The least a part holds: a block that wrote less since the last part waits.
 const LIVE_MIN_CHARS = 200
 
+// A main-loop turn begun by a prompt of these origins goes on with the turn
+// before it: a subagent's hand-back (the engine delivers it as another
+// Claude session's message, `peer`), a background task's notification, a
+// message of another agent. These wake Claude while the person waits on the
+// work they asked for. Any other prompt, the person's own above all, starts
+// a turn of its own, and the updates over.
+const RESUMING: ReadonlySet<string> = new Set(['task-notification', 'peer', 'peer-send-message', 'observer'])
+
+// The person's own prompts, typed, sent from elsewhere or stored, which
+// never go on with the turn before, whatever they say.
+const PROMPTED: ReadonlySet<string> = new Set([
+  'composer',
+  'bridge',
+  'sdk',
+  'channel',
+  'slack-ping',
+  'auto-continuation',
+  'scheduled-trigger',
+])
+
+// How the engine frames a subagent's hand-back or a task's notification: a
+// turn whose prompt came from no origin above, or that no `prompt.submit`
+// showed, is known by it.
+const HANDED_BACK = /^\s*<(?:agent-message from="|task-notification>)/
+
+// The prompts submitted since the main loop's last turn began, as
+// `prompt.submit` saw them: where each came from, its text, and whether the
+// session was idle (it starts a turn of its own) or ran a turn (it waits in
+// the queue, or goes into that turn). A turn's start finds its own by its
+// text, else takes the latest one made while idle.
+type Submission = { kind: string; text: string; isIdle: boolean }
+let submissions: Submission[] = []
+const MAX_SUBMISSIONS = 20
+
+// Whether the main loop's turn that begins with `text` goes on with the turn
+// before it. Its submission, once found, and every one made while idle are
+// let go: those started this turn or none.
+const isResumedBy = (text: string) => {
+  const trimmed = text.trim()
+  const own = submissions.filter(one => one.text === trimmed).at(-1)
+  const found = own ?? submissions.filter(one => one.isIdle).at(-1)
+  submissions = submissions.filter(one => one !== found && !one.isIdle)
+
+  if (found !== undefined && RESUMING.has(found.kind)) return true
+  if (found !== undefined && PROMPTED.has(found.kind)) return false
+
+  return HANDED_BACK.test(text)
+}
+
+// The states a subagent's loop is at work in: not yet started, running a
+// turn, or held on its own background work.
+const AT_WORK: ReadonlySet<AgentStatus> = new Set(['pending', 'running', 'waiting'])
+
+// How many subagents the main loop started that still work: the model's, not
+// a plugin's, and not idle between turns, as a teammate waiting for a message
+// is. Their results wake Claude again. None where the list cannot be read.
+const runningSubagents = async ($: EngineInterface) => {
+  try {
+    const agents = await $.agent.list()
+
+    return agents.filter(
+      agent => agent.parentId === undefined && agent.spawnedBy === undefined && AT_WORK.has(agent.status),
+    ).length
+  } catch {
+    return 0
+  }
+}
+
+// While the turn waits on its subagents, the tick counts them again each
+// WAIT_CHECK. Once none has worked for DRAIN_GRACE and no result has woken
+// Claude (a hand-back withheld, a subagent stopped with no word), the turn
+// is done. The module's own: a reload starts the count over.
+const WAIT_CHECK = 10_000
+const DRAIN_GRACE = 30_000
+let checkedAt = Number.NEGATIVE_INFINITY
+let drainedAt: number | null = null
+
+// The turn ended: no longer waiting.
+const ended = (turn: Thinking, durationMs: number, isAborted: boolean): Thinking => {
+  const { paused: _, ...rest } = turn
+
+  return { ...rest, durationMs, isAborted }
+}
+
+// The turn goes on in the main loop's turn `turnId`, which a subagent's
+// result or another background message began: no longer waiting, reopened
+// if it had ended, its recap no longer owed.
+const goOn = async ($: EngineInterface, turn: Thinking, turnId: string) => {
+  await updateTurn($, turn.turnId, one => {
+    const { durationMs: _, isAborted: __, paused: ___, ...rest } = one
+
+    return { ...rest, lastTurnId: turnId }
+  })
+
+  if (owedRecap === turn.turnId) owedRecap = null
+  if (retried.turnId === turn.turnId) retried = { turnId: '', count: 0 }
+
+  drainedAt = null
+}
+
+// The tick's count of the subagents a waiting turn waits on.
+const checkWait = async ($: EngineInterface) => {
+  const now = await $.clock.now()
+
+  if (now - checkedAt < WAIT_CHECK) return
+
+  checkedAt = now
+  const turn = await read($, thinking)
+
+  if (turn?.paused === undefined || turn.durationMs !== undefined) {
+    drainedAt = null
+
+    return
+  }
+
+  const running = await runningSubagents($)
+
+  if (running !== turn.paused.subagents) {
+    await updateTurn($, turn.turnId, one =>
+      one.paused === undefined ? one : { ...one, paused: { ...one.paused, subagents: running } },
+    )
+  }
+
+  if (running > 0) {
+    drainedAt = null
+
+    return
+  }
+
+  drainedAt ??= now
+
+  if (now - drainedAt < DRAIN_GRACE) return
+
+  // It ran until its last subagent ended, as far as the count saw. As at a
+  // turn's end, the log takes how it ended, then the summary asks for its
+  // last word, past the gap: the clock stops.
+  const end = drainedAt
+  drainedAt = null
+  await updateTurn($, turn.turnId, one =>
+    one.paused === undefined ? one : ended(one, Math.max(0, end - one.startedAt), false),
+  )
+  owedRecap = (await read($, isSummaryOn)) ? turn.turnId : null
+  stopTicker()
+  $.clock.after(0, () => void endTurn($, turn.turnId).catch(() => {}))
+}
+
 const stopTicker = () => {
   ticker?.cancel()
   ticker = null
 }
 
-// While a turn runs: redraw each second for the clock in the header, and
-// ask for a summary once one is due.
+// While a turn runs, or waits on its subagents: redraw each second for the
+// clock in the header, and ask for a summary once one is due.
 const startTicker = ($: EngineInterface) => {
   stopTicker()
   ticker = $.clock.every(SECOND, () => void tick($).catch(() => {}))
@@ -1180,6 +1582,7 @@ const tick = async ($: EngineInterface) => {
     await cutLive($)
   }
 
+  await checkWait($)
   await askSummary($, false)
 }
 
@@ -1234,9 +1637,13 @@ const newTurn = (turnId: string, request: string, startedAt: number): Thinking =
   isSummarizing: false,
 })
 
+// Whether the main loop's turn `turnId` is the kept turn's: its first, or
+// the latest that went on with it.
+const isTurnOf = (turn: Thinking, turnId: string) => turn.turnId === turnId || turn.lastTurnId === turnId
+
 // Changes the turn kept, where it is still the turn `turnId`.
 const updateTurn = ($: EngineInterface, turnId: string, change: (turn: Thinking) => Thinking) =>
-  update($, thinking, turn => (turn?.turnId === turnId ? change(turn) : turn))
+  update($, thinking, turn => (turn !== null && isTurnOf(turn, turnId) ? change(turn) : turn))
 
 // The updates with `entry` after them, the newest MAX_TURN_ENTRIES kept: the
 // log is written from them, so a turn's first updates stay in it.
@@ -1250,14 +1657,28 @@ const lastUpdateAt = (turn: Thinking) => turn.entries.at(-1)?.at ?? turn.started
 const isSilent = (turn: Thinking, now: number) =>
   turn.notes.length > turn.summarized && now - lastUpdateAt(turn) >= MAX_SILENCE
 
+// How many updates came after the turn's latest recap, or all of them while
+// it has none.
+const sinceRecap = (turn: Thinking) => {
+  let count = 0
+
+  for (let at = turn.entries.length - 1; at >= 0 && turn.entries[at]?.isRecap !== true; at -= 1) count += 1
+
+  return count
+}
+
 // Something to say. While the turn runs: notes Haiku has not read yet, as an
-// update or a WAIT, or notes that waited past MAX_SILENCE. Once it ended:
-// notes no update has read, or two updates or more and no recap yet. One
-// update and nothing after it needs none: the recap would say it again.
-const hasNews = (turn: Thinking, now: number) =>
-  turn.durationMs === undefined
-    ? turn.notes.length > turn.seen || isSilent(turn, now)
-    : turn.notes.length > turn.summarized || (turn.entries.length >= 2 && turn.entries.at(-1)?.isRecap !== true)
+// update or a WAIT, or notes that waited past MAX_SILENCE. While it waits on
+// its subagents: notes no update has read, nothing more coming until a
+// result wakes Claude. Once it ended: those, or two updates or more since
+// the last recap (a turn a result reopened has one). One update and nothing
+// after it needs none: the recap would say it again.
+const hasNews = (turn: Thinking, now: number) => {
+  if (turn.durationMs !== undefined) return turn.notes.length > turn.summarized || sinceRecap(turn) >= 2
+  if (turn.paused !== undefined) return turn.notes.length > turn.summarized
+
+  return turn.notes.length > turn.seen || isSilent(turn, now)
+}
 
 // One request at a time: a tick that comes while one runs leaves it be, and
 // a due request waits for it. `isDue` skips the gap: the turn's end, the
@@ -1336,7 +1757,11 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
   if (result !== null) {
     const spent = haikuCost(result.usage)
 
-    if (spent > 0) await update($, summaryCost, usd => usd + spent)
+    // It counts toward the account's windows too: this session's spend.
+    if (spent > 0) {
+      await update($, summaryCost, usd => usd + spent)
+      void addSpend($, { extra: spent }).catch(() => {})
+    }
   }
 
   const reply = result?.isAnswered
@@ -1489,7 +1914,7 @@ const keepNote = async ($: EngineInterface, turnId: string, text: string) => {
     let isNew = false
 
     await update($, thinking, turn => {
-      const one = turn?.turnId === turnId ? turn : newTurn(turnId, '', now)
+      const one = turn !== null && isTurnOf(turn, turnId) ? turn : newTurn(turnId, '', now)
       isNew = one !== turn
 
       // The same block twice, as from a retried request, is one note.
@@ -1544,7 +1969,7 @@ const keepMark = async ($: EngineInterface, key: 'actions' | 'said', text: strin
     const at = await $.clock.now()
 
     await update($, thinking, turn => {
-      if (turn === null || turn.durationMs !== undefined || (turnId !== undefined && turn.turnId !== turnId)) {
+      if (turn === null || turn.durationMs !== undefined || (turnId !== undefined && !isTurnOf(turn, turnId))) {
         return turn
       }
 
@@ -1610,6 +2035,10 @@ export const register: Register = on => {
     await update($, cost, () => usage.cost?.usd ?? null)
     await update($, autoCompact, () => compactAt)
 
+    // What the session spent so far, and its part of each window.
+    const spentSoFar = usage.cost?.usd
+    void (spentSoFar === undefined ? recountShares($) : addSpend($, { cost: spentSoFar })).catch(() => {})
+
     // The summary as the person left it. A reload drops the request under
     // way and the clock with the old module: a turn still running gets a
     // new clock.
@@ -1620,9 +2049,13 @@ export const register: Register = on => {
       startTicker($)
     }
 
-    // "reset in" counts down between turns: check the countdowns each minute.
-    // A reload drops this timer with the old module.
-    $.clock.every(MINUTE, () => void recount($).catch(() => {}))
+    // "reset in" counts down between turns, and what other sessions spend
+    // moves this one's part: check both each minute. A reload drops this
+    // timer with the old module.
+    $.clock.every(MINUTE, () => {
+      void recount($).catch(() => {})
+      void recountShares($).catch(() => {})
+    })
     await $.command.register({
       name: COMMAND,
       description: 'Open the Session Weather pane',
@@ -1684,32 +2117,69 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // Where each prompt came from, for the turn it starts to know whether it
+  // goes on with the turn before (RESUMING). Every prompt passes as it came.
+  on('prompt.submit', async ($, e, next) => {
+    const one: Submission = {
+      kind: e.origin === undefined ? 'unclassified' : e.origin.kind,
+      text: e.text.trim(),
+      isIdle: e.turnId === undefined,
+    }
+    submissions = [...submissions, one].slice(-MAX_SUBMISSIONS)
+    const result = await next(e)
+
+    // A prompt dropped starts no turn.
+    if (result.drop !== undefined) submissions = submissions.filter(item => item !== one)
+
+    return result
+  })
+
   // A subagent's run raises turn.start too, inside the main loop's turn: its
   // tool calls count toward that turn, and its thinking is its own.
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       await update($, turnTools, () => 0)
-      // A new prompt's first note is summarized at once, not after the gap
-      // the last turn's updates left; its updates start at the top.
-      askedAt = Number.NEGATIVE_INFINITY
       liveBlock = null
-      await toNewest($)
-      // The turn before, for an update on it that lands from here on, or its
-      // recap, still owed.
-      previousTurn = await read($, thinking)
+      const isResumed = isResumedBy(e.text)
+      const [current, fill] = await Promise.all([read($, thinking), read($, reading)])
+
       // The turn's growth counts from the fill it starts at: the turn
       // before's end, measured at its end or inside it.
-      const fill = await read($, reading)
-
       if (fill?.tokens !== undefined && fill.percent !== undefined && fill.isCompacted !== true) {
         const { tokens, percent } = fill
         await update($, samples, () => [{ tokens, percent }])
       }
 
-      const startedAt = await $.clock.now()
-      await update($, thinking, () => newTurn(e.turnId, clip(e.text.trim(), MAX_REQUEST_CHARS), startedAt))
+      const isOn = await restore($)
 
-      if (await restore($)) {
+      if (isResumed && current !== null) {
+        // A subagent's result, or another background message: the updates
+        // go on where they were.
+        await goOn($, current, e.turnId)
+      } else {
+        // A new prompt's first note is summarized at once, not after the gap
+        // the last turn's updates left; its updates start at the top.
+        askedAt = Number.NEGATIVE_INFINITY
+        await toNewest($)
+        // The turn before, for an update on it that lands from here on, or
+        // its recap, still owed. One that waited on its subagents ends here,
+        // as far as its last turn went.
+        previousTurn =
+          current?.paused !== undefined && current.durationMs === undefined
+            ? ended(current, Math.max(0, current.paused.at - current.startedAt), false)
+            : current
+
+        if (previousTurn !== null && previousTurn !== current) {
+          if (isOn) owedRecap = previousTurn.turnId
+
+          void logTurn($, previousTurn)
+        }
+
+        const startedAt = await $.clock.now()
+        await update($, thinking, () => newTurn(e.turnId, clip(e.text.trim(), MAX_REQUEST_CHARS), startedAt))
+      }
+
+      if (isOn) {
         startTicker($)
       }
     }
@@ -1799,11 +2269,26 @@ export const register: Register = on => {
         ...(usage && input > 0 ? { cacheRate: usage.cache_read_input_tokens / input } : {}),
       }))
 
-      await updateTurn($, e.turnId, turn => ({ ...turn, durationMs: e.durationMs, isAborted: e.isAborted }))
+      // While subagents it started still work, the turn waits for their
+      // results, which wake Claude and go on with it; the clock runs on. One
+      // the person interrupted, or with none left at work, has ended: the
+      // whole of it, from the person's prompt, when results woke it.
+      const running = e.isAborted ? 0 : await runningSubagents($)
+      const now = await $.clock.now()
+      const turn = await updateTurn($, e.turnId, one =>
+        running > 0
+          ? { ...one, paused: { at: now, subagents: running } }
+          : ended(one, one.lastTurnId === undefined ? e.durationMs : Math.max(0, now - one.startedAt), e.isAborted),
+      )
+      const turnId = turn !== null && isTurnOf(turn, e.turnId) ? turn.turnId : e.turnId
+      const isWaiting = turn !== null && isTurnOf(turn, e.turnId) && turn.paused !== undefined
+
       // Its last word is owed while the summary runs, even once the next
       // prompt's turn has begun; a turn that ended with it off owes none.
-      owedRecap = (await read($, isSummaryOn)) ? e.turnId : null
-      stopTicker()
+      if (!isWaiting) {
+        owedRecap = (await read($, isSummaryOn)) ? turnId : null
+        stopTicker()
+      }
 
       // The turn's growth as far as measured: the engine raises no
       // measurement at the end when the fill has not moved since one inside
@@ -1818,8 +2303,9 @@ export const register: Register = on => {
       }
 
       // The log takes the end, then the turn's last word is asked, past the
-      // gap: no tick follows the end.
-      $.clock.after(0, () => void endTurn($, e.turnId).catch(() => {}))
+      // gap: no tick follows the end. A turn that waits takes an update of
+      // where it stands.
+      $.clock.after(0, () => void endTurn($, turnId).catch(() => {}))
     }
 
     return next(e)
@@ -1839,8 +2325,9 @@ export const register: Register = on => {
       const { tokens, window, percent } = e.context
       const [before, turn] = await Promise.all([read($, reading), read($, thinking)])
       // A measurement while the main loop's turn runs (a rate-limit window
-      // moved) shows the fill; the turn's growth is counted at its end.
-      const isMidTurn = turn !== null && turn.durationMs === undefined
+      // moved) shows the fill; the turn's growth is counted at its end. One
+      // while the summary's turn waits on its subagents comes between turns.
+      const isMidTurn = turn !== null && turn.durationMs === undefined && turn.paused === undefined
       // A compaction's mark stays while the engine has no fill yet, and
       // through the turn it ran in: its drop is the change shown at the end.
       const isCompacted = before?.isCompacted === true && (tokens === undefined || isMidTurn)
@@ -1892,10 +2379,14 @@ export const register: Register = on => {
       const fresh = [...e.rateLimits]
       await update($, limits, () => fresh)
       await $.store.set(STORED_LIMITS, fresh)
+      // A window that reset counts the parts from its new start.
+      void recountShares($).catch(() => {})
     }
 
     if (e.changed.includes('cost')) {
       await update($, cost, () => e.cost?.usd ?? null)
+
+      if (e.cost !== undefined) void addSpend($, { cost: e.cost.usd }).catch(() => {})
     }
 
     return next(e)
@@ -1923,9 +2414,16 @@ export const register: Register = on => {
       await toNewest($)
       isOwed = false
       askedAt = Number.NEGATIVE_INFINITY
+      submissions = []
+      drainedAt = null
+      // The next session's spend counts from what this one's total reached,
+      // should the engine keep counting it over a /clear.
+      costCarried = e.reason === 'clear' ? (costCounted?.cost ?? null) : null
+      costCounted = null
       // The host wipes the pane's values once the session has ended: the
-      // person's choices and the limits come back from the store after it.
-      $.clock.after(SECOND, () => void restore($).catch(() => {}))
+      // person's choices and the limits come back from the store after it,
+      // and the parts are counted for the next session.
+      $.clock.after(SECOND, () => void restore($).then(() => recountShares($)).catch(() => {}))
     }
 
     return next(e)
@@ -1963,19 +2461,24 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
     // Each read subscribes the drawing to its value; they go all at once.
-    const [at, now, added, lastSamples, readings, compactAt, turn, spent, isOn] = await Promise.all([
+    const [at, now, added, lastSamples, readings, parts, compactAt, turn, spent, isOn] = await Promise.all([
       $.clock.now(),
       read($, reading),
       read($, delta),
       read($, samples),
       read($, limits),
+      read($, shares),
       read($, autoCompact),
       read($, lastTurn),
       read($, cost),
       read($, isSummaryOn),
     ])
     const hasTurns = lastSamples.length > 0
-    const windows = liveWindows(readings, at)
+    // Each window, with this session's part of its share in points.
+    const windows = liveWindows(readings, at).map(window => ({
+      ...window,
+      mine: window.percent * (parts.find(part => part.kind === window.kind)?.ratio ?? 0),
+    }))
 
     const tokens = now?.tokens
     const percent = now?.percent
@@ -2023,14 +2526,19 @@ export const register: Register = on => {
       ? await Promise.all([read($, thinking), read($, summaryCost), read($, isDebugOn), read($, summaryPlace)])
       : ([null, 0, false, { line: 0, row: 0 }] as const)
 
-    // "🧭 Thinking · 1m 46s", the turn's whole length once it ended.
+    // "🧭 Thinking · 1m 46s", the turn's whole length once it ended; "·
+    // waiting for 2 subagents" while their results are still to come.
     const header =
       turnNow === null
         ? '🧭 Thinking'
         : [
             '🧭 Thinking',
             formatDuration(Math.max(0, turnNow.durationMs ?? at - turnNow.startedAt)),
-            ...(turnNow.durationMs === undefined ? [] : [turnNow.isAborted ? 'interrupted' : 'done']),
+            ...(turnNow.durationMs !== undefined
+              ? [turnNow.isAborted ? 'interrupted' : 'done']
+              : turnNow.paused !== undefined
+                ? [waitingFor(turnNow.paused.subagents)]
+                : []),
             ...(turnNow.isSummarizing ? ['summarizing…'] : []),
           ].join(' · ')
 
@@ -2132,15 +2640,31 @@ export const register: Register = on => {
           {windows.length > 0 && (
             <Box flexDirection="column">
               <Text dimColor>Usage limits</Text>
-              {windows.map(window => (
-                <Box flexDirection="column">
-                  <Text>
-                    {window.name} {window.used}%
-                    {window.left === undefined ? '' : ` · reset in ${formatLeft(window.left)}`}
-                  </Text>
-                  <Text dimColor>{bar(window.used)}</Text>
-                </Box>
-              ))}
+              {windows.map(window => {
+                // "5h 30% · this session 8% · reset in 4h 38m", the part in
+                // yellow, as its cells are: the last of the bar's filled ones.
+                const cells = barParts(window.used, window.mine)
+
+                return (
+                  <Box flexDirection="column">
+                    <Text>
+                      {window.name} {window.used}%
+                      {window.mine > 0 && ' · '}
+                      {window.mine > 0 && <Text color={MINE}>this session {formatPart(window.mine)}</Text>}
+                      {window.left === undefined ? '' : ` · reset in ${formatLeft(window.left)}`}
+                    </Text>
+                    {cells.own === '' ? (
+                      <Text dimColor>{bar(window.used)}</Text>
+                    ) : (
+                      <Text>
+                        {cells.others !== '' && <Text dimColor>{cells.others}</Text>}
+                        <Text color={MINE}>{cells.own}</Text>
+                        {cells.free !== '' && <Text dimColor>{cells.free}</Text>}
+                      </Text>
+                    )}
+                  </Box>
+                )
+              })}
             </Box>
           )}
           {spent !== null && <Text dimColor>Session cost {formatCost(spent)}</Text>}
