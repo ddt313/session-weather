@@ -334,6 +334,40 @@ const statusTextOf = (
   return parts.length === 0 ? undefined : parts.join(' · ')
 }
 
+// The pane minimized to a widget on the desktop app, where a glance is all
+// it gets: "☁ Cloudy · 42%", the sky and the context's share used; "5h 30% ·
+// Week 74% · $1.23", the windows' shares and the session's cost; and the
+// newest update of the thinking summary while it is on. A part with nothing
+// read yet is left out, as on the status line; null where a line has none.
+const glanceOf = (
+  now: Reading | null,
+  compactAt: AutoCompact | null,
+  readings: readonly Limit[],
+  spent: number | null,
+  at: number,
+  turn: Thinking | null,
+) => {
+  const tokens = now?.tokens
+  const percent = now?.percent
+  const sky = tokens === undefined || percent === undefined ? null : forecast(levelOf(tokens, percent, compactAt))
+  const figures = [
+    ...liveWindows(readings, at).map(window => `${window.name} ${window.used}%`),
+    ...(spent === null || spent <= 0 ? [] : [formatCost(spent)]),
+  ]
+  const newest = turn?.entries.at(-1)
+
+  return {
+    sky:
+      sky !== null && percent !== undefined
+        ? { text: `${sky.icon} ${sky.label} · ${percent}%`, color: sky.color }
+        : now?.isCompacted
+          ? { text: '☀ Compacted', color: 'warning' }
+          : null,
+    figures: figures.length === 0 ? null : figures.join(' · '),
+    update: turn === null || newest === undefined ? null : `${stampOf(turn, newest)} · ${newest.gist}`,
+  }
+}
+
 // What the status line holds, as this module last set it; null until it sets
 // one, so a reload sets it again over whatever the old module left.
 let statusShown: { text: string | undefined } | null = null
@@ -547,17 +581,32 @@ const updateRows = (lines: readonly UpdateLine[], width: number) => {
 // the pane is measured in. What the arrows step through.
 const DESKTOP_FACE = 1.15
 
-const widthOf = (columns: number, surface: string) =>
-  Math.max(10, Math.round((columns - 1) * (surface === 'terminal' ? 1 : DESKTOP_FACE)))
+const faceOf = (surface: string) => (surface === 'terminal' ? 1 : DESKTOP_FACE)
+
+const widthOf = (columns: number, surface: string) => Math.max(10, Math.round((columns - 1) * faceOf(surface)))
+
+// From WIDE_FROM columns the pane lays out in two, as a page does on a wide
+// screen: the weather in a column of its own on the left, the thinking
+// summary beside it with the rest of the width and the body's whole height.
+// Narrower, or with the summary off, they stand one above the other.
+const WIDE_FROM = 90
+const COLUMN_GAP = 2
+// The weather's column holds its longest usual line on one row: "Week 74% ·
+// this session <1% · reset in 20h 37m".
+const WEATHER_CHARS = 46
+
+const weatherColumns = (surface: string) => Math.ceil(WEATHER_CHARS / faceOf(surface)) + 1
 
 // Rows a click on an arrow moves the window: about half of it, so a long
-// history reads in a few clicks. The window is the body less what the
-// weather, the summary's header and its footer take, about PANE_OVERHEAD
-// rows; never less than ROW_STEP.
+// history reads in a few clicks. The window is the body less what stands
+// above and below it: in one column the weather, the summary's header and
+// its footer, about PANE_OVERHEAD rows; beside the weather, the header and
+// the footer alone, about WIDE_OVERHEAD. Never less than ROW_STEP.
 const ROW_STEP = 3
 const PANE_OVERHEAD = 20
+const WIDE_OVERHEAD = 6
 
-const pageStep = (bodyRows: number) => Math.max(ROW_STEP, Math.floor((bodyRows - PANE_OVERHEAD) / 2))
+const pageStep = (bodyRows: number, overhead: number) => Math.max(ROW_STEP, Math.floor((bodyRows - overhead) / 2))
 
 // The row standing at the top of the window: the line it is in, and how many
 // of that line's rows are above it.
@@ -2687,6 +2736,48 @@ export const register: Register = (on, options) => {
     // Drawn, the pane says all the status line would: an unplaced pane is
     // drawn first once the terminal widens to place it, and the line goes.
     void hideStatus($).catch(() => {})
+
+    // Minimized to a widget on the desktop app: the glance, lined up on the
+    // edge the widget is anchored to, with no buttons, as a click may not
+    // reach it there. It reads only what it shows.
+    if (e.props.placement === 'widget') {
+      const [at, now, compactAt, readings, spent, isOn] = await Promise.all([
+        $.clock.now(),
+        read($, reading),
+        read($, autoCompact),
+        read($, limits),
+        read($, cost),
+        read($, isSummaryOn),
+      ])
+      const glance = glanceOf(now, compactAt, readings, spent, at, isOn ? await read($, thinking) : null)
+      const lines = [
+        glance.sky === null ? null : (
+          <Text bold color={glance.sky.color} wrap="truncate">
+            {glance.sky.text}
+          </Text>
+        ),
+        glance.figures === null ? null : (
+          <Text dimColor wrap="truncate">
+            {glance.figures}
+          </Text>
+        ),
+        glance.update === null ? null : <Text wrap="truncate">{glance.update}</Text>,
+      ].filter(line => line !== null)
+      const isOnRight = e.props.anchoredEdges?.includes('right') ?? false
+
+      return (
+        <Box flexDirection="column" {...(isOnRight ? { alignItems: 'flex-end' as const } : {})}>
+          {lines.length === 0 ? (
+            <Text dimColor wrap="truncate">
+              Waiting for the first response.
+            </Text>
+          ) : (
+            lines.slice(0, Math.max(1, e.props.scroll.bodyRows))
+          )}
+        </Box>
+      )
+    }
+
     // Each read subscribes the drawing to its value; they go all at once.
     const [at, now, added, lastSamples, readings, parts, compactAt, turn, spent, isOn] = await Promise.all([
       $.clock.now(),
@@ -2773,12 +2864,19 @@ export const register: Register = (on, options) => {
 
     // A body tall enough pins the weather on top and the summary's cost at
     // the bottom; the turn's updates scroll in the window between, moved by
-    // the arrows. A new prompt starts them over.
+    // the arrows. A new prompt starts them over. A body WIDE_FROM columns
+    // wide sets the weather beside the summary instead, and the window then
+    // has the summary's whole column but its header and footer.
     const rows = e.props.scroll.bodyRows
     const isPinned = isOn && rows >= MIN_PINNED_ROWS
-    // The lines measured in rows at the body's width, the measure the arrows
-    // then step through.
-    const width = widthOf(e.props.bodyColumns, e.surface)
+    const isWide = isOn && e.props.bodyColumns >= WIDE_FROM
+    const weatherWidth = weatherColumns(e.surface)
+    // The summary's columns: the body's, less the weather's column and the
+    // gap beside it where the two stand side by side.
+    const summaryColumns = isWide ? e.props.bodyColumns - weatherWidth - COLUMN_GAP : e.props.bodyColumns
+    // The lines measured in rows at the summary's width, the measure the
+    // arrows then step through.
+    const width = widthOf(summaryColumns, e.surface)
     const { lines, ...laid } = layUpdates(turnNow, width, place)
     const top = isPinned ? laid.top : 0
     const topLine = laid.rows[top]?.line ?? 0
@@ -2809,12 +2907,13 @@ export const register: Register = (on, options) => {
       budget -= (laid.starts[at + 1] ?? laid.rows.length) - (laid.starts[at] ?? 0)
     }
 
-    // The rule between two updates: a dim row of box drawing across the body,
-    // in the monospaced face whose cells the body is measured in, and cut
-    // rather than wrapped should it run over. (The desktop drew no Svg here.)
+    // The rule between two updates: a dim row of box drawing across the
+    // summary, in the monospaced face whose cells the body is measured in,
+    // and cut rather than wrapped should it run over. (The desktop drew no
+    // Svg here.)
     const rule = (
       <Text dimColor mono wrap="truncate">
-        {'─'.repeat(Math.max(1, e.props.bodyColumns - 1))}
+        {'─'.repeat(Math.max(1, summaryColumns - 1))}
       </Text>
     )
 
@@ -2858,78 +2957,110 @@ export const register: Register = (on, options) => {
     // itself, which, pinned, has nothing to scroll; and its keys do not
     // reach the pane.
     const canScroll = isPinned && laid.rows.length > 1
-    const step = pageStep(rows)
+    const step = pageStep(rows, isWide ? WIDE_OVERHEAD : PANE_OVERHEAD)
+
+    // The weather: the fill, the limits and the session's cost; a column of
+    // its own when wide.
+    const weather = (
+      <Box key="weather" flexDirection="column" gap={1} flexShrink={0} {...(isWide ? { width: weatherWidth } : {})}>
+        {context}
+        {windows.length > 0 && (
+          <Box flexDirection="column">
+            <Text dimColor>Usage limits</Text>
+            {windows.map(window => {
+              // "5h 30% · this session 8% · reset in 4h 38m", the part in
+              // yellow, as its cells are: the last of the bar's filled ones.
+              const cells = barParts(window.used, window.mine)
+
+              return (
+                <Box flexDirection="column">
+                  <Text>
+                    {window.name} {window.used}%
+                    {window.mine > 0 && ' · '}
+                    {window.mine > 0 && <Text color={MINE}>this session {formatPart(window.mine)}</Text>}
+                    {window.left === undefined ? '' : ` · reset in ${formatLeft(window.left)}`}
+                  </Text>
+                  {cells.own === '' ? (
+                    <Text dimColor>{bar(window.used)}</Text>
+                  ) : (
+                    <Text>
+                      {cells.others !== '' && <Text dimColor>{cells.others}</Text>}
+                      <Text color={MINE}>{cells.own}</Text>
+                      {cells.free !== '' && <Text dimColor>{cells.free}</Text>}
+                    </Text>
+                  )}
+                </Box>
+              )
+            })}
+          </Box>
+        )}
+        {spent !== null && <Text dimColor>Session cost {formatCost(spent)}</Text>}
+      </Box>
+    )
+
+    // The summary's footer: what it cost, its switch, and the arrows.
+    const footer = (
+      <Box flexDirection="column" flexShrink={0}>
+        <Text dimColor>
+          {isOn
+            ? `Summary cost ${formatSummaryCost(summarySpent)} - ${HAIKU_NAME}${isDebugging ? ' · debug log on' : ''}`
+            : '🧭 Thinking summary is off'}
+        </Text>
+        <Box flexDirection="row" gap={1}>
+          <Button
+            key={TOGGLE}
+            label={isOn ? 'Turn summary off' : 'Turn summary on'}
+            dimColor
+            onPress={() => setSummary($, !isOn).catch(() => {})}
+          />
+          {canScroll && (
+            <Button
+              key="newer"
+              plain
+              dimColor
+              label="▲"
+              onPress={() => moveUpdates($, -step, width).catch(() => {})}
+            />
+          )}
+          {canScroll && (
+            <Button
+              key="older"
+              plain
+              dimColor
+              label="▼"
+              onPress={() => moveUpdates($, step, width).catch(() => {})}
+            />
+          )}
+        </Box>
+      </Box>
+    )
+
+    // Wide: the weather on the left, the summary and its footer on the
+    // right; pinned, both as tall as the body.
+    if (isWide) {
+      return (
+        <Box flexDirection="row" gap={COLUMN_GAP} {...(isPinned ? { height: rows } : {})}>
+          {weather}
+          <Box
+            key="summary"
+            flexDirection="column"
+            gap={1}
+            flexGrow={1}
+            flexShrink={1}
+            {...(isPinned ? { height: rows } : {})}
+          >
+            {thoughts}
+            {footer}
+          </Box>
+        </Box>
+      )
+    }
 
     return (
       <Box flexDirection="column" gap={1} {...(isPinned ? { height: rows } : {})}>
-        <Box flexDirection="column" gap={1} flexShrink={0}>
-          {context}
-          {windows.length > 0 && (
-            <Box flexDirection="column">
-              <Text dimColor>Usage limits</Text>
-              {windows.map(window => {
-                // "5h 30% · this session 8% · reset in 4h 38m", the part in
-                // yellow, as its cells are: the last of the bar's filled ones.
-                const cells = barParts(window.used, window.mine)
-
-                return (
-                  <Box flexDirection="column">
-                    <Text>
-                      {window.name} {window.used}%
-                      {window.mine > 0 && ' · '}
-                      {window.mine > 0 && <Text color={MINE}>this session {formatPart(window.mine)}</Text>}
-                      {window.left === undefined ? '' : ` · reset in ${formatLeft(window.left)}`}
-                    </Text>
-                    {cells.own === '' ? (
-                      <Text dimColor>{bar(window.used)}</Text>
-                    ) : (
-                      <Text>
-                        {cells.others !== '' && <Text dimColor>{cells.others}</Text>}
-                        <Text color={MINE}>{cells.own}</Text>
-                        {cells.free !== '' && <Text dimColor>{cells.free}</Text>}
-                      </Text>
-                    )}
-                  </Box>
-                )
-              })}
-            </Box>
-          )}
-          {spent !== null && <Text dimColor>Session cost {formatCost(spent)}</Text>}
-        </Box>
+        {weather}
         {isOn && thoughts}
-        <Box flexDirection="column" flexShrink={0}>
-          <Text dimColor>
-            {isOn
-              ? `Summary cost ${formatSummaryCost(summarySpent)} - ${HAIKU_NAME}${isDebugging ? ' · debug log on' : ''}`
-              : '🧭 Thinking summary is off'}
-          </Text>
-          <Box flexDirection="row" gap={1}>
-            <Button
-              key={TOGGLE}
-              label={isOn ? 'Turn summary off' : 'Turn summary on'}
-              dimColor
-              onPress={() => setSummary($, !isOn).catch(() => {})}
-            />
-            {canScroll && (
-              <Button
-                key="newer"
-                plain
-                dimColor
-                label="▲"
-                onPress={() => moveUpdates($, -step, width).catch(() => {})}
-              />
-            )}
-            {canScroll && (
-              <Button
-                key="older"
-                plain
-                dimColor
-                label="▼"
-                onPress={() => moveUpdates($, step, width).catch(() => {})}
-              />
-            )}
-          </Box>
-        </Box>
+        {footer}
       </Box>
     )
   })

@@ -35,15 +35,20 @@ const limits = (weekUsed: number) => [
 // A compaction leaves at least one message: its summary.
 const SUMMARY = [{ role: 'user' as const, text: 'Summary of the conversation so far.', toolUses: [] }]
 
+// From this many columns the mod lays the pane out in two: the weather on
+// the left, the thinking summary beside it.
+const WIDE_FROM = 90
+
 const PANE = {
   component: 'Pane',
   requestId: 'session-weather',
   props: {
     title: 'Session Weather',
     isFocused: false,
-    // Wide, so an update's lines draw one row each; the tests of rows lay
-    // the pane out narrower.
-    bodyColumns: 200,
+    // Wide, so an update's lines draw one row each, yet a column short of
+    // WIDE_FROM: one column, the weather above the summary. The tests of
+    // rows lay the pane out narrower, the tests of two columns wider.
+    bodyColumns: WIDE_FROM - 1,
     placement: 'dock',
     scroll: { offset: 0, bodyRows: 30 },
     view: {},
@@ -302,25 +307,38 @@ const engine = (
 
 const start = { cwd: '/tmp', surface: 'desktop' as const, isInteractive: true }
 
+type Found = { props: Record<string, unknown>; text: string }
 type Mounted = {
+  find: (q: { type?: string; key?: string }) => Promise<Found | undefined>
   findAll: (q: { type: string }) => Promise<{ text: string }[]>
   unmount: () => Promise<void>
 }
 type Test$ = { ui: { mount: (target: never) => Promise<unknown>; press: (target: never) => Promise<unknown> } }
 
-// The pane drawn on `surface`, `columns` wide when given.
-const mount = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop', columns?: number) =>
+// The pane drawn on `surface`, `columns` wide when given, and with `props`
+// over the fixture's (a placement, a body's rows).
+const mount = async (
+  $: Test$,
+  surface: 'desktop' | 'terminal' = 'desktop',
+  columns?: number,
+  props: Record<string, unknown> = {},
+) =>
   (await $.ui.mount({
     plugin: 'session-weather',
     surface,
     ...PANE,
-    props: { ...PANE.props, ...(columns === undefined ? {} : { bodyColumns: columns }) },
+    props: { ...PANE.props, ...(columns === undefined ? {} : { bodyColumns: columns }), ...props },
   } as never)) as Mounted
 
 // Everything the pane shows, one string per Text, on the surface named, in a
-// pane `columns` wide when given.
-const allTexts = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop', columns?: number) => {
-  const ui = await mount($, surface, columns)
+// pane `columns` wide when given, with `props` over the fixture's.
+const allTexts = async (
+  $: Test$,
+  surface: 'desktop' | 'terminal' = 'desktop',
+  columns?: number,
+  props: Record<string, unknown> = {},
+) => {
+  const ui = await mount($, surface, columns, props)
   const texts = (await ui.findAll({ type: 'Text' })).map(one => one.text)
   await ui.unmount()
 
@@ -347,14 +365,36 @@ const thoughts = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop', c
   return top === -1 ? [] : texts.slice(top)
 }
 
-// The labels of the pane's Buttons.
-const buttons = async ($: Test$) => {
-  const ui = await mount($)
+// The labels of the pane's Buttons, with `props` over the fixture's.
+const buttons = async ($: Test$, props: Record<string, unknown> = {}) => {
+  const ui = await mount($, 'desktop', undefined, props)
   const labels = (await ui.findAll({ type: 'Button' })).map(one => one.text)
   await ui.unmount()
 
   return labels
 }
+
+// How the pane lays out `columns` wide on `surface`: which way its outer Box
+// runs, how wide the weather's column is (undefined in one column), and what
+// the weather and the summary's own column (undefined in one column) show.
+const layout = async ($: Test$, surface: 'desktop' | 'terminal', columns: number) => {
+  const ui = await mount($, surface, columns)
+  const outer = await ui.find({ type: 'Box' })
+  const weather = await ui.find({ key: 'weather' })
+  const summary = await ui.find({ key: 'summary' })
+  await ui.unmount()
+
+  return {
+    direction: outer?.props.flexDirection,
+    weatherWidth: weather?.props.width,
+    weather: weather?.text,
+    summary: summary?.text,
+  }
+}
+
+// The pane minimized to a widget on the desktop app, anchored in the chat's
+// bottom right corner unless `props` say otherwise.
+const WIDGET = { placement: 'widget', anchoredEdges: ['bottom', 'right'] }
 
 // The person pressing a Button of the pane, by its key, in a pane `columns`
 // wide when given.
@@ -1521,6 +1561,145 @@ test('a click on ▼ shows a long line from part-way, marked, and a new update k
   // ▲ goes back five rows, to the start of the long line, under the new one.
   await press($, 'newer', 21)
   expect((await thoughts($, 'desktop', 21))[1]).toBe(`1s · ${words}`)
+})
+
+test('from WIDE_FROM columns the weather stands in a column of its own, the summary beside it; narrower, one above the other', async ($, on) => {
+  const { steps, clock } = engine(on, { rateLimits: limits(25) })
+
+  await $.session.start(start)
+  await $.session.measure(measure(90_000, 45))
+  await oneTurn($, steps, clock, 't1', 'fix it')
+
+  // A column short of it: one column, the weather on top.
+  for (const surface of ['desktop', 'terminal'] as const) {
+    expect(await layout($, surface, WIDE_FROM - 1)).toEqual({
+      direction: 'column',
+      weatherWidth: undefined,
+      weather: expect.stringContaining('45% of context · 90k / 200k'),
+      summary: undefined,
+    })
+  }
+
+  // From it: the weather on the left, wide enough for its longest line on
+  // one row (46 characters: 41 cells of the desktop's narrower face, 47 of
+  // the terminal's), and the summary in the rest.
+  for (const [surface, weatherWidth] of [
+    ['desktop', 41],
+    ['terminal', 47],
+  ] as const) {
+    const wide = await layout($, surface, WIDE_FROM)
+    expect([surface, wide.direction, wide.weatherWidth]).toEqual([surface, 'row', weatherWidth])
+    expect(wide.weather).toContain('45% of context · 90k / 200k')
+    expect(wide.weather).toContain('Usage limits')
+    expect(wide.weather).toContain('Week 25%')
+    expect(wide.weather).not.toContain('🧭')
+    expect(wide.summary).toContain('1s · Claude đang sửa lỗi.')
+    expect(wide.summary).toContain('Summary cost $0.002 - Haiku 5.5')
+  }
+
+  // Nothing is lost or added on the way: the same lines, in the same order.
+  expect(await allTexts($, 'desktop', WIDE_FROM)).toEqual(await allTexts($, 'desktop', WIDE_FROM - 1))
+})
+
+test('beside the weather the rule spans the summary, and a click moves half its taller window', async ($, on) => {
+  const { replies, steps, clock } = engine(on)
+  replies.push(
+    answer('GIST: Một.\nNEXT: Tiếp 1'),
+    answer('GIST: Hai.\nNEXT: Tiếp 2'),
+    answer('GIST: Ba.\nNEXT: Tiếp 3'),
+    answer('GIST: Bốn.\nNEXT: Tiếp 4'),
+  )
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, 'First note.'), stop])
+  await clock.advance(SECOND)
+
+  for (const text of ['Second note.', 'Third note.', 'Fourth note.']) {
+    await runStep($, steps, 't1', [thought(0, text), stop])
+    await clock.advance(15 * SECOND)
+  }
+
+  // At 120 columns the summary has the body's less the weather's (41 on the
+  // desktop, 47 on the terminal) and the 2 between: the rule spans those.
+  expect(await thoughts($, 'desktop', 120)).toContain('─'.repeat(76))
+  expect(await thoughts($, 'terminal', 120)).toContain('─'.repeat(70))
+
+  // Newest first, a row each: "46s · Bốn.", "→ Tiếp 4", and so on down to
+  // "→ Tiếp 1", the eighth. In one column a click passes five rows of a
+  // body of thirty...
+  await press($, 'older')
+  expect((await thoughts($))[1]).toBe('→ Tiếp 2')
+
+  // ...and beside the weather, where the window has the body's height but
+  // the summary's header and footer, twelve: past the last row, so it stops
+  // there.
+  await press($, 'newest')
+  await press($, 'older', 120)
+  expect((await thoughts($, 'desktop', 120))[1]).toBe('→ Tiếp 1')
+})
+
+test('with the summary off the weather keeps one column at any width', async ($, on) => {
+  engine(on, { stored: { isSummaryOff: true }, rateLimits: limits(25) })
+
+  await $.session.start(start)
+  expect(await layout($, 'desktop', 200)).toEqual({
+    direction: 'column',
+    weatherWidth: undefined,
+    weather: expect.stringContaining('Week 25% · reset in 2d 5h'),
+    summary: undefined,
+  })
+})
+
+test('minimized to a widget, the pane reads at a glance: the sky, the windows and the cost, the newest update', async ($, on) => {
+  const { steps, clock } = engine(on, { rateLimits: limits(25), cost: 1.234 })
+  on('session.compact', () => ({ messages: SUMMARY, tokensBefore: 180_000, tokensAfter: 20_000 }))
+
+  await $.session.start(start)
+  await $.session.measure(measure(90_000, 45))
+  await oneTurn($, steps, clock, 't1', 'fix it')
+  expect(await allTexts($, 'desktop', undefined, WIDGET)).toEqual([
+    '☁ Cloudy · 45%',
+    '5h 3% · Week 25% · $1.23',
+    '1s · Claude đang sửa lỗi.',
+  ])
+  // A click may not reach it there: nothing to press.
+  expect(await buttons($, WIDGET)).toEqual([])
+
+  // A widget one row tall shows the sky alone.
+  expect(await allTexts($, 'desktop', undefined, { ...WIDGET, scroll: { offset: 0, bodyRows: 1 } })).toEqual([
+    '☁ Cloudy · 45%',
+  ])
+
+  // Turned off, the summary's update goes from it.
+  await press($, 'summary-toggle')
+  expect(await allTexts($, 'desktop', undefined, WIDGET)).toEqual(['☁ Cloudy · 45%', '5h 3% · Week 25% · $1.23'])
+
+  // Compacted, the fill unknown until the next response.
+  await $.session.compact({ trigger: 'manual', messages: SUMMARY })
+  expect((await allTexts($, 'desktop', undefined, WIDGET))[0]).toBe('☀ Compacted')
+})
+
+test('a widget waits for the first reading, and lines up on the edge it is anchored to', async ($, on) => {
+  engine(on)
+
+  await $.session.start(start)
+  expect(await allTexts($, 'desktop', undefined, WIDGET)).toEqual(['Waiting for the first response.'])
+
+  // Anchored on the chat's right edge, its lines end there; elsewhere, as in
+  // the session rail, they start at the left.
+  const aligned = [
+    [['bottom', 'right'], 'flex-end'],
+    [['right'], 'flex-end'],
+    [['bottom', 'left'], undefined],
+    [[], undefined],
+  ] as const
+
+  for (const [anchoredEdges, alignItems] of aligned) {
+    const ui = await mount($, 'desktop', undefined, { ...WIDGET, anchoredEdges })
+    expect([anchoredEdges, (await ui.find({ type: 'Box' }))?.props.alignItems]).toEqual([anchoredEdges, alignItems])
+    await ui.unmount()
+  }
 })
 
 test('a long stretch of thinking is summarized a part at a time while it streams', async ($, on) => {

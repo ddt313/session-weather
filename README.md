@@ -22,6 +22,18 @@ then Haiku's updates on Claude's thinking, newest first, each with its gist,
 a decision (★), what Claude takes as true unchecked (?) and its next step
 (→).
 
+**Layout**
+
+- From 90 columns wide (character cells; on the desktop, cells of the code
+  font) the pane lays out in two, as a web page does on a wide screen: the
+  weather in a column of its own on the left, the thinking summary beside it
+  with the rest of the width and the pane's whole height. Narrower, or with
+  the summary off, the weather stands above the summary, as in the picture.
+  Drag the pane wider or narrower and it changes over.
+- Minimized to a widget on the desktop app, the pane shows what reads at a
+  glance, with no buttons: `☁ Cloudy · 42%`, `5h 30% · Week 74% · $1.23`, and
+  the summary's newest update.
+
 **Weather**
 
 - A forecast from how far the context has filled toward where the engine
@@ -106,7 +118,7 @@ a decision (★), what Claude takes as true unchecked (?) and its next step
   without an update (45 seconds by default), and for the turn's recap, WAIT
   is not allowed.
 - The prompt's earlier updates stay, newest first, in their own window under
-  the weather. A recap closes a turn that had two updates or more since the
+  the weather, or beside it in a wide pane. A recap closes a turn that had two updates or more since the
   last recap, or that ended with notes no update read. A new prompt of yours
   starts the list over.
 - A turn that a subagent's result begins (its hand-back, which the engine
