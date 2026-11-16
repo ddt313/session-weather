@@ -48,6 +48,7 @@ const thinking = atom({ plugin: 'session-weather', key: 'thinking' } as const, n
 // the updates it keeps, changes.
 const recentTurns = atom({ plugin: 'session-weather', key: 'recentTurns' } as const, [], { shape: 'recent-turns-1' })
 const pickedTurn = atom({ plugin: 'session-weather', key: 'pickedTurn' } as const, null)
+const isSaving = atom({ plugin: 'session-weather', key: 'isSaving' } as const, false)
 const isSummaryOn = atom({ plugin: 'session-weather', key: 'isSummaryOn' } as const, true)
 const summaryCost = atom({ plugin: 'session-weather', key: 'summaryCost' } as const, 0)
 const summaryPlace = atom({ plugin: 'session-weather', key: 'summaryPlace' } as const, { line: 0, row: 0 })
@@ -64,16 +65,17 @@ const PANE_ROWS = 12
 
 // The person's settings: the manifest's `userConfig` fields, each a row in
 // `/config`. The language Haiku writes the thinking summary in, the seconds
-// between its requests, and how far toward compaction (`levelOf`) the
-// forecast turns to Compact soon and the toast warns. A load reads them as
-// `register` begins, and a change in `/config` reloads the mod with the new
-// values, so it takes effect at once.
+// between its requests, how far toward compaction (`levelOf`) the forecast
+// turns to Compact soon and the toast warns, and the days after which the
+// mod's files not written since are deleted (`cleanUp`). A load reads them
+// as `register` begins, and a change in `/config` reloads the mod with the
+// new values, so it takes effect at once.
 //
 // A value of the right type outside its range is held to the range, here
 // and as it is set in `/config`, never refused: the manifest declares no
 // `min` or `max`, which would stop the whole mod from loading over a typo in
 // settings.json.
-type Settings = { language: string; gapSeconds: number; compactAt: number }
+type Settings = { language: string; gapSeconds: number; compactAt: number; cleanupDays: number }
 
 const DEFAULT_LANGUAGE = 'English'
 // Room for any language's name; a longer value is cut.
@@ -85,6 +87,8 @@ const GAP_SECONDS = { fallback: 15, min: 5, max: 120 }
 // The bands under it stay where they are: under 76 it would swallow Storm,
 // from 75, whole, so a lower value counts as 76.
 const COMPACT_SOON = { fallback: 90, min: 76, max: 100 }
+// 0 keeps every file; ten years is as good as forever.
+const CLEANUP_DAYS = { fallback: 30, min: 0, max: 3650 }
 
 // The language named, on one trimmed line; the default where none is.
 const languageOf = (value: unknown) => {
@@ -105,6 +109,7 @@ const FIELDS: Record<string, (value: unknown) => string | number> = {
   summaryLanguage: languageOf,
   summaryGapSeconds: value => numberIn(value, GAP_SECONDS),
   compactSoonPercent: value => numberIn(value, COMPACT_SOON),
+  cleanupDays: value => numberIn(value, CLEANUP_DAYS),
 }
 
 // The settings in `options`, a field left out or of the wrong type at its
@@ -113,6 +118,7 @@ const settingsOf = (options: PluginOptions): Settings => ({
   language: languageOf(options.summaryLanguage),
   gapSeconds: numberIn(options.summaryGapSeconds, GAP_SECONDS),
   compactAt: numberIn(options.compactSoonPercent, COMPACT_SOON),
+  cleanupDays: numberIn(options.cleanupDays, CLEANUP_DAYS),
 })
 
 // The settings this load runs with; `register` takes them first. The
@@ -658,6 +664,8 @@ const STORED_SUMMARY_OFF = 'isSummaryOff'
 const STORED_DEBUG_ON = 'isDebugOn'
 // The address of the Button that turns it off and on.
 const TOGGLE = 'summary-toggle'
+// The address of the Button that saves the session's recent turns.
+const SAVE_TOGGLE = 'save-turns'
 
 // What one turn keeps and one request sends. A summary of Claude's reasoning
 // (the Thinking transcript view brings them) can run to thousands of
@@ -1626,10 +1634,12 @@ const recordTurn = ($: EngineInterface, turn: Thinking) =>
   })
 
 // The turn kept, in its row of the recent turns and in its log: wherever
-// the log takes a turn, as it ends, waits or gets an update, its row does.
+// the log takes a turn, as it ends, waits or gets an update, its row does,
+// and the session's saved file where the person saves it.
 const keepTurn = async ($: EngineInterface, turn: Thinking) => {
   await recordTurn($, turn).catch(() => {})
   await logTurn($, turn)
+  await saveTurns($)
 }
 
 // A prompt of the person's begins a turn: its row, newest, from the fill
@@ -1677,7 +1687,7 @@ const recentLine = (one: RecentTurn, isNewest: boolean) =>
     formatTime(one.startedAt),
     one.durationMs !== undefined
       ? formatDuration(one.durationMs)
-      : isNewest
+      : isNewest && one.isAborted !== true
         ? one.isWaiting === true
           ? 'waiting'
           : 'running'
@@ -1719,6 +1729,160 @@ const shownTurnOf = (current: Thinking | null, picked: string | null, recent: re
 const pickTurn = async ($: EngineInterface, turnId: string | null) => {
   await update($, pickedTurn, () => turnId)
   await toNewest($)
+}
+
+// A session's recent turns kept past a restart of Claude Code, while the
+// person keeps saving on for it: a JSON file of the session's own beside its
+// thinking log, written whole as each turn is kept, read back when the
+// session starts again. A session never saved writes nothing.
+const TURNS_FOLDER = ['session-weather', 'turns'] as const
+// The shape a saved file holds, as the `recentTurns` atom's tag: a file
+// written in another is not read back.
+const SAVED_SHAPE = 'recent-turns-1'
+
+// What a saved file holds: the turns, and the compactions counted.
+type SavedTurns = { shape: string; turns: RecentTurn[]; compactions?: Compactions }
+
+const isStrings = (value: unknown) => Array.isArray(value) && value.every(item => typeof item === 'string')
+
+const isNumberOrNone = (value: unknown) => value === undefined || (typeof value === 'number' && Number.isFinite(value))
+
+// An update as a saved file holds it.
+const isEntry = (value: unknown): value is ThinkingEntry => {
+  const one = value as Partial<ThinkingEntry> | null
+
+  return (
+    typeof one === 'object' &&
+    one !== null &&
+    typeof one.at === 'number' &&
+    typeof one.gist === 'string' &&
+    isStrings(one.decisions) &&
+    isStrings(one.assumptions) &&
+    (one.next === undefined || typeof one.next === 'string') &&
+    (one.isRecap === undefined || one.isRecap === true)
+  )
+}
+
+// A turn's row as a saved file holds it.
+const isRecentTurn = (value: unknown): value is RecentTurn => {
+  const one = value as Partial<RecentTurn> | null
+
+  return (
+    typeof one === 'object' &&
+    one !== null &&
+    typeof one.turnId === 'string' &&
+    typeof one.startedAt === 'number' &&
+    typeof one.tools === 'number' &&
+    isNumberOrNone(one.durationMs) &&
+    isNumberOrNone(one.fromTokens) &&
+    isNumberOrNone(one.toTokens) &&
+    (one.isAborted === undefined || one.isAborted === true) &&
+    (one.isWaiting === undefined || one.isWaiting === true) &&
+    Array.isArray(one.entries) &&
+    one.entries.every(isEntry)
+  )
+}
+
+// A saved file's text; null for one in another shape, or that holds none.
+const parseSaved = (text: string): SavedTurns | null => {
+  try {
+    const value = JSON.parse(text) as { shape?: unknown; turns?: unknown; compactions?: Partial<Compactions> } | null
+
+    if (typeof value !== 'object' || value === null || value.shape !== SAVED_SHAPE || !Array.isArray(value.turns)) {
+      return null
+    }
+
+    const counted = value.compactions
+
+    return {
+      shape: SAVED_SHAPE,
+      turns: value.turns.filter(isRecentTurn).slice(-MAX_RECENT),
+      ...(typeof counted?.count === 'number' && typeof counted.isWhole === 'boolean'
+        ? { compactions: { count: counted.count, isWhole: counted.isWhole } }
+        : {}),
+    }
+  } catch {
+    return null
+  }
+}
+
+// The saved file's writes, one at a time, each whole.
+let saving: Promise<void> = Promise.resolve()
+
+// The session's turns and compactions to its saved file, while saving is
+// on; nothing otherwise.
+const saveTurns = ($: EngineInterface) => {
+  saving = saving
+    .then(async () => {
+      if (!(await read($, isSaving))) return
+
+      const path = await sessionFile($, TURNS_FOLDER, await $.session.id(), 'json')
+
+      if (path === null) return
+
+      const [turns, counted] = await Promise.all([read($, recentTurns), read($, compactions)])
+      const saved: SavedTurns = { shape: SAVED_SHAPE, turns, ...(counted === null ? {} : { compactions: counted }) }
+      await $.fs.write(path, JSON.stringify(saved))
+    })
+    .catch((error: unknown) => tell($, `Saved turns not written: ${messageOf(error)}`, { to: 'debug' }))
+
+  return saving
+}
+
+// The person's switch, for this session alone: on, its turns are saved now
+// and as each is kept; off, its saved file goes, or, should the host not
+// delete it, is emptied, for the clean-up to take later.
+const setSaving = async ($: EngineInterface, isOn: boolean) => {
+  await update($, isSaving, () => isOn)
+
+  if (isOn) {
+    await saveTurns($)
+
+    return
+  }
+
+  const path = await sessionFile($, TURNS_FOLDER, await $.session.id(), 'json')
+
+  saving = saving.then(async () => {
+    if (path === null || !(await $.fs.exists(path))) return
+
+    const isDeleted = await deleteFiles($, [path]).catch(() => false)
+
+    if (!isDeleted) await $.fs.write(path, '')
+  })
+  await saving.catch(() => {})
+}
+
+// A session that starts again (Claude Code started anew, or a session
+// resumed) and that the person saved: its turns and its compactions back,
+// and saving on. Only where the session keeps no turns yet, as after a
+// restart; a reload finds its own.
+const restoreTurns = async ($: EngineInterface) => {
+  if ((await read($, recentTurns)).length > 0) return
+
+  const path = await sessionFile($, TURNS_FOLDER, await $.session.id(), 'json')
+
+  if (path === null || !(await $.fs.exists(path))) return
+
+  const saved = parseSaved(await $.fs.read(path))
+
+  if (saved === null) return
+
+  // A turn under way as Claude Code closed ran no further: interrupted,
+  // its length not known, no longer running or waiting.
+  const turns = saved.turns.map(one => {
+    if (one.durationMs !== undefined) return one
+
+    const { isWaiting: _, ...rest } = one
+
+    return { ...rest, isAborted: true as const }
+  })
+  const counted = saved.compactions
+
+  await update($, recentTurns, () => turns)
+  await update($, isSaving, () => true)
+
+  if (counted !== undefined) await update($, compactions, one => (one === null || one.count === 0 ? counted : one))
 }
 
 // The tool as the model sees it, the summary's language as set.
@@ -2633,6 +2797,82 @@ const keepMark = async ($: EngineInterface, key: 'actions' | 'said', text: strin
   }
 }
 
+// Files of the mod's deleted at most this many to a command.
+const DELETE_BATCH = 50
+
+// Deletes the files at `paths`, all of them the mod's own. Its file API
+// deletes nothing, so a command of the host's does: PowerShell on Windows,
+// which reads the paths on its input, never from a command line a path's
+// `&` or space could break; rm elsewhere, run with no shell. A file already
+// gone is no error. Resolves whether every command ran clean.
+const deleteFiles = async ($: EngineInterface, paths: readonly string[]) => {
+  const isWindows = (await $.env.get('OS')) === 'Windows_NT'
+  let isClean = true
+
+  for (let at = 0; at < paths.length; at += DELETE_BATCH) {
+    const batch = paths.slice(at, at + DELETE_BATCH)
+    const { exitCode } = isWindows
+      ? await $.process.run(
+          [
+            'powershell.exe',
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            '$input | ForEach-Object { Remove-Item -LiteralPath $_ -Force -ErrorAction SilentlyContinue }',
+          ],
+          { stdin: batch.join('\n') },
+        )
+      : await $.process.run(['rm', '-f', '--', ...batch])
+
+    if (exitCode !== 0) isClean = false
+  }
+
+  return isClean
+}
+
+// The folders the mod writes its files in, which the clean-up keeps within
+// the setting's days: the thinking and debug logs, the spend files and the
+// saved turns.
+const KEPT_FOLDERS = [LOG_FOLDER, DEBUG_FOLDER, SPEND_FOLDER, TURNS_FOLDER] as const
+
+// When this module last looked for old files: once a day at most, and a
+// reload, its own, looks again.
+let cleanedAt = Number.NEGATIVE_INFINITY
+
+// Deletes the mod's files that nothing has written for the setting's days
+// (30 unless set; 0 keeps them all): each session's logs, spend and saved
+// turns, by when its file was last written. The session's own files stay.
+// Only files of the mod's kinds, in its own folders, never a link.
+const cleanUp = async ($: EngineInterface) => {
+  const now = await $.clock.now()
+
+  if (settings.cleanupDays === 0 || now - cleanedAt < DAY) return
+
+  cleanedAt = now
+  const sessionId = await $.session.id()
+  const own = new Set([fileNameOf(sessionId, 'md'), fileNameOf(sessionId, 'json')])
+  const before = now - settings.cleanupDays * DAY
+  const old: string[] = []
+
+  for (const folder of KEPT_FOLDERS) {
+    const dir = await modFolder($, folder)
+    const entries = dir === null ? [] : await $.fs.list(dir).catch(() => [])
+
+    for (const entry of entries) {
+      const isOld = entry.kind === 'file' && !entry.isLink && entry.mtimeMs < before
+      const isKind = /\.(?:md|json)$/.test(entry.name) && !own.has(entry.name)
+
+      if (dir !== null && isOld && isKind) old.push(joinPath(dir, entry.name))
+    }
+  }
+
+  if (old.length > 0 && !(await deleteFiles($, old))) {
+    tell($, `Session Weather: not every file older than ${plural(settings.cleanupDays, 'day')} was deleted.`, {
+      to: 'debug',
+    })
+  }
+}
+
 // A line on where the summary stands, when the updates do not say it:
 // after a WAIT, what Haiku waits for, in the summary's language, under a
 // word in Vietnamese where that is the language, else in English.
@@ -2672,8 +2912,10 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     // Also runs on every hot reload: seed the reading, but leave the samples
     // alone. A mod loaded mid-session counts the next turn's growth from this
-    // reading, not from zero. What the engine and the store hold is read all
-    // at once.
+    // reading, not from zero. A session the person saved gets its turns and
+    // compactions back first, after a restart. What the engine and the store
+    // hold is read all at once.
+    await restoreTurns($).catch(() => {})
     const [usage, breakdown, isClosed] = await Promise.all([
       $.session.usage(),
       readBreakdown($),
@@ -2724,9 +2966,12 @@ export const register: Register = (on, options) => {
       void recountShares($).catch(() => {})
       void showStatus($).catch(() => {})
       void minuteSubagents($).catch(() => {})
+      void cleanUp($).catch(() => {})
     })
     // Subagents at work since before a reload show at once.
     void runningSubagents($).catch(() => {})
+    // The mod's old files go as the session starts, and once a day after.
+    void cleanUp($).catch(() => {})
     await $.command.register({
       name: COMMAND,
       description: 'Open the Session Weather pane',
@@ -3141,6 +3386,7 @@ export const register: Register = (on, options) => {
       spawnedAt.clear()
       await update($, recentTurns, () => [])
       await update($, pickedTurn, () => null)
+      await update($, isSaving, () => false)
       await showStatus($).catch(() => {})
       await toNewest($)
       isOwed = false
@@ -3154,14 +3400,18 @@ export const register: Register = (on, options) => {
       // The host wipes the pane's values once the session has ended: the
       // person's choices and the limits come back from the store after it,
       // the parts are counted for the next session, the new session's facts
-      // and breakdown are read, and the status line reads what is left.
+      // and breakdown are read (a resumed one's saved turns first), and the
+      // status line reads what is left.
       $.clock.after(SECOND, () =>
         void restore($)
           .then(() =>
             Promise.all([
               recountShares($),
               showStatus($),
-              readFacts($).then(async () => keepBreakdown($, await readBreakdown($))),
+              restoreTurns($)
+                .catch(() => {})
+                .then(() => readFacts($))
+                .then(async () => keepBreakdown($, await readBreakdown($))),
             ]),
           )
           .catch(() => {}),
@@ -3188,6 +3438,7 @@ export const register: Register = (on, options) => {
     // filled the context is read again with the next measurement.
     try {
       await update($, compactions, one => ({ count: (one?.count ?? 0) + 1, isWhole: one?.isWhole ?? false }))
+      await saveTurns($)
       await update($, fills, () => null)
       const { window } = (await $.session.usage()).context
       const drop =
@@ -3273,7 +3524,7 @@ export const register: Register = (on, options) => {
     // pane shows is read only there: a narrower one redraws for none of it.
     const isRoomy = e.props.bodyColumns >= WIDE_FROM
     const isWide = isOn && isRoomy
-    const [filled, known, counted, atWork, recent, picked] = isRoomy
+    const [filled, known, counted, atWork, recent, picked, isSaved] = isRoomy
       ? await Promise.all([
           read($, fills),
           read($, facts),
@@ -3281,8 +3532,9 @@ export const register: Register = (on, options) => {
           read($, subagents),
           read($, recentTurns),
           read($, pickedTurn),
+          read($, isSaving),
         ])
-      : ([null, null, null, [] as Subagent[], [] as RecentTurn[], null] as const)
+      : ([null, null, null, [] as Subagent[], [] as RecentTurn[], null, false] as const)
     isRoomyDrawn = isRoomy
     isWideDrawn = isWide
     // The characters a row of the weather holds, what it adds cut to them
@@ -3358,20 +3610,27 @@ export const register: Register = (on, options) => {
     // "🧭 Thinking · 1m 46s", the turn's whole length once it ended; "·
     // waiting for 2 subagents" while their results are still to come. A turn
     // picked from the list says when it began: "🧭 Turn at 14:32 · 2m 14s ·
-    // done".
+    // done", its length left out where its end was not seen (Claude Code
+    // closed while it ran).
     const header =
       turnShown === null
         ? '🧭 Thinking'
-        : [
-            view.isPast ? `🧭 Turn at ${formatTime(turnShown.startedAt)}` : '🧭 Thinking',
-            formatDuration(Math.max(0, turnShown.durationMs ?? at - turnShown.startedAt)),
-            ...(turnShown.durationMs !== undefined
-              ? [turnShown.isAborted ? 'interrupted' : 'done']
-              : turnShown.paused !== undefined
-                ? [waitingFor(turnShown.paused.subagents)]
-                : []),
-            ...(turnShown.isSummarizing ? ['summarizing…'] : []),
-          ].join(' · ')
+        : view.isPast
+          ? [
+              `🧭 Turn at ${formatTime(turnShown.startedAt)}`,
+              ...(turnShown.durationMs === undefined ? [] : [formatDuration(turnShown.durationMs)]),
+              turnShown.isAborted ? 'interrupted' : 'done',
+            ].join(' · ')
+          : [
+              '🧭 Thinking',
+              formatDuration(Math.max(0, turnShown.durationMs ?? at - turnShown.startedAt)),
+              ...(turnShown.durationMs !== undefined
+                ? [turnShown.isAborted ? 'interrupted' : 'done']
+                : turnShown.paused !== undefined
+                  ? [waitingFor(turnShown.paused.subagents)]
+                  : []),
+              ...(turnShown.isSummarizing ? ['summarizing…'] : []),
+            ].join(' · ')
 
     const status = view.isPast
       ? turnShown?.entries.length === 0
@@ -3475,6 +3734,22 @@ export const register: Register = (on, options) => {
     const canScroll = isPinned && laid.rows.length > 1
     const step = pageStep(rows, isWide ? WIDE_OVERHEAD : PANE_OVERHEAD)
 
+    // The recent turns' header, and beside it the person's switch for
+    // keeping this session's turns past a restart of Claude Code: off unless
+    // pressed.
+    const recentHeader = (
+      <Box flexDirection="row" gap={2}>
+        <Text {...BLOCK_HEADER}>Recent turns</Text>
+        <Button
+          key={SAVE_TOGGLE}
+          plain
+          dimColor={!isSaved}
+          label={isSaved ? '☑ Saved' : '☐ Save'}
+          onPress={() => setSaving($, !isSaved).catch(() => {})}
+        />
+      </Box>
+    )
+
     // The weather: the fill, the limits and the session's cost; roomy, the
     // pace on the limits, what fills the context, the session's line, the
     // subagents at work and the recent turns too. A column of its own beside
@@ -3565,7 +3840,7 @@ export const register: Register = (on, options) => {
         )}
         {recent.length > 0 && (
           <Box flexDirection="column">
-            <Text {...BLOCK_HEADER}>Recent turns</Text>
+            {recentHeader}
             {[...recent].reverse().map((one, index) => {
               // Newest first, so that a column too short for them all cuts
               // the oldest. Beside the summary each is pressed to show its

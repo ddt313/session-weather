@@ -22,6 +22,12 @@
       "title": "Compact soon at (% of the way to compaction)",
       "description": "Where the forecast turns to Compact soon and a toast warns, in percent of the way to the auto-compact point, from 76 to 100; a value outside that is held to it, so Storm (from 75) keeps its band.",
       "default": 90
+    },
+    "cleanupDays": {
+      "type": "number",
+      "title": "Delete the mod's old files after (days)",
+      "description": "The thinking logs, debug logs, spend files and saved turns the mod writes under ~/.claude/session-weather are deleted once none has been written for this many days, looked for once a day; 0 keeps them all. From 0 to 3650; a value outside that is held to it.",
+      "default": 30
     }
   }
 }

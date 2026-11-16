@@ -166,6 +166,11 @@ declare module 'claude-code' {
       // The turn of `recentTurns` whose updates the wide layout shows, by its
       // id; null for the newest, which a new prompt picks again.
       pickedTurn: string | null
+      // Whether the person keeps this session's recent turns, and its count
+      // of compactions, past a restart of Claude Code: saved to a file of the
+      // session's own and read back when it starts again. Off unless they
+      // turn it on.
+      isSaving: boolean
       // Whether the thinking summary runs; the person turns it off and on.
       isSummaryOn: boolean
       // What the summary's Haiku requests cost this session, in US dollars:

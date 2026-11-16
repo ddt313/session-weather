@@ -64,9 +64,9 @@ a decision (★), what Claude takes as true unchecked (?) and its next step
   and holds no spend from before them. A session the mod first counts
   mid-way, as when it loads into one already running, spreads what it
   spent until then evenly over its life so far. Off a subscription no
-  window has a reading, and nothing is written. The files stay until you
-  remove them, a few kilobytes each; one last written before the week
-  began is no longer read.
+  window has a reading, and nothing is written. The files are a few
+  kilobytes each; one last written before the week began is no longer read,
+  and the clean-up (see **Old files**) deletes it in time.
 - The session's cost at API prices, as `/cost` reports it.
 
 **Wide layout**
@@ -118,10 +118,17 @@ Each row is cut to the column, never wrapped.
   With the summary off they are figures alone. A pane too short for them all
   leaves the oldest out.
 - The recent turns are kept with the session's other values, each with its
-  figures and its newest 100 updates: reloading the mod keeps them, a
-  `/clear` starts the list over with the new conversation, and a session
-  resumed in a new Claude Code process starts it empty (its thinking log
-  still holds the earlier turns' updates, for Claude to read).
+  figures and its newest 100 updates: reloading the mod keeps them, and a
+  `/clear` starts the list over with the new conversation. Closing Claude
+  Code loses them, unless you saved the session: **☐ Save**, beside the
+  header, off until you press it, and for this session alone. Pressed, it
+  reads **☑ Saved**, and the session's turns and its count of compactions go
+  to a file named after the session's id in
+  `~/.claude/session-weather/turns/`, written again as each turn ends or gets
+  an update. When the session starts again, after a restart or resumed, they
+  come back, saving still on; a turn the restart cut short reads
+  `interrupted`. Pressed again, saving stops and the file is deleted. A
+  session never saved writes no such file.
 
 **Status line**
 
@@ -214,10 +221,10 @@ Each row is cut to the column, never wrapped.
   every update with `full`. Its description tells Claude that the log is
   Haiku's paraphrase of its summarized thinking, to check against the code
   or the transcript, not a record of what it decided.
-- The mod cannot delete files (its file API has no delete), so the logs stay
-  until you remove them; a turn takes a kilobyte or two. The file API reads
-  and writes no file past 4 MiB, so past 3 MiB a session's thinking log
-  leaves its oldest turns out.
+- A turn takes a kilobyte or two of the log. The file API reads and writes
+  no file past 4 MiB, so past 3 MiB a session's thinking log leaves its
+  oldest turns out. The clean-up (see **Old files**) deletes a log nothing
+  has written for 30 days.
 - The summary is written in English unless you set another language.
 - Each update or WAIT is one Haiku request on the session's own account,
   about $0.001; the pane shows what the summaries cost this session. The request
@@ -231,11 +238,22 @@ Each row is cut to the column, never wrapped.
   system prompt at its top and the newest 30 requests kept; each also leaves
   a dim line in the transcript, which Claude is not sent. The pane's footer
   says `debug log on` while it is. The file holds your prompts and Claude's
-  thinking notes, and stays until you remove it.
+  thinking notes, and stays until the clean-up deletes it, or you do.
+
+**Old files**
+
+The mod's files under `~/.claude/session-weather/` (the thinking and debug
+logs, the spend files and the saved turns) are deleted once nothing has
+written them for 30 days, a setting; 0 keeps them all. The mod looks as a
+session starts, and once a day while it runs, and leaves the session's own
+files, files of other kinds and links alone. Its file API deletes nothing,
+so a command does: PowerShell on Windows, which reads the paths on its
+input, `rm` elsewhere. A saved session left unopened that long loses its
+saved turns too.
 
 **Settings**
 
-Three rows in `/config`, kept in settings.json under
+Four rows in `/config`, kept in settings.json under
 `pluginConfigs["session-weather@ddt313-mods"].options`. A change there takes
 effect at once: Claude Code loads the mod again with the new value, as
 `/reload-plugins` would. The pane and the turn's updates stay; a Haiku request
@@ -258,6 +276,9 @@ under way is dropped, and the next one is asked on the new terms.
   compaction, in percent of the way, the forecast turns to ϟ Compact soon,
   the toast warns and the status line's sky turns ϟ. The bands under it stay
   at 25, 50 and 75, so it runs from 76 to 100: Storm keeps at least 75.
+- **Delete the mod's old files after (days)** (`cleanupDays`, default 30):
+  the days after which a file of the mod's that nothing has written since is
+  deleted (see **Old files**), from 0 to 3650; 0 keeps every file.
 
 A number outside its range is held to the range, never refused: as you set
 it in `/config`, where the row then shows the value in use, and as the mod

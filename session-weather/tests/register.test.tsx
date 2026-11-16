@@ -112,6 +112,8 @@ const engine = (
   const files = new Map(Object.entries(usage.files ?? {}))
   const mtimes = new Map([...files.keys()].map(path => [path, usage.written?.[path] ?? NOW]))
   const registered: unknown[] = []
+  // The commands the mod ran on the host.
+  const runs: { argv: string[]; stdin?: string }[] = []
   // The session's id; a /clear moves it on.
   let sessionId = 'session-1'
   // What each `$.turn.step` streams, in turn (a `{ wait }` holds the stream
@@ -260,6 +262,19 @@ const engine = (
       })),
     }
   })
+  // A command the mod runs, kept in turn: deleting files, rm's after its
+  // `--` or PowerShell's on its input, which the disk then lets go.
+  on('process.run', ($, e) => {
+    runs.push({ argv: [...e.argv], stdin: e.init?.stdin })
+    const paths = e.argv[0] === 'rm' ? e.argv.slice(e.argv.indexOf('--') + 1) : (e.init?.stdin ?? '').split('\n')
+
+    for (const path of paths) {
+      files.delete(key(path))
+      mtimes.delete(key(path))
+    }
+
+    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
   on('tool.register', ($, e, next) => {
     registered.push(e)
 
@@ -306,6 +321,7 @@ const engine = (
     files,
     store,
     registered,
+    runs,
     redraws: () => redraws,
     // Another session writes its file, or this one's own changes, now.
     write: (path: string, text: string) => {
@@ -2133,6 +2149,174 @@ test("a hand-back goes on in its turn's row; the list keeps the last eight turns
   expect((await pane($, 'terminal', WIDE_FROM)).includes('Recent turns')).toBe(false)
 })
 
+// The mod's folder of files, and the file a saved session's turns go to.
+const MOD_FILES = '/home/me/.claude/session-weather'
+const SAVED = `${MOD_FILES}/turns/session-1.json`
+
+// What the session's saved file holds, as JSON.
+type Saved = {
+  shape: string
+  turns: { turnId: string; durationMs?: number; entries: { gist: string }[] }[]
+  compactions?: { count: number; isWhole: boolean }
+}
+
+const savedIn = (files: Map<string, string>) => JSON.parse(files.get(SAVED) ?? 'null') as Saved | null
+
+test("saving is off until pressed: then the session's turns and compactions go to a file of its own; pressed again, it goes", async ($, on) => {
+  const { files, runs, steps, clock } = engine(on)
+  on('session.compact', () => ({ messages: SUMMARY, tokensBefore: 180_000, tokensAfter: 20_000 }))
+
+  await $.session.start(start)
+  await oneTurn($, steps, clock, 't1', 'fix it')
+
+  // Off unless pressed: nothing is written.
+  expect(await buttons($, { bodyColumns: WIDE_FROM })).toContain('☐ Save')
+  expect(files.has(SAVED)).toBe(false)
+
+  await press($, 'save-turns', WIDE_FROM)
+  expect(await buttons($, { bodyColumns: WIDE_FROM })).toContain('☑ Saved')
+  expect(savedIn(files)?.shape).toBe('recent-turns-1')
+  expect(savedIn(files)?.turns.map(one => [one.turnId, one.durationMs, one.entries.map(entry => entry.gist)])).toEqual([
+    ['t1', 2_000, ['Claude đang sửa lỗi.']],
+  ])
+  expect(savedIn(files)?.compactions).toEqual({ count: 0, isWhole: true })
+
+  // A compaction and the next turn are saved as they come.
+  await $.session.compact({ trigger: 'manual', messages: SUMMARY })
+  expect(savedIn(files)?.compactions).toEqual({ count: 1, isWhole: true })
+  await oneTurn($, steps, clock, 't2', 'and this')
+  expect(savedIn(files)?.turns.map(one => one.turnId)).toEqual(['t1', 't2'])
+
+  // Pressed again: the file goes, by a command of the host's.
+  await press($, 'save-turns', WIDE_FROM)
+  expect(runs.at(-1)?.argv).toEqual(['rm', '-f', '--', SAVED])
+  expect(files.has(SAVED)).toBe(false)
+  expect(await buttons($, { bodyColumns: WIDE_FROM })).toContain('☐ Save')
+})
+
+test('a saved session started again gets its turns and compactions back, saving on; a turn the restart cut reads interrupted', async ($, on) => {
+  const saved = {
+    shape: 'recent-turns-1',
+    turns: [
+      {
+        turnId: 't1',
+        startedAt: NOW - HOUR,
+        durationMs: 134_000,
+        fromTokens: 0,
+        toTokens: 90_000,
+        tools: 3,
+        entries: [{ at: NOW - HOUR + SECOND, gist: 'Một.', decisions: [], assumptions: [] }],
+      },
+      { turnId: 't2', startedAt: NOW - 10 * MINUTE, fromTokens: 90_000, toTokens: 97_000, tools: 1, isWaiting: true, entries: [] },
+    ],
+    compactions: { count: 2, isWhole: true },
+  }
+  engine(on, { files: { [SAVED]: JSON.stringify(saved) }, breakdown: BREAKDOWN, turns: 2 })
+
+  await $.session.start(start)
+  expect(await turnRows($, 'terminal')).toEqual([
+    `${clockOf(NOW - 10 * MINUTE)} · ▲ +7k · 1 tool · interrupted`,
+    `${clockOf(NOW - HOUR)} · 2m 14s · ▲ +90k · 3 tools`,
+  ])
+  expect(await buttons($, { bodyColumns: WIDE_FROM })).toContain('☑ Saved')
+  // All its compactions, not those since the restart alone.
+  expect((await sessionShown($, 'terminal')).join('\n')).toContain('2 compactions')
+
+  await press($, 'turn-t1', WIDE_FROM)
+  expect(await thoughts($, 'terminal', WIDE_FROM)).toEqual([
+    `🧭 Turn at ${clockOf(NOW - HOUR)} · 2m 14s · done`,
+    '1s · Một.',
+    'Summary cost $0.000 - Haiku 5.5',
+  ])
+
+  await press($, 'turn-t2', WIDE_FROM)
+  expect((await thoughts($, 'terminal', WIDE_FROM)).slice(0, 2)).toEqual([
+    `🧭 Turn at ${clockOf(NOW - 10 * MINUTE)} · interrupted`,
+    'No updates on this turn.',
+  ])
+})
+
+for (const [kind, text] of [
+  ['in another shape', JSON.stringify({ shape: 'recent-turns-0', turns: [{ turnId: 't1' }] })],
+  ['emptied', ''],
+] as const) {
+  test(`a saved file ${kind} gives nothing back`, async ($, on) => {
+    engine(on, { files: { [SAVED]: text } })
+
+    await $.session.start(start)
+    await $.turn.start({ text: 'go', turnId: 't9' })
+    expect(await turnRows($, 'terminal')).toEqual([`▸ ${clockOf(NOW)} · running · 0 tools`])
+    expect(await buttons($, { bodyColumns: WIDE_FROM })).toContain('☐ Save')
+  })
+}
+
+// The mod's files, each written `days` days ago.
+const aged = (entries: [string, number][]) => ({
+  files: Object.fromEntries(entries.map(([path]) => [path, 'x'])),
+  written: Object.fromEntries(entries.map(([path, days]) => [path, NOW - days * DAY])),
+})
+
+test("the mod's files nothing has written for 30 days are deleted as a session starts; its own, newer ones and others stay", async ($, on) => {
+  const old = [
+    `${MOD_FILES}/thinking/old.md`,
+    `${MOD_FILES}/debug/old.md`,
+    `${MOD_FILES}/spend/old.json`,
+    `${MOD_FILES}/turns/old.json`,
+  ]
+  const kept = [`${MOD_FILES}/thinking/new.md`, `${MOD_FILES}/thinking/session-1.md`, `${MOD_FILES}/thinking/notes.txt`]
+  const { files, runs, clock } = engine(
+    on,
+    aged([
+      ...old.map((path): [string, number] => [path, 31]),
+      [kept[0]!, 29],
+      [kept[1]!, 90],
+      [kept[2]!, 90],
+    ]),
+  )
+
+  await $.session.start(start)
+  await clock.settle()
+  expect(runs).toEqual([{ argv: ['rm', '-f', '--', ...old], stdin: undefined }])
+  expect([...files.keys()].sort()).toEqual([...kept].sort())
+
+  // Once a day at most: a reading a minute on looks no further.
+  await clock.advance(MINUTE)
+  expect(runs.length).toBe(1)
+})
+
+test('on Windows PowerShell deletes them, the paths on its input', async ($, on) => {
+  const old = '/Users/me/.claude/session-weather/thinking/old.md'
+  const { files, runs, clock } = engine(on, {
+    env: { OS: 'Windows_NT', USERPROFILE: 'C:\\Users\\me', HOME: '/c/Users/me' },
+    ...aged([[old, 40]]),
+  })
+
+  await $.session.start(start)
+  await clock.settle()
+  expect(runs.map(run => run.argv[0])).toEqual(['powershell.exe'])
+  expect(runs[0]?.stdin).toBe('C:\\Users\\me\\.claude\\session-weather\\thinking\\old.md')
+  expect(files.has(old)).toBe(false)
+})
+
+test('the days are a setting: at 7 a file written eight days ago goes', { options: { cleanupDays: 7 } }, async ($, on) => {
+  const file = `${MOD_FILES}/thinking/old.md`
+  const { files, clock } = engine(on, aged([[file, 8]]))
+
+  await $.session.start(start)
+  await clock.settle()
+  expect(files.has(file)).toBe(false)
+})
+
+test('at 0 days every file stays', { options: { cleanupDays: 0 } }, async ($, on) => {
+  const file = `${MOD_FILES}/thinking/old.md`
+  const { files, runs, clock } = engine(on, aged([[file, 400]]))
+
+  await $.session.start(start)
+  await clock.settle()
+  expect(runs).toEqual([])
+  expect(files.has(file)).toBe(true)
+})
+
 test("each block's header reads as one: a step larger than its rows, heavier, muted", async ($, on) => {
   const { agents } = engine(on, { rateLimits: PACED })
   on('agent.spawn', () => ({ model: 'claude-haiku-5-5', agentId: 'a1' }))
@@ -3900,6 +4084,9 @@ test('a setting changed in /config is stored as the mod will use it; other rows 
   await setRow($, 'session-weather.compactSoonPercent', 50)
   await setRow($, 'session-weather.summaryLanguage', '  Japanese \n')
   await setRow($, 'session-weather.summaryLanguage', '')
+  await setRow($, 'session-weather.cleanupDays', -3)
+  await setRow($, 'session-weather.cleanupDays', 7.6)
+  await setRow($, 'session-weather.cleanupDays', 99_999)
   // A value of the wrong kind is the engine's to refuse.
   await setRow($, 'session-weather.summaryGapSeconds', 'soon')
   await setRow($, 'theme', 'dark')
@@ -3912,6 +4099,9 @@ test('a setting changed in /config is stored as the mod will use it; other rows 
     { key: 'session-weather.compactSoonPercent', value: 76 },
     { key: 'session-weather.summaryLanguage', value: 'Japanese' },
     { key: 'session-weather.summaryLanguage', value: 'English' },
+    { key: 'session-weather.cleanupDays', value: 0 },
+    { key: 'session-weather.cleanupDays', value: 8 },
+    { key: 'session-weather.cleanupDays', value: 3650 },
     { key: 'session-weather.summaryGapSeconds', value: 'soon' },
     { key: 'theme', value: 'dark' },
     { key: 'other-mod.summaryGapSeconds', value: 1 },
