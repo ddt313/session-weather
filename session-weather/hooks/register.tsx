@@ -9,12 +9,13 @@ import type {
   UiLogOptions,
 } from 'claude-code'
 
-import type { AutoCompact, Limit, Reading, Thinking, ThinkingEntry, TurnMark } from '../types'
+import type { AutoCompact, Limit, Reading, Share, Thinking, ThinkingEntry, TurnMark } from '../types'
 
 const reading = atom({ plugin: 'session-weather', key: 'reading' } as const, null)
 const samples = atom({ plugin: 'session-weather', key: 'samples' } as const, [])
 const delta = atom({ plugin: 'session-weather', key: 'delta' } as const, null)
 const limits = atom({ plugin: 'session-weather', key: 'limits' } as const, [])
+const shares = atom({ plugin: 'session-weather', key: 'shares' } as const, [])
 const turnTools = atom({ plugin: 'session-weather', key: 'turnTools' } as const, 0)
 const lastTurn = atom({ plugin: 'session-weather', key: 'lastTurn' } as const, null)
 const autoCompact = atom({ plugin: 'session-weather', key: 'autoCompact' } as const, null)
@@ -115,12 +116,33 @@ const bar = (percent: number) => {
   return '█'.repeat(filled) + '░'.repeat(20 - filled)
 }
 
+// This session's part of a window, in the theme's yellow.
+const MINE = 'warning'
+
+// A window's bar split where this session's part of the share used (`mine`
+// points of it) begins: the last of the filled cells, rounded as they are,
+// so a part under half a cell has none.
+const barParts = (percent: number, mine: number) => {
+  const filled = Math.max(0, Math.min(20, Math.round(percent / 5)))
+  const own = Math.min(filled, Math.round(Math.max(0, mine) / 5))
+
+  return { others: '█'.repeat(filled - own), own: '█'.repeat(own), free: '░'.repeat(20 - filled) }
+}
+
+// "8%"; "<1%" under half a point.
+const formatPart = (points: number) => (points < 0.5 ? '<1%' : `${Math.round(points)}%`)
+
+const MINUTE = 60_000
+const HOUR = 60 * MINUTE
+const DAY = 24 * HOUR
+
 // The account's windows as the rate-limit notices name them, in the order
-// shown. The engine reports each one's share used and its reset, never a
-// count of tokens.
+// shown, and how long each runs: one began its length before its reset. The
+// engine reports each one's share used and its reset, never a count of
+// tokens.
 const WINDOWS = [
-  { kind: 'five_hour', name: '5h' },
-  { kind: 'seven_day', name: 'Week' },
+  { kind: 'five_hour', name: '5h', length: 5 * HOUR },
+  { kind: 'seven_day', name: 'Week', length: 7 * DAY },
 ] as const
 
 // The last windows any session read, kept across sessions: the engine has
@@ -149,10 +171,6 @@ const storedLimits = async ($: EngineInterface) => {
   return Array.isArray(value) ? value.filter(isLimit) : []
 }
 
-const MINUTE = 60_000
-const HOUR = 60 * MINUTE
-const DAY = 24 * HOUR
-
 // "5d 7h", "4h 38m", "12m", "<1m".
 const formatLeft = (ms: number) => {
   if (ms >= DAY) return `${Math.floor(ms / DAY)}d ${Math.floor((ms % DAY) / HOUR)}h`
@@ -162,10 +180,12 @@ const formatLeft = (ms: number) => {
   return '<1m'
 }
 
-// The windows to show, in order. Past its reset the share read before is
-// stale: that window is left out until the next reading.
+// The windows to show, in order: each one's share used, rounded and as read,
+// the time left until its reset, and when it began, where the reset is
+// known. Past its reset the share read before is stale: that window is left
+// out until the next reading.
 const liveWindows = (readings: readonly Limit[], now: number) =>
-  WINDOWS.flatMap(({ kind, name }) => {
+  WINDOWS.flatMap(({ kind, name, length }) => {
     const limit = readings.find(one => one.kind === kind)
 
     if (limit === undefined) {
@@ -178,7 +198,9 @@ const liveWindows = (readings: readonly Limit[], now: number) =>
       return []
     }
 
-    return [{ name, used: Math.round(limit.percentUsed), left }]
+    const start = left === undefined || Number.isNaN(left) ? undefined : now + left - length
+
+    return [{ kind, name, used: Math.round(limit.percentUsed), percent: limit.percentUsed, left, start }]
   })
 
 // What the countdowns read now; the pane is drawn again only when it
@@ -755,13 +777,13 @@ const joinPath = (base: string, ...parts: string[]) => {
   return [base.replace(/[\\/]+$/, ''), ...parts].join(separator)
 }
 
-// A file of the session's own in a folder of the mod's, in the configuration
-// directory as Claude Code finds it: the variable that moves it, else
-// `.claude` in the home directory as Node reads it, the profile on Windows
-// (where every process has OS=Windows_NT) and HOME elsewhere: a USERPROFILE
-// that WSL passes on names the Windows profile, or no path of this host.
-// Null where no directory is known.
-const sessionFile = async ($: EngineInterface, folder: readonly string[], sessionId: string) => {
+// A folder of the mod's in the configuration directory as Claude Code finds
+// it: the variable that moves it, else `.claude` in the home directory as
+// Node reads it, the profile on Windows (where every process has
+// OS=Windows_NT) and HOME elsewhere: a USERPROFILE that WSL passes on names
+// the Windows profile, or no path of this host. Null where no directory is
+// known.
+const modFolder = async ($: EngineInterface, folder: readonly string[]) => {
   const moved = present(await $.env.get('CLAUDE_CONFIG_DIR'))
   const isWindows = (await $.env.get('OS')) === 'Windows_NT'
   const home = isWindows
@@ -769,7 +791,18 @@ const sessionFile = async ($: EngineInterface, folder: readonly string[], sessio
     : present(await $.env.get('HOME'))
   const dir = moved ?? (home === undefined ? undefined : joinPath(home, '.claude'))
 
-  return dir === undefined ? null : joinPath(dir, ...folder, `${sessionId.replace(/[^\w.-]/g, '_')}.md`)
+  return dir === undefined ? null : joinPath(dir, ...folder)
+}
+
+// The name of the session's own file of a kind: its id, made safe.
+const fileNameOf = (sessionId: string, extension: string) => `${sessionId.replace(/[^\w.-]/g, '_')}.${extension}`
+
+// A file of the session's own in a folder of the mod's, Markdown unless
+// said; null where no directory is known.
+const sessionFile = async ($: EngineInterface, folder: readonly string[], sessionId: string, extension = 'md') => {
+  const dir = await modFolder($, folder)
+
+  return dir === null ? null : joinPath(dir, fileNameOf(sessionId, extension))
 }
 
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error))
@@ -800,6 +833,196 @@ const rewrite = async (
   const text = (await $.fs.exists(path)) ? await $.fs.read(path) : ''
   await $.fs.write(path, await change(text, sessionId))
 }
+
+// This session's part of each rate-limit window. The engine reports a
+// window's share used for the whole account, and never what used it: each
+// session writes what it spends, at API prices, to a file of its own, and
+// this session's part of a window is its spend there over what every
+// session's file spent there, times the window's share. Spend the files do
+// not see (claude.ai, another computer, a session without the mod) counts
+// toward the sessions here in proportion.
+const SPEND_FOLDER = ['session-weather', 'spend'] as const
+
+// A stretch of spend, spread evenly over it: from and to (ms since the
+// epoch), and US dollars. Each minute a session spent in is one; what it
+// spent before the mod counted it is one over its life until then.
+type Span = [number, number, number]
+
+// A session's spend file: its spans, and the session's cost, as the engine
+// totals it, that they count up to (absent until a total was counted).
+type SpendFile = { seen?: number; spans: Span[] }
+
+// The longest window: a span that ended before it began counts in none, and
+// is dropped as the file is written again.
+const LONGEST = Math.max(...WINDOWS.map(window => window.length))
+
+const isSpan = (value: unknown): value is Span =>
+  Array.isArray(value) &&
+  value.length === 3 &&
+  value.every(n => typeof n === 'number' && Number.isFinite(n)) &&
+  value[0] < value[1] &&
+  value[2] >= 0
+
+// A spend file's text; null for one that holds none, or is not whole yet
+// (its session writing it as it is read).
+const parseSpend = (text: string): SpendFile | null => {
+  try {
+    const value = JSON.parse(text) as { seen?: unknown; spans?: unknown } | null
+
+    if (typeof value !== 'object' || value === null || !Array.isArray(value.spans)) return null
+
+    const { seen } = value
+
+    return {
+      ...(typeof seen === 'number' && Number.isFinite(seen) ? { seen } : {}),
+      spans: value.spans.filter(isSpan),
+    }
+  } catch {
+    return null
+  }
+}
+
+// What the spans spent from `start` on: each one's part that lies past it.
+const spentSince = (spans: readonly Span[], start: number) =>
+  spans.reduce((sum, [from, to, usd]) => (to <= start ? sum : sum + (usd * (to - Math.max(from, start))) / (to - from)), 0)
+
+// Dollars to the millionth, so a file holds no long fractions.
+const toMillionth = (usd: number) => Math.round(usd * 1_000_000) / 1_000_000
+
+// The session's cost as last counted in this process, so that a session yet
+// to spend writes no file; and after a /clear, the total the session before
+// reached, from which a total that kept counting goes on.
+let costCounted: { sessionId: string; cost: number } | null = null
+let costCarried: number | null = null
+// The spend files are written and read one call at a time, in order: each
+// reads what the one before it wrote.
+let spendQueue: Promise<unknown> = Promise.resolve()
+// The spend files read, by name: when each was written and its size, and
+// its spans. One is read again only once either changed, and the session's
+// own after each write of its own.
+const spendRead = new Map<string, { stamp: string; spans: Span[] }>()
+
+const queued = <T,>(work: () => Promise<T>) => {
+  const run = spendQueue.then(work)
+  spendQueue = run.catch(() => {})
+
+  return run
+}
+
+// Counts this session's part of each window with a reading: its spend from
+// the window's start on, over what every session's file spent from there. A
+// file last written before the earliest start holds nothing in any window,
+// and is not read.
+const countShares = async ($: EngineInterface) => {
+  const now = await $.clock.now()
+  const windows = liveWindows(await read($, limits), now).flatMap(({ kind, start }) =>
+    start === undefined ? [] : [{ kind, start, own: 0, total: 0 }],
+  )
+  const folder = windows.length === 0 ? null : await modFolder($, SPEND_FOLDER)
+  const entries = folder === null ? [] : await $.fs.list(folder).catch(() => [])
+  const earliest = Math.min(...windows.map(window => window.start))
+  const ownName = fileNameOf(await $.session.id(), 'json')
+
+  for (const entry of entries) {
+    if (folder === null || entry.kind !== 'file' || !entry.name.endsWith('.json')) continue
+
+    if (entry.mtimeMs < earliest) {
+      spendRead.delete(entry.name)
+      continue
+    }
+
+    const stamp = `${entry.mtimeMs}:${entry.size}`
+
+    if (spendRead.get(entry.name)?.stamp !== stamp) {
+      const file = await $.fs.read(joinPath(folder, entry.name)).then(parseSpend, () => null)
+
+      // One not whole yet counts what it held when last read whole.
+      if (file !== null) spendRead.set(entry.name, { stamp, spans: file.spans })
+    }
+
+    const spans = spendRead.get(entry.name)?.spans ?? []
+
+    for (const window of windows) {
+      const spent = spentSince(spans, window.start)
+      window.total += spent
+
+      if (entry.name === ownName) window.own += spent
+    }
+  }
+
+  const fresh: Share[] = windows.map(({ kind, own, total }) => ({
+    kind,
+    ratio: total > 0 ? Math.round((own / total) * 1000) / 1000 : 0,
+  }))
+
+  if (JSON.stringify(await read($, shares)) !== JSON.stringify(fresh)) await update($, shares, () => fresh)
+}
+
+const recountShares = ($: EngineInterface) => queued(() => countShares($))
+
+// What the session spent since the last count: `cost`, its total as the
+// engine counts it, past what its file counted already, and `extra`, spent
+// beside it (the summary's requests, which the engine leaves out of that
+// total), each kept in the minute it came; then the parts are counted
+// again. Off a subscription no window has a reading, and nothing is kept.
+const addSpend = ($: EngineInterface, spend: { cost?: number; extra?: number }) =>
+  queued(async () => {
+    if ((await read($, limits)).length === 0) return
+
+    const sessionId = await $.session.id()
+    const path = await sessionFile($, SPEND_FOLDER, sessionId, 'json')
+
+    if (path === null) return
+
+    const now = await $.clock.now()
+    const file = (await $.fs.exists(path)) ? parseSpend(await $.fs.read(path)) : null
+    let spans = (file?.spans ?? []).filter(([, to]) => to > now - LONGEST)
+    let seen = file?.seen ?? (costCounted?.sessionId === sessionId ? costCounted.cost : undefined)
+    let added = spend.extra ?? 0
+    const { cost } = spend
+
+    if (cost !== undefined) {
+      // After a /clear the total went on from the session before's, or
+      // started over.
+      if (seen === undefined && costCarried !== null) seen = cost >= costCarried ? costCarried : 0
+
+      if (seen === undefined) {
+        // Counted for the first time, as in a session that ran before the
+        // mod loaded: what it spent until now, spread over its life so far.
+        const { startedAt } = await $.session.usage()
+
+        if (cost > 0) spans = [...spans, [Math.min(startedAt, now - MINUTE), now, cost]]
+      } else {
+        // A total that went down started over.
+        added += cost >= seen ? cost - seen : cost
+      }
+
+      seen = cost
+      costCounted = { sessionId, cost }
+      costCarried = null
+    }
+
+    if (added > 0) {
+      const from = Math.floor(now / MINUTE) * MINUTE
+      const last = spans.at(-1)
+      spans =
+        last !== undefined && last[0] === from && last[1] === from + MINUTE
+          ? [...spans.slice(0, -1), [from, from + MINUTE, last[2] + added]]
+          : [...spans, [from, from + MINUTE, added]]
+    }
+
+    // A session yet to spend writes no file.
+    if (file !== null || spans.length > 0) {
+      const kept: SpendFile = {
+        ...(seen === undefined ? {} : { seen: toMillionth(seen) }),
+        spans: spans.map(([from, to, usd]) => [from, to, toMillionth(usd)]),
+      }
+      await $.fs.write(path, JSON.stringify(kept))
+      spendRead.delete(fileNameOf(sessionId, 'json'))
+    }
+
+    await countShares($)
+  })
 
 const pad = (n: number) => String(n).padStart(2, '0')
 
@@ -1534,7 +1757,11 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
   if (result !== null) {
     const spent = haikuCost(result.usage)
 
-    if (spent > 0) await update($, summaryCost, usd => usd + spent)
+    // It counts toward the account's windows too: this session's spend.
+    if (spent > 0) {
+      await update($, summaryCost, usd => usd + spent)
+      void addSpend($, { extra: spent }).catch(() => {})
+    }
   }
 
   const reply = result?.isAnswered
@@ -1808,6 +2035,10 @@ export const register: Register = on => {
     await update($, cost, () => usage.cost?.usd ?? null)
     await update($, autoCompact, () => compactAt)
 
+    // What the session spent so far, and its part of each window.
+    const spentSoFar = usage.cost?.usd
+    void (spentSoFar === undefined ? recountShares($) : addSpend($, { cost: spentSoFar })).catch(() => {})
+
     // The summary as the person left it. A reload drops the request under
     // way and the clock with the old module: a turn still running gets a
     // new clock.
@@ -1818,9 +2049,13 @@ export const register: Register = on => {
       startTicker($)
     }
 
-    // "reset in" counts down between turns: check the countdowns each minute.
-    // A reload drops this timer with the old module.
-    $.clock.every(MINUTE, () => void recount($).catch(() => {}))
+    // "reset in" counts down between turns, and what other sessions spend
+    // moves this one's part: check both each minute. A reload drops this
+    // timer with the old module.
+    $.clock.every(MINUTE, () => {
+      void recount($).catch(() => {})
+      void recountShares($).catch(() => {})
+    })
     await $.command.register({
       name: COMMAND,
       description: 'Open the Session Weather pane',
@@ -2144,10 +2379,14 @@ export const register: Register = on => {
       const fresh = [...e.rateLimits]
       await update($, limits, () => fresh)
       await $.store.set(STORED_LIMITS, fresh)
+      // A window that reset counts the parts from its new start.
+      void recountShares($).catch(() => {})
     }
 
     if (e.changed.includes('cost')) {
       await update($, cost, () => e.cost?.usd ?? null)
+
+      if (e.cost !== undefined) void addSpend($, { cost: e.cost.usd }).catch(() => {})
     }
 
     return next(e)
@@ -2177,9 +2416,14 @@ export const register: Register = on => {
       askedAt = Number.NEGATIVE_INFINITY
       submissions = []
       drainedAt = null
+      // The next session's spend counts from what this one's total reached,
+      // should the engine keep counting it over a /clear.
+      costCarried = e.reason === 'clear' ? (costCounted?.cost ?? null) : null
+      costCounted = null
       // The host wipes the pane's values once the session has ended: the
-      // person's choices and the limits come back from the store after it.
-      $.clock.after(SECOND, () => void restore($).catch(() => {}))
+      // person's choices and the limits come back from the store after it,
+      // and the parts are counted for the next session.
+      $.clock.after(SECOND, () => void restore($).then(() => recountShares($)).catch(() => {}))
     }
 
     return next(e)
@@ -2217,19 +2461,24 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
     // Each read subscribes the drawing to its value; they go all at once.
-    const [at, now, added, lastSamples, readings, compactAt, turn, spent, isOn] = await Promise.all([
+    const [at, now, added, lastSamples, readings, parts, compactAt, turn, spent, isOn] = await Promise.all([
       $.clock.now(),
       read($, reading),
       read($, delta),
       read($, samples),
       read($, limits),
+      read($, shares),
       read($, autoCompact),
       read($, lastTurn),
       read($, cost),
       read($, isSummaryOn),
     ])
     const hasTurns = lastSamples.length > 0
-    const windows = liveWindows(readings, at)
+    // Each window, with this session's part of its share in points.
+    const windows = liveWindows(readings, at).map(window => ({
+      ...window,
+      mine: window.percent * (parts.find(part => part.kind === window.kind)?.ratio ?? 0),
+    }))
 
     const tokens = now?.tokens
     const percent = now?.percent
@@ -2391,15 +2640,31 @@ export const register: Register = on => {
           {windows.length > 0 && (
             <Box flexDirection="column">
               <Text dimColor>Usage limits</Text>
-              {windows.map(window => (
-                <Box flexDirection="column">
-                  <Text>
-                    {window.name} {window.used}%
-                    {window.left === undefined ? '' : ` · reset in ${formatLeft(window.left)}`}
-                  </Text>
-                  <Text dimColor>{bar(window.used)}</Text>
-                </Box>
-              ))}
+              {windows.map(window => {
+                // "5h 30% · this session 8% · reset in 4h 38m", the part in
+                // yellow, as its cells are: the last of the bar's filled ones.
+                const cells = barParts(window.used, window.mine)
+
+                return (
+                  <Box flexDirection="column">
+                    <Text>
+                      {window.name} {window.used}%
+                      {window.mine > 0 && ' · '}
+                      {window.mine > 0 && <Text color={MINE}>this session {formatPart(window.mine)}</Text>}
+                      {window.left === undefined ? '' : ` · reset in ${formatLeft(window.left)}`}
+                    </Text>
+                    {cells.own === '' ? (
+                      <Text dimColor>{bar(window.used)}</Text>
+                    ) : (
+                      <Text>
+                        {cells.others !== '' && <Text dimColor>{cells.others}</Text>}
+                        <Text color={MINE}>{cells.own}</Text>
+                        {cells.free !== '' && <Text dimColor>{cells.free}</Text>}
+                      </Text>
+                    )}
+                  </Box>
+                )
+              })}
             </Box>
           )}
           {spent !== null && <Text dimColor>Session cost {formatCost(spent)}</Text>}

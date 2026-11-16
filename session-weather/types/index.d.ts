@@ -10,6 +10,10 @@ export type Sample = { tokens: number; percent: number }
 // one, its share used, and when it resets (ISO 8601).
 export type Limit = { kind: string; percentUsed: number; resetsAt?: string }
 
+// This session's part of what every session spent in one rate-limit window
+// since it began, 0 to 1, by the window's kind.
+export type Share = { kind: string; ratio: number }
+
 // The main loop's last finished turn: how long it ran, how many tool calls
 // it made (its subagents' included), and the share of its input the prompt
 // cache served, when it reported usage.
@@ -86,6 +90,9 @@ declare module 'claude-code' {
       // The account's windows as last reported; empty off a subscription,
       // where no window has a reading.
       limits: Limit[]
+      // This session's part of each window's spend, as last counted; empty
+      // off a subscription, or until counted.
+      shares: Share[]
       // Tool calls since the main loop's turn began.
       turnTools: number
       lastTurn: LastTurn | null

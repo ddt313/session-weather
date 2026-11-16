@@ -6,7 +6,7 @@ so far.
 
 | Mod | What it does |
 | --- | --- |
-| [session-weather](session-weather) | A pane with the session's weather: how full the context is, the last turn, the 5-hour and weekly limits, the cost, and a running Haiku summary of what Claude is thinking. |
+| [session-weather](session-weather) | A pane with the session's weather: how full the context is, the last turn, the 5-hour and weekly limits and this session's part of each, the cost, and a running Haiku summary of what Claude is thinking. |
 
 ## Session Weather
 
@@ -25,6 +25,25 @@ The pane opens beside the conversation when a session starts.
   the share of its input the prompt cache served.
 - The 5-hour and weekly limits with the time until they reset, kept across
   sessions until the next reading.
+- This session's part of each limit, in yellow: `5h 30% · this session 8%`,
+  and its cells in the bar, the last of the filled ones (a part under half
+  a cell, 2.5 points, has none). The engine reports how much of a window
+  the whole account used, never what used it, so each session writes what
+  it spends (at API prices, as `/cost` counts it, its summary's Haiku
+  requests included) by the minute to a file named after its id in
+  `~/.claude/session-weather/spend/`. This session's part is its spend
+  since the window began over the spend of every such file, times the
+  window's share used, counted again after each response and each minute.
+  Spend no file holds (claude.ai, the Claude apps, another computer, a
+  session without the mod) counts toward the sessions here in proportion,
+  so the part shown is then too high: so it is for a while after the files
+  begin, until a window has run its whole length since (5 hours, a week)
+  and holds no spend from before them. A session the mod first counts
+  mid-way, as when it loads into one already running, spreads what it
+  spent until then evenly over its life so far. Off a subscription no
+  window has a reading, and nothing is written. The files stay until you
+  remove them, a few kilobytes each; one last written before the week
+  began is no longer read.
 - The session's cost at API prices, as `/cost` reports it.
 
 **Thinking summary**

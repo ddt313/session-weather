@@ -5,7 +5,7 @@
     {
       "name": "session-weather",
       "source": "./session-weather",
-      "description": "A pane with the session's weather: context fill and auto-compact point, the last turn, the 5-hour and weekly limits, the cost, and a Haiku summary of what Claude is thinking"
+      "description": "A pane with the session's weather: context fill and auto-compact point, the last turn, the 5-hour and weekly limits and this session's part of each, the cost, and a Haiku summary of what Claude is thinking"
     }
   ]
 }
