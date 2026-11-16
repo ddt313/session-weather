@@ -2111,7 +2111,7 @@ test('a recent turn pressed shows its updates beside the weather; a new prompt s
   expect((await turnRows($, 'desktop'))[0]).toBe(`▸ ${second} · running · 0 tools`)
 })
 
-test("a hand-back goes on in its turn's row; the list keeps the last eight turns, and a /clear empties it", async ($, on) => {
+test("a hand-back goes on in its turn's row; the list keeps the last ten turns, and a /clear empties it", async ($, on) => {
   const { agents, clock } = engine(on)
   on('session.end', ($$, e) => ({ sessionId: e.sessionId }))
 
@@ -2133,20 +2133,39 @@ test("a hand-back goes on in its turn's row; the list keeps the last eight turns
   await clock.settle()
   expect(await turnRows($, 'terminal')).toEqual([`▸ ${clockOf(NOW)} · 30s · 0 tools`])
 
-  // Eight more prompts: the first turn goes from the list.
-  for (let at = 1; at <= 8; at += 1) {
+  // Ten more prompts: the first turn goes from the list.
+  for (let at = 1; at <= 10; at += 1) {
     await $.turn.start({ text: `prompt ${at}`, turnId: `u${at}` })
     await $.turn.complete(turnDone({ turnId: `u${at}`, durationMs: 1_000 }) as never)
   }
 
   const rows = await turnRows($, 'terminal')
-  expect(rows.length).toBe(8)
+  expect(rows.length).toBe(10)
   expect(rows.some(row => row.includes('30s'))).toBe(false)
 
   // A /clear starts another conversation: its turns are listed from there.
   await endSession($, 'clear')
   expect(await turnRows($, 'terminal')).toEqual([])
   expect((await pane($, 'terminal', WIDE_FROM)).includes('Recent turns')).toBe(false)
+})
+
+test('how many turns the list keeps is a setting', { options: { recentTurns: 3 } }, async ($, on) => {
+  const { clock } = engine(on)
+
+  await $.session.start(start)
+
+  for (let at = 1; at <= 5; at += 1) {
+    await $.turn.start({ text: `prompt ${at}`, turnId: `u${at}` })
+    await $.turn.complete(turnDone({ turnId: `u${at}`, durationMs: at * 1_000 }) as never)
+    await clock.advance(MINUTE)
+  }
+
+  // The newest three, newest first.
+  expect(await turnRows($, 'terminal')).toEqual([
+    `▸ ${clockOf(NOW + 4 * MINUTE)} · 5s · 0 tools`,
+    `${clockOf(NOW + 3 * MINUTE)} · 4s · 0 tools`,
+    `${clockOf(NOW + 2 * MINUTE)} · 3s · 0 tools`,
+  ])
 })
 
 // The mod's folder of files, and the file a saved session's turns go to.
@@ -4093,6 +4112,8 @@ test('a setting changed in /config is stored as the mod will use it; other rows 
   await setRow($, 'session-weather.cleanupDays', -3)
   await setRow($, 'session-weather.cleanupDays', 7.6)
   await setRow($, 'session-weather.cleanupDays', 99_999)
+  await setRow($, 'session-weather.recentTurns', 0)
+  await setRow($, 'session-weather.recentTurns', 99)
   // A value of the wrong kind is the engine's to refuse.
   await setRow($, 'session-weather.summaryGapSeconds', 'soon')
   await setRow($, 'theme', 'dark')
@@ -4108,6 +4129,8 @@ test('a setting changed in /config is stored as the mod will use it; other rows 
     { key: 'session-weather.cleanupDays', value: 0 },
     { key: 'session-weather.cleanupDays', value: 8 },
     { key: 'session-weather.cleanupDays', value: 3650 },
+    { key: 'session-weather.recentTurns', value: 1 },
+    { key: 'session-weather.recentTurns', value: 30 },
     { key: 'session-weather.summaryGapSeconds', value: 'soon' },
     { key: 'theme', value: 'dark' },
     { key: 'other-mod.summaryGapSeconds', value: 1 },

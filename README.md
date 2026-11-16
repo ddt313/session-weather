@@ -122,8 +122,8 @@ Each row is cut to the column, never wrapped.
   Only those the main loop started; listed again as one starts or ends, each
   minute, and every ten seconds while a turn runs or waits with the summary
   on.
-- The recent turns, newest first: your last eight prompts' turns, a
-  subagent's hand-back going on with the prompt it answers. When each began,
+- The recent turns, newest first: your last ten prompts' turns (a setting),
+  a subagent's hand-back going on with the prompt it answers. When each began,
   how long it ran (or that it runs, or waits on its subagents), the tokens it
   added to the context, its tool calls (its subagents' included), and
   whether you interrupted it. Press one to show its updates beside the
@@ -136,7 +136,8 @@ Each row is cut to the column, never wrapped.
   `/clear` starts the list over with the new conversation. Closing Claude
   Code loses them, unless you persist the session: **☐ Persist**, a box
   beside the header, unticked until you press it, and for this session
-  alone. Ticked, **☑ Persist**, the session's turns and its count of
+  alone. Ticked, **☑ Persist**, the session's turns (as many as the list
+  keeps, no more) and its count of
   compactions go to a file named after the session's id in
   `~/.claude/session-weather/turns/`, written again as each turn ends or gets
   an update. When the session starts again, after a restart or resumed, they
@@ -268,11 +269,13 @@ saved turns too.
 
 **Settings**
 
-Four rows in `/config`, kept in settings.json under
+Five rows in `/config`, kept in settings.json under
 `pluginConfigs["session-weather@ddt313-mods"].options`. A change there takes
 effect at once: Claude Code loads the mod again with the new value, as
 `/reload-plugins` would. The pane and the turn's updates stay; a Haiku request
-under way is dropped, and the next one is asked on the new terms.
+under way is dropped, and the next one is asked on the new terms. The
+desktop app shows the same five in the plugin's Settings and keeps them in
+the same place; set there, a value is used by the sessions started after it.
 
 - **Thinking summary language** (`summaryLanguage`, default `English`):
   the language Haiku writes the updates and recaps in, named as you would to
@@ -294,6 +297,9 @@ under way is dropped, and the next one is asked on the new terms.
 - **Delete the mod's old files after (days)** (`cleanupDays`, default 30):
   the days after which a file of the mod's that nothing has written since is
   deleted (see **Old files**), from 0 to 3650; 0 keeps every file.
+- **Recent turns kept** (`recentTurns`, default 10): how many of your latest
+  turns the wide pane lists, and a persisted session's file keeps, from 1 to
+  30; the oldest go past it. Each keeps up to its newest 100 updates.
 
 A number outside its range is held to the range, never refused: as you set
 it in `/config`, where the row then shows the value in use, and as the mod

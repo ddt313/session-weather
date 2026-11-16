@@ -66,16 +66,17 @@ const PANE_ROWS = 12
 // The person's settings: the manifest's `userConfig` fields, each a row in
 // `/config`. The language Haiku writes the thinking summary in, the seconds
 // between its requests, how far toward compaction (`levelOf`) the forecast
-// turns to Compact soon and the toast warns, and the days after which the
-// mod's files not written since are deleted (`cleanUp`). A load reads them
-// as `register` begins, and a change in `/config` reloads the mod with the
-// new values, so it takes effect at once.
+// turns to Compact soon and the toast warns, the days after which the mod's
+// files not written since are deleted (`cleanUp`), and how many recent turns
+// the wide layout keeps. A load reads them as `register` begins, and a
+// change in `/config` reloads the mod with the new values, so it takes
+// effect at once.
 //
 // A value of the right type outside its range is held to the range, here
 // and as it is set in `/config`, never refused: the manifest declares no
 // `min` or `max`, which would stop the whole mod from loading over a typo in
 // settings.json.
-type Settings = { language: string; gapSeconds: number; compactAt: number; cleanupDays: number }
+type Settings = { language: string; gapSeconds: number; compactAt: number; cleanupDays: number; recentTurns: number }
 
 const DEFAULT_LANGUAGE = 'English'
 // Room for any language's name; a longer value is cut.
@@ -89,6 +90,10 @@ const GAP_SECONDS = { fallback: 15, min: 5, max: 120 }
 const COMPACT_SOON = { fallback: 90, min: 76, max: 100 }
 // 0 keeps every file; ten years is as good as forever.
 const CLEANUP_DAYS = { fallback: 30, min: 0, max: 3650 }
+// Each turn keeps up to its newest 100 updates, in `$.state` and in a
+// persisted session's file, which the file API holds under 4 MiB: thirty
+// turns of long updates stay well within it.
+const RECENT_TURNS = { fallback: 10, min: 1, max: 30 }
 
 // The language named, on one trimmed line; the default where none is.
 const languageOf = (value: unknown) => {
@@ -110,6 +115,7 @@ const FIELDS: Record<string, (value: unknown) => string | number> = {
   summaryGapSeconds: value => numberIn(value, GAP_SECONDS),
   compactSoonPercent: value => numberIn(value, COMPACT_SOON),
   cleanupDays: value => numberIn(value, CLEANUP_DAYS),
+  recentTurns: value => numberIn(value, RECENT_TURNS),
 }
 
 // The settings in `options`, a field left out or of the wrong type at its
@@ -119,6 +125,7 @@ const settingsOf = (options: PluginOptions): Settings => ({
   gapSeconds: numberIn(options.summaryGapSeconds, GAP_SECONDS),
   compactAt: numberIn(options.compactSoonPercent, COMPACT_SOON),
   cleanupDays: numberIn(options.cleanupDays, CLEANUP_DAYS),
+  recentTurns: numberIn(options.recentTurns, RECENT_TURNS),
 })
 
 // The settings this load runs with; `register` takes them first. The
@@ -1602,15 +1609,16 @@ const logTurn = ($: EngineInterface, turn: Thinking) => {
   return logging
 }
 
-// The recent turns, as the wide layout lists them: the person's last
-// MAX_RECENT turns in `$.state`, where a reload finds them and a /clear,
-// which starts another conversation, lets them go. Each keeps its figures
-// and its newest updates, so a turn picked from the list shows them without
-// reading its log back.
-const MAX_RECENT = 8
+// The recent turns, as the wide layout lists them: the person's last few
+// turns, as many as the setting keeps (10 unless set), in `$.state`, where a
+// reload finds them and a /clear, which starts another conversation, lets
+// them go. Each keeps its figures and its newest updates, so a turn picked
+// from the list shows them without reading its log back. A persisted
+// session's file holds as many, no more: an older turn is let go there too.
+const maxRecent = () => settings.recentTurns
 
 // The turn as it now stands into its row, added where it has none (rows in
-// the order the turns began, the oldest let go past MAX_RECENT): how long it
+// the order the turns began, the oldest let go past `maxRecent`): how long it
 // ran, how it ended or whether it waits, and its newest updates. Its fill
 // and its tool calls stay as counted.
 const recordTurn = ($: EngineInterface, turn: Thinking) =>
@@ -1629,7 +1637,7 @@ const recordTurn = ($: EngineInterface, turn: Thinking) =>
     }
 
     return before === undefined
-      ? [...list, record].sort((a, b) => a.startedAt - b.startedAt).slice(-MAX_RECENT)
+      ? [...list, record].sort((a, b) => a.startedAt - b.startedAt).slice(-maxRecent())
       : list.map(one => (one === before ? record : one))
   })
 
@@ -1653,7 +1661,7 @@ const openRecord = ($: EngineInterface, turnId: string, startedAt: number, fill:
     [
       ...list.filter(one => one.turnId !== turnId),
       { turnId, startedAt, ...(fromTokens === undefined ? {} : { fromTokens }), tools: 0, entries: [] },
-    ].slice(-MAX_RECENT),
+    ].slice(-maxRecent()),
   )
 }
 
@@ -1796,7 +1804,7 @@ const parseSaved = (text: string): SavedTurns | null => {
 
     return {
       shape: SAVED_SHAPE,
-      turns: value.turns.filter(isRecentTurn).slice(-MAX_RECENT),
+      turns: value.turns.filter(isRecentTurn).slice(-maxRecent()),
       ...(typeof counted?.count === 'number' && typeof counted.isWhole === 'boolean'
         ? { compactions: { count: counted.count, isWhole: counted.isWhole } }
         : {}),
@@ -1821,7 +1829,12 @@ const saveTurns = ($: EngineInterface) => {
       if (path === null) return
 
       const [turns, counted] = await Promise.all([read($, recentTurns), read($, compactions)])
-      const saved: SavedTurns = { shape: SAVED_SHAPE, turns, ...(counted === null ? {} : { compactions: counted }) }
+      // As many as the setting keeps now, should it have gone down.
+      const saved: SavedTurns = {
+        shape: SAVED_SHAPE,
+        turns: turns.slice(-maxRecent()),
+        ...(counted === null ? {} : { compactions: counted }),
+      }
       await $.fs.write(path, JSON.stringify(saved))
     })
     .catch((error: unknown) => tell($, `Saved turns not written: ${messageOf(error)}`, { to: 'debug' }))
@@ -3842,7 +3855,7 @@ export const register: Register = (on, options) => {
         {recent.length > 0 && (
           <Box flexDirection="column">
             {recentHeader}
-            {[...recent].reverse().map((one, index) => {
+            {recent.slice(-maxRecent()).reverse().map((one, index) => {
               // Newest first, so that a column too short for them all cuts
               // the oldest. Beside the summary each is pressed to show its
               // updates there, the one shown marked ▸; with the summary off

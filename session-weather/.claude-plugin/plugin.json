@@ -28,6 +28,12 @@
       "title": "Delete the mod's old files after (days)",
       "description": "The thinking logs, debug logs, spend files and saved turns the mod writes under ~/.claude/session-weather are deleted once none has been written for this many days, looked for once a day; 0 keeps them all. From 0 to 3650; a value outside that is held to it.",
       "default": 30
+    },
+    "recentTurns": {
+      "type": "number",
+      "title": "Recent turns kept",
+      "description": "How many of your latest turns the wide pane lists, and a persisted session's file keeps, the oldest let go past it. From 1 to 30; a value outside that is held to it.",
+      "default": 10
     }
   }
 }
