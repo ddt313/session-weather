@@ -6,12 +6,14 @@ so far.
 
 | Mod | What it does |
 | --- | --- |
-| [session-weather](session-weather) | A pane with the session's weather: how full the context is, the last turn, the 5-hour and weekly limits and this session's part of each, the cost, and a running Haiku summary of what Claude is thinking. |
+| [session-weather](session-weather) | A pane with the session's weather: how full the context is, the last turn, the 5-hour and weekly limits and this session's part of each, the cost, and a running Haiku summary of what Claude is thinking. While the pane is not on screen, a status line under the prompt keeps its key figures. |
 
 ## Session Weather
 
 The pane opens beside the conversation when a session starts.
-`/session-weather` opens it again after you closed it.
+`/session-weather` opens it again after you closed it. While it is closed,
+or the terminal is too narrow to show it, a status line under the prompt
+keeps its key figures.
 
 **Weather**
 
@@ -45,6 +47,30 @@ The pane opens beside the conversation when a session starts.
   remove them, a few kilobytes each; one last written before the week
   began is no longer read.
 - The session's cost at API prices, as `/cost` reports it.
+
+**Status line**
+
+- While the pane is not on screen, one line under the prompt carries the
+  weather's key figures: `☁ 42% · 5h 30% (4h 38m) · $1.23`, the forecast
+  (from how far the context has filled toward compaction, as in the pane)
+  and the share of the context used, the 5-hour limit's share used and the
+  time until it resets, and the session's cost.
+- It shows while you have closed the pane, and while the pane waits undrawn
+  on a terminal too narrow for it: a pane the session opens on its own is
+  placed only from 144 columns, or from 110 once you opened it yourself and
+  have not closed it since.
+- It goes as soon as the pane is drawn: `/session-weather` opens the pane
+  at any width, and a terminal widened enough places it (the line goes at
+  its first drawing, or at the latest within a minute).
+- It follows the readings: each response, a compaction, a `/clear`, and
+  the countdown, minute by minute. It is set again only when its text
+  changes.
+- A part with nothing to show yet is left out rather than shown as zero:
+  the context before the first response and right after a compaction, the
+  5-hour limit off a subscription (and past its reset, until the next
+  reading), the cost before anything is spent or where Claude Code keeps
+  no cost. The weekly limit stays in the pane. With no part at all there is
+  no line.
 
 **Thinking summary**
 

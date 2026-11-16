@@ -220,6 +220,86 @@ const recount = async ($: EngineInterface) => {
 
 const openPane = ($: EngineInterface) => $.ui.open({ id: PANE, title: TITLE, rows: PANE_ROWS })
 
+// "☁ 42% · 5h 30% (4h 38m) · $1.23": the weather's key figures in one line,
+// for the status line under the prompt. The sky (how far the fill has come
+// toward compaction, as the pane's) and the context's share used, the 5-hour
+// window's share used and the time until it resets, and the session's cost.
+// A part with nothing read yet is left out rather than shown as zero: the
+// fill before the first response or right after a compaction, the window off
+// a subscription or past its reset, a cost with no ledger or nothing spent.
+// Undefined where no part has a reading.
+const statusTextOf = (
+  now: Reading | null,
+  compactAt: AutoCompact | null,
+  readings: readonly Limit[],
+  spent: number | null,
+  at: number,
+) => {
+  const tokens = now?.tokens
+  const percent = now?.percent
+  const fiveHour = liveWindows(readings, at).find(window => window.kind === 'five_hour')
+  const left = fiveHour?.left
+  const parts = [
+    tokens === undefined || percent === undefined
+      ? null
+      : `${forecast(levelOf(tokens, percent, compactAt)).icon} ${percent}%`,
+    fiveHour === undefined
+      ? null
+      : `${fiveHour.name} ${fiveHour.used}%${left === undefined || Number.isNaN(left) ? '' : ` (${formatLeft(left)})`}`,
+    spent === null || spent <= 0 ? null : formatCost(spent),
+  ].filter((part): part is string => part !== null)
+
+  return parts.length === 0 ? undefined : parts.join(' · ')
+}
+
+// What the status line holds, as this module last set it; null until it sets
+// one, so a reload sets it again over whatever the old module left.
+let statusShown: { text: string | undefined } | null = null
+// The line is worked out and set one call at a time, in order: a look at the
+// panes taken before the pane was placed never lands after one taken since.
+let statusQueue: Promise<unknown> = Promise.resolve()
+
+const inStatusOrder = (work: () => Promise<void> | void) => {
+  const run = statusQueue.then(work)
+  statusQueue = run.catch(() => {})
+
+  return run
+}
+
+// Pins `text` as the status line, undefined removing it; only a change
+// reaches the engine.
+const setStatus = ($: EngineInterface, text: string | undefined) => {
+  if (statusShown !== null && statusShown.text === text) return
+
+  $.ui.status(text)
+  statusShown = { text }
+}
+
+// The status line as it should stand now: the weather's figures while the
+// pane is not drawn (the person closed it, or it waits undrawn on a terminal
+// too narrow to place it unasked), none while it is, where the pane says it
+// all. The engine's record of the panes says which. Called wherever what the
+// line shows may have changed: a reading, a compaction, a /clear, the minute
+// that moves the countdown, the pane opened or closed.
+const showStatus = ($: EngineInterface) =>
+  inStatusOrder(async () => {
+    const [panes, now, compactAt, readings, spent, at] = await Promise.all([
+      $.ui.panes(),
+      read($, reading),
+      read($, autoCompact),
+      read($, limits),
+      read($, cost),
+      $.clock.now(),
+    ])
+    const isDrawn = panes.some(pane => pane.id === PANE && pane.isPlaced)
+
+    setStatus($, isDrawn ? undefined : statusTextOf(now, compactAt, readings, spent, at))
+  })
+
+// The pane being drawn, as when a widened terminal places it: the line goes,
+// after any look at the panes already under way.
+const hideStatus = ($: EngineInterface) => inStatusOrder(() => setStatus($, undefined))
+
 // The thinking summary: Claude Haiku 5.5 reads the main loop's thinking
 // notes and says in a few lines what Claude is at, at most once per
 // SUMMARY_GAP while a turn runs, and once more as it ends. While the notes
@@ -2055,6 +2135,7 @@ export const register: Register = on => {
     $.clock.every(MINUTE, () => {
       void recount($).catch(() => {})
       void recountShares($).catch(() => {})
+      void showStatus($).catch(() => {})
     })
     await $.command.register({
       name: COMMAND,
@@ -2074,17 +2155,19 @@ export const register: Register = on => {
       // No tool: the log is still written, for the person to read.
     }
 
-    if (!isClosed) {
-      void openPane($)
-    }
+    // The pane, unless the person closed it; where it is closed or waits
+    // undrawn, the status line stands in for it.
+    void (isClosed ? Promise.resolve() : openPane($)).then(() => showStatus($)).catch(() => {})
 
     return next(e)
   })
 
-  // Opened by the person, the pane is placed at any width.
+  // Opened by the person, the pane is placed at any width, and the status
+  // line goes.
   on('command.run', { command: COMMAND }, async $ => {
     await $.store.set(STORED_CLOSED, false)
     await openPane($)
+    await showStatus($).catch(() => {})
 
     return {}
   })
@@ -2109,12 +2192,20 @@ export const register: Register = on => {
     }
   })
 
+  // The pane closed: the status line takes its place. An unload is the mod
+  // going, or reloading, which looks again as the session starts.
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE && e.origin.kind === 'person') {
       await $.store.set(STORED_CLOSED, true)
     }
 
-    return next(e)
+    const done = await next(e)
+
+    if (e.id === PANE && e.origin.kind !== 'unload') {
+      await showStatus($).catch(() => {})
+    }
+
+    return done
   })
 
   // Where each prompt came from, for the turn it starts to know whether it
@@ -2389,6 +2480,8 @@ export const register: Register = on => {
       if (e.cost !== undefined) void addSpend($, { cost: e.cost.usd }).catch(() => {})
     }
 
+    await showStatus($).catch(() => {})
+
     return next(e)
   })
 
@@ -2411,6 +2504,7 @@ export const register: Register = on => {
       await update($, lastTurn, () => null)
       await update($, turnTools, () => 0)
       await update($, thinking, () => null)
+      await showStatus($).catch(() => {})
       await toNewest($)
       isOwed = false
       askedAt = Number.NEGATIVE_INFINITY
@@ -2422,8 +2516,13 @@ export const register: Register = on => {
       costCounted = null
       // The host wipes the pane's values once the session has ended: the
       // person's choices and the limits come back from the store after it,
-      // and the parts are counted for the next session.
-      $.clock.after(SECOND, () => void restore($).then(() => recountShares($)).catch(() => {}))
+      // the parts are counted for the next session, and the status line
+      // reads what is left.
+      $.clock.after(SECOND, () =>
+        void restore($)
+          .then(() => Promise.all([recountShares($), showStatus($)]))
+          .catch(() => {}),
+      )
     }
 
     return next(e)
@@ -2455,11 +2554,16 @@ export const register: Register = on => {
       // The pane keeps its last reading until the next turn measures one.
     }
 
+    await showStatus($).catch(() => {})
+
     return done
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
+    // Drawn, the pane says all the status line would: an unplaced pane is
+    // drawn first once the terminal widens to place it, and the line goes.
+    void hideStatus($).catch(() => {})
     // Each read subscribes the drawing to its value; they go all at once.
     const [at, now, added, lastSamples, readings, parts, compactAt, turn, spent, isOn] = await Promise.all([
       $.clock.now(),
