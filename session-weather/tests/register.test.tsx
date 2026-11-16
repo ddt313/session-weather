@@ -84,6 +84,9 @@ const engine = (
   const steps: unknown[][] = []
   const asks: { model: string; prompt: string; system?: string; effort?: string }[] = []
   const replies: unknown[] = []
+  // The session's subagents, as `$.agent.list()` gives them; a test moves
+  // their status along.
+  const agents: { id: string; description: string; type: string; status: string }[] = []
   let redraws = 0
   const { tokens, percent, rateLimits = [], stored = {}, cost } = usage
   const clock = mock.clock(on, { now: NOW })
@@ -132,6 +135,8 @@ const engine = (
   }))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('prompt.submit', ($, e) => ({ text: e.text, origin: e.origin }))
+  on('agent.list', () => ({ value: agents as never }))
   on('tool.call', () => ({ deny: 'not run in this test' }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
@@ -185,7 +190,21 @@ const engine = (
     return next(e)
   })
 
-  return { clock, opens, toasts, logs, writes, steps, asks, replies, files, store, registered, redraws: () => redraws }
+  return {
+    clock,
+    opens,
+    toasts,
+    logs,
+    writes,
+    steps,
+    asks,
+    replies,
+    agents,
+    files,
+    store,
+    registered,
+    redraws: () => redraws,
+  }
 }
 
 const start = { cwd: '/tmp', surface: 'desktop' as const, isInteractive: true }
@@ -2057,4 +2076,292 @@ test("the forecast follows a change of the auto-compact setting from the next tu
   await $.session.measure(measure(154_000, 77))
   expect((await pane($))[0]).toBe('☇ Storm')
   expect(await pane($)).toContain('auto-compact off')
+})
+
+// A subagent of the main loop's, at work, as `$.agent.list()` gives it.
+const subagent = (id: string) => ({ id, description: `review ${id}`, type: 'general-purpose', status: 'running' })
+
+// A prompt as `prompt.submit` takes it: the person's own, typed while the
+// session was idle, unless `origin` and `turnId` say otherwise.
+const submit = (text: string, origin: Record<string, unknown> = { kind: 'composer' }, turnId?: string) =>
+  ({ text, origin, wait: false, ...(turnId === undefined ? {} : { turnId }) }) as never
+
+// A subagent's report as the engine hands it back to the main loop: another
+// Claude session's message, which begins a turn of its own.
+const handBack = (agentId: string) =>
+  `<agent-message from="${agentId}"> [Subagent hand-back] The report follows:\n  Found two issues.`
+
+// A turn a background message begins, as the engine raises it: a subagent's
+// hand-back unless `kind` says otherwise.
+const resume = async (
+  $: { prompt: { submit: (e: never) => Promise<unknown> }; turn: { start: (e: never) => Promise<unknown> } },
+  text: string,
+  turnId: string,
+  kind = 'peer',
+) => {
+  await $.prompt.submit(submit(text, { kind }))
+  await $.turn.start({ text, turnId } as never)
+}
+
+// The thinking summary's header.
+const header = async ($: Test$) => (await thoughts($))[0]
+
+test("a subagent's result goes on with the turn's updates, which wait, not done, while its subagents work", async ($, on) => {
+  const { agents, asks, files, replies, steps, clock } = engine(on)
+  replies.push(
+    answer('GIST: Giao việc cho hai agent.'),
+    answer('GIST: Chờ hai agent.'),
+    answer('GIST: Agent a1 xong.'),
+    answer('GIST: Tổng kết.'),
+  )
+  const [a1, a2] = [subagent('a1'), subagent('a2')]
+
+  await $.session.start(start)
+  await $.prompt.submit(submit('review it'))
+  await $.turn.start({ text: 'review it', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, 'I will ask two agents.'), stop])
+  await clock.advance(SECOND)
+  agents.push(a1, a2)
+  await runStep($, steps, 't1', [thought(0, 'Both agents run; I wait for them.'), stop])
+  await clock.advance(4 * SECOND)
+  await $.turn.complete(turnDone({ durationMs: 5_000 }) as never)
+  await clock.settle()
+
+  // Not done: an update says where Claude stands, WAIT not allowed, and no
+  // recap yet; the clock runs on.
+  expect(asks.length).toBe(2)
+  expect(asks[1]?.prompt).toContain('Claude has ended its turn to wait for subagents it started')
+  expect(asks[1]?.prompt).not.toContain('The turn has ended')
+  expect(asks[1]?.prompt.endsWith(`\n\n${NO_WAIT}`)).toBe(true)
+  expect(await header($)).toBe('🧭 Thinking · 5s · waiting for 2 subagents')
+  expect(sectionOf(files.get(LOG) ?? '', 't1')).toContain(`## ${when(NOW)} · waiting for 2 subagents\n`)
+
+  await clock.advance(MINUTE)
+  expect(asks.length).toBe(2)
+  expect(await header($)).toBe('🧭 Thinking · 1m 5s · waiting for 2 subagents')
+
+  // a1 hands back: its turn goes on with the updates, under the person's
+  // request.
+  a1.status = 'completed'
+  await resume($, handBack('a1'), 't2')
+  expect(await thoughts($)).toEqual([
+    '🧭 Thinking · 1m 5s',
+    '5s · Chờ hai agent.',
+    RULE,
+    '1s · Giao việc cho hai agent.',
+    'Summary cost $0.004 - Haiku 5.5',
+  ])
+
+  await runStep($, steps, 't2', [thought(0, 'Agent a1 found two issues; a2 still runs.'), stop])
+  await clock.advance(SECOND)
+  expect(asks.length).toBe(3)
+  expect(asks[2]?.prompt).toContain('<request>\nreview it\n</request>')
+  expect(tagged(asks[2]?.prompt, 'notes')).toBe('<note>\nAgent a1 found two issues; a2 still runs.\n</note>')
+
+  await $.turn.complete(turnDone({ turnId: 't2', durationMs: 1_000 }) as never)
+  await clock.settle()
+  expect(asks.length).toBe(3)
+  expect(await header($)).toBe('🧭 Thinking · 1m 6s · waiting for 1 subagent')
+
+  // a2, the last, hands back: the turn ends with it, its length from the
+  // person's prompt, and its recap reads the whole of it.
+  a2.status = 'completed'
+  await resume($, handBack('a2'), 't3')
+  await runStep($, steps, 't3', [thought(0, 'Both agents are in; I fix the two issues.'), stop])
+  await clock.advance(9 * SECOND)
+  await $.turn.complete(turnDone({ turnId: 't3', durationMs: 9_000 }) as never)
+  await clock.settle()
+  expect(asks.length).toBe(4)
+  expect(asks[3]?.prompt).toContain('The turn has ended')
+
+  for (const note of ['I will ask two agents.', 'Agent a1 found two issues', 'Both agents are in']) {
+    expect(tagged(asks[3]?.prompt, 'notes')).toContain(note)
+  }
+
+  expect(await thoughts($)).toEqual([
+    '🧭 Thinking · 1m 15s · done',
+    'Recap · Tổng kết.',
+    RULE,
+    '1m 6s · Agent a1 xong.',
+    RULE,
+    '5s · Chờ hai agent.',
+    RULE,
+    '1s · Giao việc cho hai agent.',
+    'Summary cost $0.008 - Haiku 5.5',
+  ])
+
+  // One section in the log, under the person's prompt.
+  const log = files.get(LOG) ?? ''
+  expect(sectionOf(log, 't1')).toContain(`## ${when(NOW)} · 1m 15s · done\n\n> review it\n\n- Recap · Tổng kết.\n`)
+  expect(log).not.toContain('<!-- turn t2 -->')
+  expect(log).not.toContain('<!-- turn t3 -->')
+})
+
+test("a measurement while the turn waits on its subagents counts the last turn's growth", async ($, on) => {
+  const { agents, clock } = engine(on)
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'review it', turnId: 't1' })
+  agents.push(subagent('a1'))
+  await $.turn.complete(turnDone() as never)
+  await clock.settle()
+  await $.session.measure(measure(90_000, 45))
+  expect(await pane($)).toContain('Last turn ▲ +90k · 2m 14s · 0 tools · cache 96%')
+})
+
+test("a prompt of the person's own while the turn waits starts the updates over, and the waiting turn gets its recap", async ($, on) => {
+  const { agents, asks, files, replies, steps, clock } = engine(on)
+  replies.push(answer('GIST: Một.'), answer('GIST: Hai.'), answer('GIST: Tổng kết.'))
+
+  await $.session.start(start)
+  await $.prompt.submit(submit('review it'))
+  await $.turn.start({ text: 'review it', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, 'First note.'), stop])
+  await clock.advance(SECOND)
+  agents.push(subagent('a1'))
+  await runStep($, steps, 't1', [thought(0, 'I wait for a1.'), stop])
+  await clock.advance(4 * SECOND)
+  await $.turn.complete(turnDone({ durationMs: 5_000 }) as never)
+  await clock.settle()
+  expect(asks.length).toBe(2)
+
+  await clock.advance(20 * SECOND)
+  await $.prompt.submit(submit('and now this'))
+  await $.turn.start({ text: 'and now this', turnId: 't2' })
+  expect(await thoughts($)).toEqual(['🧭 Thinking · 0s', 'No thinking notes yet.', 'Summary cost $0.004 - Haiku 5.5'])
+
+  // The turn that waited ends where its last turn did, and its recap comes.
+  await clock.advance(SECOND)
+  await clock.settle()
+  expect(asks.length).toBe(3)
+  expect(asks[2]?.prompt).toContain('<request>\nreview it\n</request>')
+  expect(asks[2]?.prompt).toContain('The turn has ended')
+
+  const section = sectionOf(files.get(LOG) ?? '', 't1')
+  expect(section).toContain(' · 5s · done\n')
+  expect(section).toContain('- Recap · Tổng kết.\n- 1s · Một.\n- 5s · Hai.\n')
+})
+
+test('a turn whose subagents all end with no result waking Claude is done half a minute after', async ($, on) => {
+  const { agents, asks, replies, steps, clock } = engine(on)
+  replies.push(answer('GIST: Một.'), answer('GIST: Hai.'), answer('GIST: Tổng kết.'))
+  const a1 = subagent('a1')
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'review it', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, 'First note.'), stop])
+  await clock.advance(SECOND)
+  agents.push(a1)
+  await runStep($, steps, 't1', [thought(0, 'I wait for a1.'), stop])
+  await $.turn.complete(turnDone({ durationMs: 1_000 }) as never)
+  await clock.settle()
+  expect(asks.length).toBe(2)
+
+  // Stopped, and no word of it wakes Claude.
+  a1.status = 'killed'
+  await clock.advance(15 * SECOND)
+  expect(await header($)).toBe('🧭 Thinking · 16s · waiting')
+
+  await clock.advance(25 * SECOND)
+  await clock.settle()
+  expect(asks.length).toBe(3)
+  expect(asks[2]?.prompt).toContain('The turn has ended')
+  expect(await header($)).toBe('🧭 Thinking · 11s · done')
+
+  // Done: the clock stops, and nothing more is asked.
+  await clock.advance(MINUTE)
+  expect(asks.length).toBe(3)
+})
+
+test("a background task's notification after the turn ended reopens it; one update after its recap needs none again", async ($, on) => {
+  const { asks, replies, steps, clock } = engine(on)
+  replies.push(answer('GIST: Một.'), answer('GIST: Hai.'), answer('GIST: Tổng kết.'), answer('GIST: Build xong.'))
+
+  await $.session.start(start)
+  await $.prompt.submit(submit('build it'))
+  await $.turn.start({ text: 'build it', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, 'First note.'), stop])
+  await clock.advance(SECOND)
+  await runStep($, steps, 't1', [thought(0, 'Second note.'), stop])
+  await clock.advance(15 * SECOND)
+  await $.turn.complete(turnDone({ durationMs: 20_000 }) as never)
+  await clock.settle()
+  expect(asks.length).toBe(3)
+  expect(await header($)).toBe('🧭 Thinking · 20s · done')
+
+  await clock.advance(MINUTE)
+  const notice = '<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>'
+  await resume($, notice, 't2', 'task-notification')
+  expect(await header($)).toBe('🧭 Thinking · 1m 16s')
+  expect((await thoughts($))[1]).toBe('Recap · Tổng kết.')
+
+  await runStep($, steps, 't2', [thought(0, 'The build passed.'), stop])
+  await clock.advance(SECOND)
+  await $.turn.complete(turnDone({ turnId: 't2', durationMs: 2_000 }) as never)
+  await clock.settle()
+  expect(asks.length).toBe(4)
+  expect(await thoughts($)).toEqual([
+    '🧭 Thinking · 1m 17s · done',
+    '1m 17s · Build xong.',
+    RULE,
+    'Recap · Tổng kết.',
+    RULE,
+    '16s · Hai.',
+    RULE,
+    '1s · Một.',
+    'Summary cost $0.008 - Haiku 5.5',
+  ])
+})
+
+test('a prompt the person typed while a turn ran starts over, though a notification came in after it', async ($, on) => {
+  const { steps, clock } = engine(on)
+
+  await $.session.start(start)
+  await $.prompt.submit(submit('fix it'))
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, 'A note.'), stop])
+  await clock.advance(SECOND)
+  // Typed while t1 runs: it waits in the queue.
+  await $.prompt.submit(submit('and now this', { kind: 'composer' }, 't1'))
+  await $.turn.complete(turnDone({ durationMs: 2_000 }) as never)
+  await clock.settle()
+
+  // A notification goes into the conversation with no turn of its own, then
+  // the queued prompt's turn begins.
+  await $.prompt.submit(submit('<task-notification>\n<task-id>b1</task-id>\n</task-notification>', { kind: 'task-notification' }))
+  await $.turn.start({ text: 'and now this', turnId: 't2' })
+  expect(await thoughts($)).toEqual(['🧭 Thinking · 0s', 'No thinking notes yet.', 'Summary cost $0.002 - Haiku 5.5'])
+})
+
+test('a hand-back no prompt.submit showed is known by its frame, and goes on with the turn', async ($, on) => {
+  const { agents, steps, clock } = engine(on)
+  const a1 = subagent('a1')
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'review it', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, 'A note.'), stop])
+  await clock.advance(SECOND)
+  agents.push(a1)
+  await $.turn.complete(turnDone({ durationMs: 2_000 }) as never)
+  await clock.settle()
+  expect(await header($)).toBe('🧭 Thinking · 1s · waiting for 1 subagent')
+
+  a1.status = 'completed'
+  await $.turn.start({ text: handBack('a1'), turnId: 't2' })
+  expect(await thoughts($)).toEqual(['🧭 Thinking · 1s', '1s · Claude đang sửa lỗi.', 'Summary cost $0.002 - Haiku 5.5'])
+
+  // So with an origin the mod does not know.
+  await $.turn.complete(turnDone({ turnId: 't2', durationMs: 1_000 }) as never)
+  await clock.settle()
+  await resume($, handBack('a2'), 't3', 'unclassified')
+  expect((await thoughts($))[1]).toBe('1s · Claude đang sửa lỗi.')
+})
+
+test("a prompt of the person's own that quotes a hand-back's frame starts over", async ($, on) => {
+  const { steps, clock } = engine(on)
+
+  await $.session.start(start)
+  await oneTurn($, steps, clock, 't1', 'fix it')
+  await resume($, handBack('a1'), 't2', 'composer')
+  expect(await thoughts($)).toEqual(['🧭 Thinking · 0s', 'No thinking notes yet.', 'Summary cost $0.002 - Haiku 5.5'])
 })

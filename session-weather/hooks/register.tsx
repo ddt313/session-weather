@@ -1,5 +1,13 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, ModelCompleteResult, ModelUsage, Register, Timer, UiLogOptions } from 'claude-code'
+import type {
+  AgentStatus,
+  EngineInterface,
+  ModelCompleteResult,
+  ModelUsage,
+  Register,
+  Timer,
+  UiLogOptions,
+} from 'claude-code'
 
 import type { AutoCompact, Limit, Reading, Thinking, ThinkingEntry, TurnMark } from '../types'
 
@@ -257,6 +265,11 @@ const MIN_PINNED_ROWS = 24
 // "1m 5s" into the turn.
 const intoTurn = (turn: Thinking, at: number) => formatDuration(Math.max(0, at - turn.startedAt))
 
+// Where a turn stands that waits on its subagents: "waiting for 2
+// subagents", or, the last of them ended and its result not yet in,
+// "waiting".
+const waitingFor = (subagents: number) => (subagents > 0 ? `waiting for ${plural(subagents, 'subagent')}` : 'waiting')
+
 // One line of an update: its gist, a decision, an assumption, or its next
 // step.
 type UpdateLine = { kind: 'gist' | 'decision' | 'assumption' | 'next'; text: string }
@@ -446,9 +459,13 @@ const RECAP = [
   'GIST sums up what Claude did and where it stopped, in two or three sentences; DECISION lines give the key decisions of the turn, at most three, reported before or not; ASSUMPTION lines give what Claude still takes on trust, at most two; NEXT says only what Claude left to do.',
 ].join('\n')
 
-// The line that takes WAIT away: the turn's recap, and a request past
-// MAX_SILENCE.
+// The line that takes WAIT away: the turn's recap, a request while Claude
+// waits for its subagents, and one past MAX_SILENCE.
 const NO_WAIT = 'WAIT is not allowed this time.'
+
+// What a request asked while the turn waits on its subagents adds.
+const WAITING =
+  'Claude has ended its turn to wait for subagents it started, which still run; their results will wake it again.'
 
 // The tag each kind of line goes under in a reply, and in the earlier
 // updates a request sends back.
@@ -509,18 +526,29 @@ const noteTag = (text: string, time?: string) => `<note${time === undefined ? ''
 const sizeOfMark = (mark: TurnMark) => mark.text.length
 
 // What one request asks, settled once for the prompt and the debug log: the
-// recap (the turn has ended) or an update, whether WAIT is taken away, the
-// notes it reads (from `from` up to `covered`, with `base` notes dropped
-// from the turn's front by then), and since when it tells what Claude did
-// and wrote.
-type Ask = { isRecap: boolean; isForced: boolean; from: number; covered: number; base: number; since: number }
+// recap (the turn has ended) or an update, whether Claude waits for its
+// subagents, whether WAIT is taken away, the notes it reads (from `from` up
+// to `covered`, with `base` notes dropped from the turn's front by then),
+// and since when it tells what Claude did and wrote.
+type Ask = {
+  isRecap: boolean
+  isWaiting: boolean
+  isForced: boolean
+  from: number
+  covered: number
+  base: number
+  since: number
+}
 
 const askOf = (turn: Thinking, now: number): Ask => {
   const isRecap = turn.durationMs !== undefined
+  // Nothing more comes until a result wakes Claude: no WAIT.
+  const isWaiting = !isRecap && turn.paused !== undefined
 
   return {
     isRecap,
-    isForced: isRecap || isSilent(turn, now),
+    isWaiting,
+    isForced: isRecap || isWaiting || isSilent(turn, now),
     from: isRecap ? 0 : turn.summarized,
     covered: turn.notes.length,
     base: turn.dropped ?? 0,
@@ -593,6 +621,7 @@ const summaryPrompt = (turn: Thinking, ask: Ask) => {
           `<said>\n${said.map(one => one.text).join('\n\n')}\n</said>`,
         ]),
     ...(isRecap ? ['', RECAP] : []),
+    ...(ask.isWaiting ? ['', WAITING] : []),
     ...(ask.isForced ? ['', NO_WAIT] : []),
   ].join('\n')
 }
@@ -816,9 +845,11 @@ const logSection = (turn: Thinking) => {
   const recaps = turn.entries.filter(entry => entry.isRecap === true).reverse()
   const updates = turn.entries.filter(entry => entry.isRecap !== true)
   const ending =
-    turn.durationMs === undefined
-      ? ['in progress']
-      : [formatDuration(turn.durationMs), turn.isAborted === true ? 'interrupted' : 'done']
+    turn.durationMs !== undefined
+      ? [formatDuration(turn.durationMs), turn.isAborted === true ? 'interrupted' : 'done']
+      : turn.paused !== undefined
+        ? [waitingFor(turn.paused.subagents)]
+        : ['in progress']
 
   return [
     sectionMark(turn.turnId),
@@ -1045,9 +1076,11 @@ const notesRead = ({ ask }: DebugRequest) => `notes ${ask.from + 1}–${ask.cove
 const askedFor = ({ ask, sentAt }: DebugRequest) =>
   ask.isRecap
     ? 'the recap, WAIT not allowed'
-    : ask.isForced
-      ? `an update, WAIT not allowed after ${formatDuration(sentAt - ask.since)} without one`
-      : 'an update or WAIT'
+    : ask.isWaiting
+      ? 'an update, WAIT not allowed while Claude waits for its subagents'
+      : ask.isForced
+        ? `an update, WAIT not allowed after ${formatDuration(sentAt - ask.since)} without one`
+        : 'an update or WAIT'
 
 // What the request came to, in a few words.
 const outcomeOf = (request: DebugRequest) => {
@@ -1159,13 +1192,159 @@ let liveBlock: { turnId: string; text: string; kept: number } | null = null
 // The least a part holds: a block that wrote less since the last part waits.
 const LIVE_MIN_CHARS = 200
 
+// A main-loop turn begun by a prompt of these origins goes on with the turn
+// before it: a subagent's hand-back (the engine delivers it as another
+// Claude session's message, `peer`), a background task's notification, a
+// message of another agent. These wake Claude while the person waits on the
+// work they asked for. Any other prompt, the person's own above all, starts
+// a turn of its own, and the updates over.
+const RESUMING: ReadonlySet<string> = new Set(['task-notification', 'peer', 'peer-send-message', 'observer'])
+
+// The person's own prompts, typed, sent from elsewhere or stored, which
+// never go on with the turn before, whatever they say.
+const PROMPTED: ReadonlySet<string> = new Set([
+  'composer',
+  'bridge',
+  'sdk',
+  'channel',
+  'slack-ping',
+  'auto-continuation',
+  'scheduled-trigger',
+])
+
+// How the engine frames a subagent's hand-back or a task's notification: a
+// turn whose prompt came from no origin above, or that no `prompt.submit`
+// showed, is known by it.
+const HANDED_BACK = /^\s*<(?:agent-message from="|task-notification>)/
+
+// The prompts submitted since the main loop's last turn began, as
+// `prompt.submit` saw them: where each came from, its text, and whether the
+// session was idle (it starts a turn of its own) or ran a turn (it waits in
+// the queue, or goes into that turn). A turn's start finds its own by its
+// text, else takes the latest one made while idle.
+type Submission = { kind: string; text: string; isIdle: boolean }
+let submissions: Submission[] = []
+const MAX_SUBMISSIONS = 20
+
+// Whether the main loop's turn that begins with `text` goes on with the turn
+// before it. Its submission, once found, and every one made while idle are
+// let go: those started this turn or none.
+const isResumedBy = (text: string) => {
+  const trimmed = text.trim()
+  const own = submissions.filter(one => one.text === trimmed).at(-1)
+  const found = own ?? submissions.filter(one => one.isIdle).at(-1)
+  submissions = submissions.filter(one => one !== found && !one.isIdle)
+
+  if (found !== undefined && RESUMING.has(found.kind)) return true
+  if (found !== undefined && PROMPTED.has(found.kind)) return false
+
+  return HANDED_BACK.test(text)
+}
+
+// The states a subagent's loop is at work in: not yet started, running a
+// turn, or held on its own background work.
+const AT_WORK: ReadonlySet<AgentStatus> = new Set(['pending', 'running', 'waiting'])
+
+// How many subagents the main loop started that still work: the model's, not
+// a plugin's, and not idle between turns, as a teammate waiting for a message
+// is. Their results wake Claude again. None where the list cannot be read.
+const runningSubagents = async ($: EngineInterface) => {
+  try {
+    const agents = await $.agent.list()
+
+    return agents.filter(
+      agent => agent.parentId === undefined && agent.spawnedBy === undefined && AT_WORK.has(agent.status),
+    ).length
+  } catch {
+    return 0
+  }
+}
+
+// While the turn waits on its subagents, the tick counts them again each
+// WAIT_CHECK. Once none has worked for DRAIN_GRACE and no result has woken
+// Claude (a hand-back withheld, a subagent stopped with no word), the turn
+// is done. The module's own: a reload starts the count over.
+const WAIT_CHECK = 10_000
+const DRAIN_GRACE = 30_000
+let checkedAt = Number.NEGATIVE_INFINITY
+let drainedAt: number | null = null
+
+// The turn ended: no longer waiting.
+const ended = (turn: Thinking, durationMs: number, isAborted: boolean): Thinking => {
+  const { paused: _, ...rest } = turn
+
+  return { ...rest, durationMs, isAborted }
+}
+
+// The turn goes on in the main loop's turn `turnId`, which a subagent's
+// result or another background message began: no longer waiting, reopened
+// if it had ended, its recap no longer owed.
+const goOn = async ($: EngineInterface, turn: Thinking, turnId: string) => {
+  await updateTurn($, turn.turnId, one => {
+    const { durationMs: _, isAborted: __, paused: ___, ...rest } = one
+
+    return { ...rest, lastTurnId: turnId }
+  })
+
+  if (owedRecap === turn.turnId) owedRecap = null
+  if (retried.turnId === turn.turnId) retried = { turnId: '', count: 0 }
+
+  drainedAt = null
+}
+
+// The tick's count of the subagents a waiting turn waits on.
+const checkWait = async ($: EngineInterface) => {
+  const now = await $.clock.now()
+
+  if (now - checkedAt < WAIT_CHECK) return
+
+  checkedAt = now
+  const turn = await read($, thinking)
+
+  if (turn?.paused === undefined || turn.durationMs !== undefined) {
+    drainedAt = null
+
+    return
+  }
+
+  const running = await runningSubagents($)
+
+  if (running !== turn.paused.subagents) {
+    await updateTurn($, turn.turnId, one =>
+      one.paused === undefined ? one : { ...one, paused: { ...one.paused, subagents: running } },
+    )
+  }
+
+  if (running > 0) {
+    drainedAt = null
+
+    return
+  }
+
+  drainedAt ??= now
+
+  if (now - drainedAt < DRAIN_GRACE) return
+
+  // It ran until its last subagent ended, as far as the count saw. As at a
+  // turn's end, the log takes how it ended, then the summary asks for its
+  // last word, past the gap: the clock stops.
+  const end = drainedAt
+  drainedAt = null
+  await updateTurn($, turn.turnId, one =>
+    one.paused === undefined ? one : ended(one, Math.max(0, end - one.startedAt), false),
+  )
+  owedRecap = (await read($, isSummaryOn)) ? turn.turnId : null
+  stopTicker()
+  $.clock.after(0, () => void endTurn($, turn.turnId).catch(() => {}))
+}
+
 const stopTicker = () => {
   ticker?.cancel()
   ticker = null
 }
 
-// While a turn runs: redraw each second for the clock in the header, and
-// ask for a summary once one is due.
+// While a turn runs, or waits on its subagents: redraw each second for the
+// clock in the header, and ask for a summary once one is due.
 const startTicker = ($: EngineInterface) => {
   stopTicker()
   ticker = $.clock.every(SECOND, () => void tick($).catch(() => {}))
@@ -1180,6 +1359,7 @@ const tick = async ($: EngineInterface) => {
     await cutLive($)
   }
 
+  await checkWait($)
   await askSummary($, false)
 }
 
@@ -1234,9 +1414,13 @@ const newTurn = (turnId: string, request: string, startedAt: number): Thinking =
   isSummarizing: false,
 })
 
+// Whether the main loop's turn `turnId` is the kept turn's: its first, or
+// the latest that went on with it.
+const isTurnOf = (turn: Thinking, turnId: string) => turn.turnId === turnId || turn.lastTurnId === turnId
+
 // Changes the turn kept, where it is still the turn `turnId`.
 const updateTurn = ($: EngineInterface, turnId: string, change: (turn: Thinking) => Thinking) =>
-  update($, thinking, turn => (turn?.turnId === turnId ? change(turn) : turn))
+  update($, thinking, turn => (turn !== null && isTurnOf(turn, turnId) ? change(turn) : turn))
 
 // The updates with `entry` after them, the newest MAX_TURN_ENTRIES kept: the
 // log is written from them, so a turn's first updates stay in it.
@@ -1250,14 +1434,28 @@ const lastUpdateAt = (turn: Thinking) => turn.entries.at(-1)?.at ?? turn.started
 const isSilent = (turn: Thinking, now: number) =>
   turn.notes.length > turn.summarized && now - lastUpdateAt(turn) >= MAX_SILENCE
 
+// How many updates came after the turn's latest recap, or all of them while
+// it has none.
+const sinceRecap = (turn: Thinking) => {
+  let count = 0
+
+  for (let at = turn.entries.length - 1; at >= 0 && turn.entries[at]?.isRecap !== true; at -= 1) count += 1
+
+  return count
+}
+
 // Something to say. While the turn runs: notes Haiku has not read yet, as an
-// update or a WAIT, or notes that waited past MAX_SILENCE. Once it ended:
-// notes no update has read, or two updates or more and no recap yet. One
-// update and nothing after it needs none: the recap would say it again.
-const hasNews = (turn: Thinking, now: number) =>
-  turn.durationMs === undefined
-    ? turn.notes.length > turn.seen || isSilent(turn, now)
-    : turn.notes.length > turn.summarized || (turn.entries.length >= 2 && turn.entries.at(-1)?.isRecap !== true)
+// update or a WAIT, or notes that waited past MAX_SILENCE. While it waits on
+// its subagents: notes no update has read, nothing more coming until a
+// result wakes Claude. Once it ended: those, or two updates or more since
+// the last recap (a turn a result reopened has one). One update and nothing
+// after it needs none: the recap would say it again.
+const hasNews = (turn: Thinking, now: number) => {
+  if (turn.durationMs !== undefined) return turn.notes.length > turn.summarized || sinceRecap(turn) >= 2
+  if (turn.paused !== undefined) return turn.notes.length > turn.summarized
+
+  return turn.notes.length > turn.seen || isSilent(turn, now)
+}
 
 // One request at a time: a tick that comes while one runs leaves it be, and
 // a due request waits for it. `isDue` skips the gap: the turn's end, the
@@ -1489,7 +1687,7 @@ const keepNote = async ($: EngineInterface, turnId: string, text: string) => {
     let isNew = false
 
     await update($, thinking, turn => {
-      const one = turn?.turnId === turnId ? turn : newTurn(turnId, '', now)
+      const one = turn !== null && isTurnOf(turn, turnId) ? turn : newTurn(turnId, '', now)
       isNew = one !== turn
 
       // The same block twice, as from a retried request, is one note.
@@ -1544,7 +1742,7 @@ const keepMark = async ($: EngineInterface, key: 'actions' | 'said', text: strin
     const at = await $.clock.now()
 
     await update($, thinking, turn => {
-      if (turn === null || turn.durationMs !== undefined || (turnId !== undefined && turn.turnId !== turnId)) {
+      if (turn === null || turn.durationMs !== undefined || (turnId !== undefined && !isTurnOf(turn, turnId))) {
         return turn
       }
 
@@ -1684,32 +1882,69 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // Where each prompt came from, for the turn it starts to know whether it
+  // goes on with the turn before (RESUMING). Every prompt passes as it came.
+  on('prompt.submit', async ($, e, next) => {
+    const one: Submission = {
+      kind: e.origin === undefined ? 'unclassified' : e.origin.kind,
+      text: e.text.trim(),
+      isIdle: e.turnId === undefined,
+    }
+    submissions = [...submissions, one].slice(-MAX_SUBMISSIONS)
+    const result = await next(e)
+
+    // A prompt dropped starts no turn.
+    if (result.drop !== undefined) submissions = submissions.filter(item => item !== one)
+
+    return result
+  })
+
   // A subagent's run raises turn.start too, inside the main loop's turn: its
   // tool calls count toward that turn, and its thinking is its own.
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       await update($, turnTools, () => 0)
-      // A new prompt's first note is summarized at once, not after the gap
-      // the last turn's updates left; its updates start at the top.
-      askedAt = Number.NEGATIVE_INFINITY
       liveBlock = null
-      await toNewest($)
-      // The turn before, for an update on it that lands from here on, or its
-      // recap, still owed.
-      previousTurn = await read($, thinking)
+      const isResumed = isResumedBy(e.text)
+      const [current, fill] = await Promise.all([read($, thinking), read($, reading)])
+
       // The turn's growth counts from the fill it starts at: the turn
       // before's end, measured at its end or inside it.
-      const fill = await read($, reading)
-
       if (fill?.tokens !== undefined && fill.percent !== undefined && fill.isCompacted !== true) {
         const { tokens, percent } = fill
         await update($, samples, () => [{ tokens, percent }])
       }
 
-      const startedAt = await $.clock.now()
-      await update($, thinking, () => newTurn(e.turnId, clip(e.text.trim(), MAX_REQUEST_CHARS), startedAt))
+      const isOn = await restore($)
 
-      if (await restore($)) {
+      if (isResumed && current !== null) {
+        // A subagent's result, or another background message: the updates
+        // go on where they were.
+        await goOn($, current, e.turnId)
+      } else {
+        // A new prompt's first note is summarized at once, not after the gap
+        // the last turn's updates left; its updates start at the top.
+        askedAt = Number.NEGATIVE_INFINITY
+        await toNewest($)
+        // The turn before, for an update on it that lands from here on, or
+        // its recap, still owed. One that waited on its subagents ends here,
+        // as far as its last turn went.
+        previousTurn =
+          current?.paused !== undefined && current.durationMs === undefined
+            ? ended(current, Math.max(0, current.paused.at - current.startedAt), false)
+            : current
+
+        if (previousTurn !== null && previousTurn !== current) {
+          if (isOn) owedRecap = previousTurn.turnId
+
+          void logTurn($, previousTurn)
+        }
+
+        const startedAt = await $.clock.now()
+        await update($, thinking, () => newTurn(e.turnId, clip(e.text.trim(), MAX_REQUEST_CHARS), startedAt))
+      }
+
+      if (isOn) {
         startTicker($)
       }
     }
@@ -1799,11 +2034,26 @@ export const register: Register = on => {
         ...(usage && input > 0 ? { cacheRate: usage.cache_read_input_tokens / input } : {}),
       }))
 
-      await updateTurn($, e.turnId, turn => ({ ...turn, durationMs: e.durationMs, isAborted: e.isAborted }))
+      // While subagents it started still work, the turn waits for their
+      // results, which wake Claude and go on with it; the clock runs on. One
+      // the person interrupted, or with none left at work, has ended: the
+      // whole of it, from the person's prompt, when results woke it.
+      const running = e.isAborted ? 0 : await runningSubagents($)
+      const now = await $.clock.now()
+      const turn = await updateTurn($, e.turnId, one =>
+        running > 0
+          ? { ...one, paused: { at: now, subagents: running } }
+          : ended(one, one.lastTurnId === undefined ? e.durationMs : Math.max(0, now - one.startedAt), e.isAborted),
+      )
+      const turnId = turn !== null && isTurnOf(turn, e.turnId) ? turn.turnId : e.turnId
+      const isWaiting = turn !== null && isTurnOf(turn, e.turnId) && turn.paused !== undefined
+
       // Its last word is owed while the summary runs, even once the next
       // prompt's turn has begun; a turn that ended with it off owes none.
-      owedRecap = (await read($, isSummaryOn)) ? e.turnId : null
-      stopTicker()
+      if (!isWaiting) {
+        owedRecap = (await read($, isSummaryOn)) ? turnId : null
+        stopTicker()
+      }
 
       // The turn's growth as far as measured: the engine raises no
       // measurement at the end when the fill has not moved since one inside
@@ -1818,8 +2068,9 @@ export const register: Register = on => {
       }
 
       // The log takes the end, then the turn's last word is asked, past the
-      // gap: no tick follows the end.
-      $.clock.after(0, () => void endTurn($, e.turnId).catch(() => {}))
+      // gap: no tick follows the end. A turn that waits takes an update of
+      // where it stands.
+      $.clock.after(0, () => void endTurn($, turnId).catch(() => {}))
     }
 
     return next(e)
@@ -1839,8 +2090,9 @@ export const register: Register = on => {
       const { tokens, window, percent } = e.context
       const [before, turn] = await Promise.all([read($, reading), read($, thinking)])
       // A measurement while the main loop's turn runs (a rate-limit window
-      // moved) shows the fill; the turn's growth is counted at its end.
-      const isMidTurn = turn !== null && turn.durationMs === undefined
+      // moved) shows the fill; the turn's growth is counted at its end. One
+      // while the summary's turn waits on its subagents comes between turns.
+      const isMidTurn = turn !== null && turn.durationMs === undefined && turn.paused === undefined
       // A compaction's mark stays while the engine has no fill yet, and
       // through the turn it ran in: its drop is the change shown at the end.
       const isCompacted = before?.isCompacted === true && (tokens === undefined || isMidTurn)
@@ -1923,6 +2175,8 @@ export const register: Register = on => {
       await toNewest($)
       isOwed = false
       askedAt = Number.NEGATIVE_INFINITY
+      submissions = []
+      drainedAt = null
       // The host wipes the pane's values once the session has ended: the
       // person's choices and the limits come back from the store after it.
       $.clock.after(SECOND, () => void restore($).catch(() => {}))
@@ -2023,14 +2277,19 @@ export const register: Register = on => {
       ? await Promise.all([read($, thinking), read($, summaryCost), read($, isDebugOn), read($, summaryPlace)])
       : ([null, 0, false, { line: 0, row: 0 }] as const)
 
-    // "🧭 Thinking · 1m 46s", the turn's whole length once it ended.
+    // "🧭 Thinking · 1m 46s", the turn's whole length once it ended; "·
+    // waiting for 2 subagents" while their results are still to come.
     const header =
       turnNow === null
         ? '🧭 Thinking'
         : [
             '🧭 Thinking',
             formatDuration(Math.max(0, turnNow.durationMs ?? at - turnNow.startedAt)),
-            ...(turnNow.durationMs === undefined ? [] : [turnNow.isAborted ? 'interrupted' : 'done']),
+            ...(turnNow.durationMs !== undefined
+              ? [turnNow.isAborted ? 'interrupted' : 'done']
+              : turnNow.paused !== undefined
+                ? [waitingFor(turnNow.paused.subagents)]
+                : []),
             ...(turnNow.isSummarizing ? ['summarizing…'] : []),
           ].join(' · ')
 

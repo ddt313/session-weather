@@ -37,7 +37,13 @@ export type ThinkingEntry = {
 // of the text Claude wrote to the person.
 export type TurnMark = { at: number; text: string }
 
-// The main loop's current or last turn, as the summary follows it. `notes`
+// The main loop's current or last turn, as the summary follows it: the
+// turn a prompt of the person's own began, and every turn a subagent's
+// result or a background task's notification began after it, which go on
+// with it. `turnId` is the first turn's id, and `lastTurnId` the latest of
+// those that went on with it (absent while there is none). `paused` is set
+// while it waits on subagents it started: since when (its last turn's end),
+// and how many still ran at the last count. `notes`
 // are its thinking blocks that carried text, oldest first; `summarized`
 // counts the ones an update has read, and `seen` the ones Haiku has read,
 // an update or a WAIT; `dropped` counts the notes dropped from the front past
@@ -51,10 +57,12 @@ export type TurnMark = { at: number; text: string }
 // shape tag; an optional field added needs none.
 export type Thinking = {
   turnId: string
+  lastTurnId?: string
   request: string
   startedAt: number
   durationMs?: number
   isAborted?: boolean
+  paused?: { at: number; subagents: number }
   notes: TurnMark[]
   summarized: number
   seen: number

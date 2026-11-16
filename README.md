@@ -52,8 +52,21 @@ The pane opens beside the conversation when a session starts.
   again with the next ones. After 45 seconds without an update, and for the
   turn's recap, WAIT is not allowed.
 - The prompt's earlier updates stay, newest first, in their own window under
-  the weather. A recap closes a turn that had two updates or more, or that
-  ended with notes no update read. A new prompt starts the list over.
+  the weather. A recap closes a turn that had two updates or more since the
+  last recap, or that ended with notes no update read. A new prompt of yours
+  starts the list over.
+- A turn that a subagent's result begins (its hand-back, which the engine
+  delivers as another Claude session's message) or a background task's
+  notification is no new prompt: its updates join the list of the prompt
+  Claude works on. A turn that ends while subagents it started still work
+  is not done: the header says `waiting for 2 subagents`, the clock runs
+  on, and one update says where Claude stands (no WAIT: nothing more comes
+  until a result does). The recap waits for the turn that ends with none
+  left at work, and reads the whole of it from your prompt. Should no
+  result wake Claude within about half a minute of the last subagent
+  ending (a hand-back withheld, a subagent stopped), the turn is done
+  there. A notification after the turn ended, as from a background command
+  that finished, opens it again.
 - To scroll the updates and nothing else, click ▲ ▼: each click moves about
   half the window, and a line scrolled part-way shows from there, marked `…`.
   The mouse wheel does not reach the updates (the desktop scrolls the pane
@@ -66,10 +79,12 @@ The pane opens beside the conversation when a session starts.
 - Each turn's updates also go to a log of the session's own, a Markdown
   file named after the session's id in `~/.claude/session-weather/thinking/`
   (under `CLAUDE_CONFIG_DIR` when that is set). A turn's section says when
-  it began and how it ended, then your prompt, the recap, and the updates in
-  the order they came. It is written again as each update comes, a recap
-  that lands after your next prompt still goes to its turn, and a resumed
-  session goes on in the same file. A turn with no update adds nothing.
+  it began and how it ended (or that it waits for its subagents), then your
+  prompt, the recap, and the updates in the order they came, those of the
+  turns its subagents' results began among them. It is written again as
+  each update comes, a recap that lands after your next prompt still goes
+  to its turn, and a resumed session goes on in the same file. A turn with
+  no update adds nothing.
 - Claude reads the log through a tool of the mod's,
   `mcp__session-weather__thinking_log`, kept behind ToolSearch until it is
   wanted: the recaps of the last 10 turns by default, up to 50 turns, or
