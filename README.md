@@ -15,21 +15,35 @@ The pane opens beside the conversation when a session starts.
 or the terminal is too narrow to show it, a status line under the prompt
 keeps its key figures.
 
-![The Session Weather pane in the Claude desktop app, part-way through a turn](session-weather/screenshot.png)
+The pane lays itself out by its width, and changes over as you drag it wider
+or narrower.
 
-The pane in the desktop app, 42 seconds into a turn: the weather on top,
-then Haiku's updates on Claude's thinking, newest first, each with its gist,
-a decision (★), what Claude takes as true unchecked (?) and its next step
-(→).
+![The Session Weather pane under 90 columns in the Claude desktop app: the weather above the thinking summary](session-weather/screenshot.png)
+
+Under 90 columns, in the desktop app as a turn ends: the weather on top (the
+sky, the context's fill and where auto-compact runs, the last turn, the
+5-hour and weekly limits with this session's part of each in yellow, the
+session's cost), then Haiku's updates on Claude's thinking, newest first,
+each with its gist, a decision (★), what Claude takes as true unchecked (?)
+and its next step (→).
+
+![The Session Weather pane from 90 columns: the weather in a column of its own, the summary of a picked turn beside it](session-weather/screenshot-wide.png)
+
+From 90 columns: the weather in a column of its own, which also says what
+fills the context, the pace of each limit (the │ on its bar, `~29% at
+reset`), the session's line (model, since when, prompts, cost) and the
+recent turns, with the box that persists them; beside it the summary, here
+showing the turn picked from the list (▸ 23:31), its recap on top.
 
 **Layout**
 
 - From 90 columns wide (character cells; on the desktop, cells of the code
   font) the pane lays out in two, as a web page does on a wide screen: the
   weather in a column of its own on the left, the thinking summary beside it
-  with the rest of the width and the pane's whole height. Narrower, or with
-  the summary off, the weather stands above the summary, as in the picture.
-  Drag the pane wider or narrower and it changes over.
+  with the rest of the width and the pane's whole height, as in the second
+  picture. Narrower, or with the summary off, the weather stands above the
+  summary, as in the first. Drag the pane wider or narrower and it changes
+  over.
 - From 90 columns the weather also says more, in the room its column has:
   see **Wide layout**.
 - Minimized to a widget on the desktop app, the pane shows what reads at a
@@ -120,15 +134,16 @@ Each row is cut to the column, never wrapped.
 - The recent turns are kept with the session's other values, each with its
   figures and its newest 100 updates: reloading the mod keeps them, and a
   `/clear` starts the list over with the new conversation. Closing Claude
-  Code loses them, unless you saved the session: **☐ Save**, beside the
-  header, off until you press it, and for this session alone. Pressed, it
-  reads **☑ Saved**, and the session's turns and its count of compactions go
-  to a file named after the session's id in
+  Code loses them, unless you persist the session: **☐ Persist**, a box
+  beside the header, unticked until you press it, and for this session
+  alone. Ticked, **☑ Persist**, the session's turns and its count of
+  compactions go to a file named after the session's id in
   `~/.claude/session-weather/turns/`, written again as each turn ends or gets
   an update. When the session starts again, after a restart or resumed, they
-  come back, saving still on; a turn the restart cut short reads
-  `interrupted`. Pressed again, saving stops and the file is deleted. A
-  session never saved writes no such file.
+  come back, the box still ticked; a turn the restart cut short reads
+  `interrupted`. Unticked, the file is deleted at once, and the turns stay
+  in memory only, until Claude Code closes. A session never ticked writes no
+  such file.
 
 **Status line**
 

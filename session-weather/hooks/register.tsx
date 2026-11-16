@@ -3735,8 +3735,9 @@ export const register: Register = (on, options) => {
     const step = pageStep(rows, isWide ? WIDE_OVERHEAD : PANE_OVERHEAD)
 
     // The recent turns' header, and beside it the person's switch for
-    // keeping this session's turns past a restart of Claude Code: off unless
-    // pressed.
+    // keeping this session's turns past a restart of Claude Code, a box to
+    // tick: "☐ Persist" unless pressed; ticked, "☑ Persist", the turns go to
+    // a file; unticked again, the file goes and the turns stay in memory.
     const recentHeader = (
       <Box flexDirection="row" gap={2}>
         <Text {...BLOCK_HEADER}>Recent turns</Text>
@@ -3744,7 +3745,7 @@ export const register: Register = (on, options) => {
           key={SAVE_TOGGLE}
           plain
           dimColor={!isSaved}
-          label={isSaved ? '☑ Saved' : '☐ Save'}
+          label={isSaved ? '☑ Persist' : '☐ Persist'}
           onPress={() => setSaving($, !isSaved).catch(() => {})}
         />
       </Box>

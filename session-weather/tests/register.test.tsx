@@ -2170,11 +2170,11 @@ test("saving is off until pressed: then the session's turns and compactions go t
   await oneTurn($, steps, clock, 't1', 'fix it')
 
   // Off unless pressed: nothing is written.
-  expect(await buttons($, { bodyColumns: WIDE_FROM })).toContain('☐ Save')
+  expect(await buttons($, { bodyColumns: WIDE_FROM })).toContain('☐ Persist')
   expect(files.has(SAVED)).toBe(false)
 
   await press($, 'save-turns', WIDE_FROM)
-  expect(await buttons($, { bodyColumns: WIDE_FROM })).toContain('☑ Saved')
+  expect(await buttons($, { bodyColumns: WIDE_FROM })).toContain('☑ Persist')
   expect(savedIn(files)?.shape).toBe('recent-turns-1')
   expect(savedIn(files)?.turns.map(one => [one.turnId, one.durationMs, one.entries.map(entry => entry.gist)])).toEqual([
     ['t1', 2_000, ['Claude đang sửa lỗi.']],
@@ -2187,11 +2187,17 @@ test("saving is off until pressed: then the session's turns and compactions go t
   await oneTurn($, steps, clock, 't2', 'and this')
   expect(savedIn(files)?.turns.map(one => one.turnId)).toEqual(['t1', 't2'])
 
-  // Pressed again: the file goes, by a command of the host's.
+  // Unticked: the file goes, by a command of the host's, and the turns stay
+  // in memory, for as long as Claude Code runs.
   await press($, 'save-turns', WIDE_FROM)
   expect(runs.at(-1)?.argv).toEqual(['rm', '-f', '--', SAVED])
   expect(files.has(SAVED)).toBe(false)
-  expect(await buttons($, { bodyColumns: WIDE_FROM })).toContain('☐ Save')
+  expect(await buttons($, { bodyColumns: WIDE_FROM })).toContain('☐ Persist')
+  expect((await turnRows($, 'terminal')).length).toBe(2)
+
+  // A turn after it writes no file.
+  await oneTurn($, steps, clock, 't3', 'and more')
+  expect(files.has(SAVED)).toBe(false)
 })
 
 test('a saved session started again gets its turns and compactions back, saving on; a turn the restart cut reads interrupted', async ($, on) => {
@@ -2218,7 +2224,7 @@ test('a saved session started again gets its turns and compactions back, saving 
     `${clockOf(NOW - 10 * MINUTE)} · ▲ +7k · 1 tool · interrupted`,
     `${clockOf(NOW - HOUR)} · 2m 14s · ▲ +90k · 3 tools`,
   ])
-  expect(await buttons($, { bodyColumns: WIDE_FROM })).toContain('☑ Saved')
+  expect(await buttons($, { bodyColumns: WIDE_FROM })).toContain('☑ Persist')
   // All its compactions, not those since the restart alone.
   expect((await sessionShown($, 'terminal')).join('\n')).toContain('2 compactions')
 
@@ -2246,7 +2252,7 @@ for (const [kind, text] of [
     await $.session.start(start)
     await $.turn.start({ text: 'go', turnId: 't9' })
     expect(await turnRows($, 'terminal')).toEqual([`▸ ${clockOf(NOW)} · running · 0 tools`])
-    expect(await buttons($, { bodyColumns: WIDE_FROM })).toContain('☐ Save')
+    expect(await buttons($, { bodyColumns: WIDE_FROM })).toContain('☐ Persist')
   })
 }
 
