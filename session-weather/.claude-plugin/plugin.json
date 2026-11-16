@@ -1,6 +1,6 @@
 {
   "name": "session-weather",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "license": "MIT",
   "description": "A pane with the session's weather: context fill and auto-compact point, the last turn, the 5-hour and weekly limits and this session's part of each, the cost, and a Haiku summary of what Claude is thinking; wide, the limits' pace, what fills the context, the subagents at work and the recent turns; a status line while it is hidden",
   "types": "./types/index.d.ts",
