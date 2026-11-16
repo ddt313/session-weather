@@ -6,7 +6,7 @@ so far.
 
 | Mod | What it does |
 | --- | --- |
-| [session-weather](session-weather) | A pane with the session's weather: how full the context is, the last turn, the 5-hour and weekly limits and this session's part of each, the cost, and a running Haiku summary of what Claude is thinking. While the pane is not on screen, a status line under the prompt keeps its key figures. |
+| [session-weather](session-weather) | A pane with the session's weather: how full the context is, the last turn, the 5-hour and weekly limits and this session's part of each, the cost, and a running Haiku summary of what Claude is thinking. A wide pane adds the limits' pace, what fills the context, the subagents at work and the recent turns. While the pane is not on screen, a status line under the prompt keeps its key figures. |
 
 ## Session Weather
 
