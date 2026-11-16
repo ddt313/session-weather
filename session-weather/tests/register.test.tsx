@@ -2133,6 +2133,34 @@ test("a hand-back goes on in its turn's row; the list keeps the last eight turns
   expect((await pane($, 'terminal', WIDE_FROM)).includes('Recent turns')).toBe(false)
 })
 
+test("each block's header reads as one: a step larger than its rows, heavier, muted", async ($, on) => {
+  const { agents } = engine(on, { rateLimits: PACED })
+  on('agent.spawn', () => ({ model: 'claude-haiku-5-5', agentId: 'a1' }))
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  agents.push({ id: 'a1', description: 'Find it', type: 'Explore', status: 'running' })
+  await $.agent.spawn({ prompt: 'Find it.', description: 'Find it' } as never)
+
+  // The header's style, by its text, in a pane `columns` wide.
+  const styleOf = async (surface: 'desktop' | 'terminal', columns: number, text: string) => {
+    const ui = await mount($, surface, columns)
+    const found = ((await ui.findAll({ type: 'Text' })) as unknown as Found[]).find(one => one.text === text)
+    await ui.unmount()
+
+    return found === undefined ? undefined : { size: found.props.size, weight: found.props.weight, dim: found.props.dimColor }
+  }
+  const header = { size: 'heading', weight: 'semibold', dim: true }
+
+  for (const surface of ['desktop', 'terminal'] as const) {
+    expect(await styleOf(surface, WIDE_FROM - 1, 'Usage limits')).toEqual(header)
+
+    for (const text of ['Usage limits', 'Subagents at work', 'Recent turns']) {
+      expect([text, await styleOf(surface, WIDE_FROM, text)]).toEqual([text, header])
+    }
+  }
+})
+
 test('under WIDE_FROM columns, in a widget and on the status line, nothing of the wide layout shows', async ($, on) => {
   // Everything the wide layout's additions read is there: the breakdown and
   // its model, prompts and a compaction, a subagent at work, recent turns,

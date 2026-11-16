@@ -360,6 +360,11 @@ const bar = (percent: number) => {
   return '█'.repeat(filled) + '░'.repeat(20 - filled)
 }
 
+// The header of a block of the weather ("Usage limits", "Recent turns"): a
+// step larger than its rows and heavier, still muted. The terminal has one
+// size, and draws it bold.
+const BLOCK_HEADER = { dimColor: true, size: 'heading', weight: 'semibold' } as const
+
 // This session's part of a window, in the theme's yellow.
 const MINE = 'warning'
 
@@ -3487,7 +3492,7 @@ export const register: Register = (on, options) => {
         {context}
         {windows.length > 0 && (
           <Box flexDirection="column">
-            <Text dimColor>Usage limits</Text>
+            <Text {...BLOCK_HEADER}>Usage limits</Text>
             {windows.map(window => {
               // "5h 30% · this session 8% · reset in 4h 38m", the part in
               // yellow, as its cells are: the last of the bar's filled ones.
@@ -3544,7 +3549,7 @@ export const register: Register = (on, options) => {
           : spent !== null && <Text dimColor>Session cost {formatCost(spent)}</Text>}
         {atWork.length > 0 && (
           <Box flexDirection="column">
-            <Text dimColor>Subagents at work</Text>
+            <Text {...BLOCK_HEADER}>Subagents at work</Text>
             {atWork.slice(0, MAX_SUBAGENT_ROWS).map(agent => {
               const { label, tail } = subagentLine(agent, at, weatherChars)
 
@@ -3560,7 +3565,7 @@ export const register: Register = (on, options) => {
         )}
         {recent.length > 0 && (
           <Box flexDirection="column">
-            <Text dimColor>Recent turns</Text>
+            <Text {...BLOCK_HEADER}>Recent turns</Text>
             {[...recent].reverse().map((one, index) => {
               // Newest first, so that a column too short for them all cuts
               // the oldest. Beside the summary each is pressed to show its
