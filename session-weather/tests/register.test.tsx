@@ -1665,21 +1665,16 @@ test('from WIDE_FROM columns the weather stands in a column of its own, the summ
   })
 
   // From it: the weather on the left, wide enough for its longest line on
-  // one row (46 characters: 41 cells of the desktop's narrower face, 47 of
-  // the terminal's), and the summary in the rest.
-  for (const [surface, weatherWidth] of [
-    ['desktop', 41],
-    ['terminal', 47],
-  ] as const) {
-    const wide = await layout($, surface, WIDE_FROM)
-    expect([surface, wide.direction, wide.weatherWidth]).toEqual([surface, 'row', weatherWidth])
-    expect(wide.weather).toContain('45% of context · 90k / 200k')
-    expect(wide.weather).toContain('Usage limits')
-    expect(wide.weather).toContain('Week 25%')
-    expect(wide.weather).not.toContain('🧭')
-    expect(wide.summary).toContain('1s · Claude đang sửa lỗi.')
-    expect(wide.summary).toContain('Summary cost $0.002 - Haiku 5.5')
-  }
+  // one row (46 characters, 47 cells of the terminal), and the summary in the
+  // rest. (The desktop draws its own wide layout: see the desktop tests.)
+  const wide = await layout($, 'terminal', WIDE_FROM)
+  expect([wide.direction, wide.weatherWidth]).toEqual(['row', 47])
+  expect(wide.weather).toContain('45% of context · 90k / 200k')
+  expect(wide.weather).toContain('Usage limits')
+  expect(wide.weather).toContain('Week 25%')
+  expect(wide.weather).not.toContain('🧭')
+  expect(wide.summary).toContain('1s · Claude đang sửa lỗi.')
+  expect(wide.summary).toContain('Summary cost $0.002 - Haiku 5.5')
 
   // Nothing is lost on the way: each line one column shows stands beside the
   // weather in the same order, but the limits' bars, which gain their pace.
@@ -1707,9 +1702,8 @@ test('beside the weather the rule spans the summary, and a click moves half its 
     await clock.advance(15 * SECOND)
   }
 
-  // At 120 columns the summary has the body's less the weather's (41 on the
-  // desktop, 47 on the terminal) and the 2 between: the rule spans those.
-  expect(await thoughts($, 'desktop', 120)).toContain('─'.repeat(76))
+  // At 120 columns the summary has the body's less the weather's (47 on the
+  // terminal) and the 2 between: the rule spans those.
   expect(await thoughts($, 'terminal', 120)).toContain('─'.repeat(70))
 
   // Newest first, a row each: "46s · Bốn.", "→ Tiếp 4", and so on down to
@@ -1723,14 +1717,14 @@ test('beside the weather the rule spans the summary, and a click moves half its 
   // there.
   await press($, 'newest')
   await press($, 'older', 120)
-  expect((await thoughts($, 'desktop', 120))[1]).toBe('→ Tiếp 1')
+  expect((await thoughts($, 'terminal', 120))[1]).toBe('→ Tiếp 1')
 })
 
 test('with the summary off the weather keeps one column at any width', async ($, on) => {
   engine(on, { stored: { isSummaryOff: true }, rateLimits: limits(25) })
 
   await $.session.start(start)
-  expect(await layout($, 'desktop', 200)).toEqual({
+  expect(await layout($, 'terminal', 200)).toEqual({
     direction: 'column',
     weatherWidth: undefined,
     weather: expect.stringContaining('Week 25% · reset in 2d 5h'),
@@ -1759,7 +1753,7 @@ test('from WIDE_FROM columns each limit bar marks the share of its time gone, an
     `${bar(15)} [dim]`,
   ])
 
-  for (const surface of ['desktop', 'terminal'] as const) {
+  for (const surface of ['terminal'] as const) {
     // From it: the cell where the time gone falls is │ (the 11th of the 5-hour
     // bar, the 18th of the week's), and 11% over 53% of the time reads 21% at
     // the reset, 75% over 89% of it 84%.
@@ -1876,7 +1870,7 @@ test('from WIDE_FROM columns what fills the context stands under the auto-compac
     'Last turn ▲ +90k',
   ])
 
-  for (const surface of ['desktop', 'terminal'] as const) {
+  for (const surface of ['terminal'] as const) {
     // From it: the rows in use, never the free space, the buffer or the tools
     // loaded on demand; past four, the rest in one (MCP tools and Skills);
     // the rows on the branches of a tree.
@@ -1898,7 +1892,7 @@ test('from WIDE_FROM columns what fills the context stands under the auto-compac
   breakdown.categories = [category('System prompt', 3_200), category('Messages', 12_000), category('Free space', 160_000, 'free')]
   await $.turn.start({ text: 'go on', turnId: 't2' })
   await $.session.measure(measure(20_000, 10))
-  const after = await pane($, 'desktop', WIDE_FROM)
+  const after = await pane($, 'terminal', WIDE_FROM)
   expect(after.slice(after.indexOf('auto-compact at 92% · 184k') + 1, after.indexOf('auto-compact at 92% · 184k') + 3)).toEqual([
     '├ Messages 12k · 6%',
     '└ System prompt 3.2k · 2%',
@@ -1917,7 +1911,7 @@ test("from WIDE_FROM columns the session cost becomes the session's line: its mo
   expect(narrow.at(-1)).toBe('Session cost $16.17')
   expect(narrow.some(text => text.includes('Fable'))).toBe(false)
 
-  for (const surface of ['desktop', 'terminal'] as const) {
+  for (const surface of ['terminal'] as const) {
     // From it, no prompt yet: none said.
     expect((await sessionShown($, surface)).at(-1)).toBe(`Fable 5.2 · ${since} · $16.17`)
   }
@@ -1928,7 +1922,7 @@ test("from WIDE_FROM columns the session cost becomes the session's line: its mo
   await $.session.compact({ trigger: 'manual', messages: SUMMARY })
   await $.session.compact({ trigger: 'auto', messages: SUMMARY })
 
-  for (const surface of ['desktop', 'terminal'] as const) {
+  for (const surface of ['terminal'] as const) {
     expect((await sessionShown($, surface)).slice(-2)).toEqual([`Fable 5.2 · ${since} · 23 turns`, '2 compactions · $16.17'])
   }
 
@@ -1988,7 +1982,7 @@ test('from WIDE_FROM columns each subagent has a row, where it stands and how lo
   )
   await $.agent.spawn({ prompt: 'Find it.', description: 'Find the flaky test' } as never)
 
-  for (const surface of ['desktop', 'terminal'] as const) {
+  for (const surface of ['terminal'] as const) {
     expect(await subagentsShown($, surface, WIDE_FROM)).toEqual([
       'Subagents · 1 at work',
       'Find the flaky test · running · <1m',
@@ -2072,7 +2066,7 @@ test("from WIDE_FROM columns a subagent's rows say what it is at, its model and 
 
   await clock.advance(SECOND)
 
-  for (const surface of ['desktop', 'terminal'] as const) {
+  for (const surface of ['terminal'] as const) {
     expect(await subagentsShown($, surface, WIDE_FROM)).toEqual([
       'Subagents · 1 at work',
       'Find the flaky test · running · <1m',
@@ -2269,7 +2263,7 @@ test('from WIDE_FROM columns the recent turns are listed, newest first: when eac
   await $.turn.complete(turnDone({ turnId: 't2', durationMs: 9_000, isAborted: true }) as never)
   await $.session.measure(measure(97_000, 49))
 
-  for (const surface of ['desktop', 'terminal'] as const) {
+  for (const surface of ['terminal'] as const) {
     expect(await turnRows($, surface)).toEqual([
       `▸ ${clockOf(NOW + 5 * MINUTE)} · 9s · ▲ +7k · 1 tool · interrupted`,
       `${clockOf(NOW)} · 2m 14s · ▲ +90k · 3 tools`,
@@ -2302,8 +2296,8 @@ test('a recent turn pressed shows its updates beside the weather; a new prompt s
   const [first, second] = [clockOf(NOW), clockOf(NOW + MINUTE + SECOND)]
 
   // The newest is shown, marked.
-  expect(await turnRows($, 'desktop')).toEqual([`▸ ${second} · 2s · 0 tools`, `${first} · 2s · 0 tools`])
-  expect(await thoughts($, 'desktop', WIDE_FROM)).toEqual([
+  expect(await turnRows($, 'terminal')).toEqual([`▸ ${second} · 2s · 0 tools`, `${first} · 2s · 0 tools`])
+  expect(await thoughts($, 'terminal', WIDE_FROM)).toEqual([
     '🧭 Thinking · 2s · done',
     '1s · Hai.',
     'Summary cost $0.004 - Haiku 5.5',
@@ -2311,8 +2305,8 @@ test('a recent turn pressed shows its updates beside the weather; a new prompt s
 
   // The one before, pressed: its updates, the turn said by when it began.
   await press($, 'turn-t1', WIDE_FROM)
-  expect(await turnRows($, 'desktop')).toEqual([`${second} · 2s · 0 tools`, `▸ ${first} · 2s · 0 tools`])
-  expect(await thoughts($, 'desktop', WIDE_FROM)).toEqual([
+  expect(await turnRows($, 'terminal')).toEqual([`${second} · 2s · 0 tools`, `▸ ${first} · 2s · 0 tools`])
+  expect(await thoughts($, 'terminal', WIDE_FROM)).toEqual([
     `🧭 Turn at ${first} · 2s · done`,
     '1s · Một.',
     'Summary cost $0.004 - Haiku 5.5',
@@ -2322,17 +2316,17 @@ test('a recent turn pressed shows its updates beside the weather; a new prompt s
 
   // The newest pressed again: back to it.
   await press($, 'turn-t2', WIDE_FROM)
-  expect((await thoughts($, 'desktop', WIDE_FROM))[1]).toBe('1s · Hai.')
+  expect((await thoughts($, 'terminal', WIDE_FROM))[1]).toBe('1s · Hai.')
 
   // An earlier turn picked, the next prompt shows its own turn.
   await press($, 'turn-t1', WIDE_FROM)
   await $.turn.start({ text: 'next', turnId: 't3' })
-  expect(await thoughts($, 'desktop', WIDE_FROM)).toEqual([
+  expect(await thoughts($, 'terminal', WIDE_FROM)).toEqual([
     '🧭 Thinking · 0s',
     'No thinking notes yet.',
     'Summary cost $0.004 - Haiku 5.5',
   ])
-  expect((await turnRows($, 'desktop'))[0]).toBe(`▸ ${second} · running · 0 tools`)
+  expect((await turnRows($, 'terminal'))[0]).toBe(`▸ ${second} · running · 0 tools`)
 })
 
 test("a hand-back goes on in its turn's row; the list keeps the last ten turns, and a /clear empties it", async ($, on) => {
@@ -2587,7 +2581,7 @@ test("each block's header reads as one: a step larger than its rows, heavier, mu
 
   expect(await styleOf('terminal', WIDE_FROM - 1, 'Usage limits')).toEqual(header)
 
-  for (const surface of ['desktop', 'terminal'] as const) {
+  for (const surface of ['terminal'] as const) {
     for (const text of ['Usage limits', 'Subagents · 1 at work', 'Recent turns']) {
       expect([text, await styleOf(surface, WIDE_FROM, text)]).toEqual([text, header])
     }
@@ -4377,9 +4371,10 @@ const desk = async ($: Test$, columns = 60) => {
   return { texts, alts: svgs.map(one => one.alt), svgs, labels }
 }
 
-// The person pressing a Button of the desktop pane under WIDE_FROM columns.
-const pressDesk = async ($: Test$, key: string) => {
-  const ui = await mount($, 'desktop', 60)
+// The person pressing a Button of the desktop pane, `columns` wide (under
+// WIDE_FROM unless given).
+const pressDesk = async ($: Test$, key: string, columns = 60) => {
+  const ui = await mount($, 'desktop', columns)
   await $.ui.press({ plugin: 'session-weather', key } as never)
   await ui.unmount()
 }
@@ -4573,4 +4568,142 @@ test("on the desktop ⌃ and ⌄ scroll the turn's updates about half the window
   expect(second.lines.at(-1)).toBe('1s · Claude đang sửa lỗi.')
   expect(second.lines.some(line => line.includes('Ba.'))).toBe(false)
   expect(second.labels).toEqual(['Turn summary off'])
+})
+
+test('on the desktop from WIDE_FROM columns: the sky, the cost across the top; the context, the limits and the recent turns on the left', async ($, on) => {
+  const { clock, steps } = engine(on, { rateLimits: limits(25), breakdown: BREAKDOWN, cost: 1.234, startedAt: NOW, turns: 3 })
+
+  await $.session.start(start)
+  await clock.settle()
+  await oneTurn($, steps, clock, 't1', 'fix it')
+  await $.session.measure(measure(90_000, 45))
+
+  const { texts, labels } = await desk($, WIDE_FROM)
+  const between = (from: string, to: string) => texts.slice(texts.indexOf(from), texts.indexOf(to))
+
+  expect(texts.slice(0, texts.indexOf('Context'))).toEqual([
+    'Cloudy',
+    `Fable 5.2 · since ${clockOf(NOW)} · 3 turns`,
+    'Session cost',
+    '$1.23',
+  ])
+  // What fills the context, each part with its share; the last turn.
+  expect(between('Context', 'Usage limits')).toEqual([
+    'Context',
+    'Auto-compact at 92% · 184k',
+    '45%',
+    '90k / 200k',
+    'Messages',
+    '64k',
+    '32%',
+    'System tools',
+    '17.1k',
+    '9%',
+    'System prompt',
+    '3.2k',
+    '2%',
+    'Memory files',
+    '2.4k',
+    '1%',
+    'Other',
+    '2.3k',
+    '1%',
+    'Last turn',
+    '+90k',
+    '2s · 0 tools · cache 96%',
+  ])
+  // Each window with this session's part, its reset and its pace.
+  expect(between('Usage limits', 'Recent turns')).toEqual([
+    'Usage limits',
+    '5-hour',
+    '3%',
+    'This session 3%',
+    'Resets in 3h 26m · ~11% at reset',
+    ' · ~11% at reset',
+    'Week',
+    '25%',
+    'This session 25%',
+    'Resets in 2d 5h · ~37% at reset',
+    ' · ~37% at reset',
+    'Other sessions',
+    'This session',
+    'Projected at reset',
+  ])
+  // The recent turns as a table, the one shown marked.
+  expect(between('Recent turns', 'Thinking')).toEqual(['Recent turns', 'Time · Duration', 'Context added', 'Tools', '2s', '+90k', '0'])
+  expect(labels).toEqual(['☐ Persist', `▸ ${clockOf(NOW)}  2s`, 'Turn summary off'])
+})
+
+test('on the desktop from WIDE_FROM columns a recent turn pressed shows beside them, and ⌃ ⌄ scroll the turn shown', async ($, on) => {
+  const { replies, steps, clock } = engine(on)
+  await threeUpdates($, replies, steps, clock)
+  await $.turn.complete(turnDone({ durationMs: 31_000 }) as never)
+  await clock.settle()
+  await clock.advance(MINUTE)
+  replies.push(answer('GIST: Bốn.'))
+  await oneTurn($, steps, clock, 't2', 'and this')
+
+  // The thinking card's title and its lines, past its duration and its chip
+  // and up to the footer; and the pane's Buttons, in order.
+  const card = async () => {
+    const { texts, labels } = await desk($, WIDE_FROM)
+    const top = texts.findIndex(text => text === 'Thinking' || text.startsWith('Turn at '))
+
+    return { title: texts[top], lines: texts.slice(top + 3, -1), labels }
+  }
+  const [first, second] = [clockOf(NOW), clockOf(NOW + 31 * SECOND + MINUTE)]
+
+  // The current turn, its one update: nothing to scroll.
+  expect(await card()).toEqual({
+    title: 'Thinking',
+    lines: ['1s · Bốn.'],
+    labels: ['☐ Persist', `▸ ${second}  2s`, `${first}  31s`, 'Turn summary off'],
+  })
+
+  // The one before, pressed: its updates, its recap on top, a rule between
+  // two across the right column's card (90 cells, less the left column's 43
+  // and the 2 between, less a cell each side), and arrows to scroll them.
+  await pressDesk($, 'turn-t1', WIDE_FROM)
+  const rule = '─'.repeat(WIDE_FROM - 43 - 2 - 2 - 1)
+  expect(await card()).toEqual({
+    title: `Turn at ${first}`,
+    lines: [
+      'Recap · Claude đang sửa lỗi.',
+      rule,
+      '31s · Ba.',
+      '? Test đã xanh',
+      rule,
+      '16s · Hai.',
+      '→ Chạy test',
+      rule,
+      '1s · Một.',
+      '★ Chỉ sửa file A',
+    ],
+    labels: ['☐ Persist', `${second}  2s`, `▸ ${first}  31s`, '⌃', '⌄', 'Turn summary off'],
+  })
+
+  // ⌄ moves twelve rows, past the last of the seven: the four gists above.
+  await pressDesk($, 'older', WIDE_FROM)
+  expect(await card()).toEqual({
+    title: `Turn at ${first}`,
+    lines: ['★ Chỉ sửa file A'],
+    labels: ['☐ Persist', `${second}  2s`, `▸ ${first}  31s`, '⌃', '⌄', '↑ 4 newer updates', 'Turn summary off'],
+  })
+  await pressDesk($, 'newer', WIDE_FROM)
+  expect((await card()).lines[0]).toBe('Recap · Claude đang sửa lỗi.')
+
+  // The current turn pressed again: back to it.
+  await pressDesk($, 'turn-t2', WIDE_FROM)
+  expect((await card()).title).toBe('Thinking')
+})
+
+test('on the desktop from WIDE_FROM columns with the summary off, the cards stand in one column', async ($, on) => {
+  engine(on, { stored: { isSummaryOff: true }, rateLimits: limits(25) })
+
+  await $.session.start(start)
+  const { texts, labels } = await desk($, 120)
+  expect(texts).toContain('Usage limits')
+  expect(texts).not.toContain('Thinking')
+  expect(texts.at(-1)).toBe('Thinking summary is off')
+  expect(labels).toEqual(['Turn summary on'])
 })

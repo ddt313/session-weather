@@ -26,8 +26,8 @@ limits with this session's part of each in yellow, the session's cost), then
 Haiku's updates on Claude's thinking, newest first, each with its gist, a
 decision (★), what Claude takes as true unchecked (?) and its next step (→).
 The terminal draws it so at that width; the desktop app now draws its own
-cards there (see **On the desktop, under 90 columns**), which the picture
-predates.
+cards there and from 90 columns (see **On the desktop**), which both
+pictures predate.
 
 ![The Session Weather pane from 90 columns: the weather in a column of its own, the summary of a picked turn beside it](session-weather/screenshot-wide.png)
 
@@ -52,12 +52,12 @@ showing the turn picked from the list (▸ 23:31), its recap on top.
   glance, with no buttons: `☁ Cloudy · 42%`, `5h 30% · Week 74% · $1.23`, and
   the summary's newest update.
 
-**On the desktop, under 90 columns**
+**On the desktop**
 
 The desktop app draws the pane as the design "Session Weather layouts" lays
 it out: cards on a fill of their own, the bars and icons drawn as images.
 The terminal, which draws no images, keeps the rows of text the rest of this
-section tells; so, for now, does a desktop pane from 90 columns.
+section tells. Under 90 columns, from the top:
 
 - The sky: its icon on a tile of its color, its name (`Showers`), the
   session's line under it (`Opus 5.5 · since 19:59 · 8 turns`), and the
@@ -75,16 +75,35 @@ section tells; so, for now, does a desktop pane from 90 columns.
   with its state's icon, its task, how long it has run, its model, effort
   and context, its latest tool call with an icon for its kind, and its
   tokens over a bar of its share of all the subagents' tokens.
-- The thinking summary, as a card: the turn shown (the current one, or one
-  stepped to with ⌃ and ⌄ through the recent turns, `1 of 2`), its newest
-  update or its recap whole, with what Claude decided (★), takes as true
-  unchecked (?) and does next (→) each by an icon; then its earlier updates,
-  newest first, a line each, opened and closed by a press. The scroll
-  arrows ▲ ▼ are the terminal's.
+- The thinking summary, as a card: the current turn's updates as the
+  terminal lists them (see **Thinking summary**), newest first, a rule
+  between two. ⌃ and ⌄ scroll them about half the window a press, within
+  the turn; they never go to another turn.
 - Under it, what the summary cost and its switch.
-- Colors follow the theme where text takes them; the fills, the bars and the
-  icons are tones that read on a light theme and a dark one alike. The
-  cards have square corners and the app's own font.
+
+From 90 columns, with the summary on:
+
+- Across the top: the sky and the session's line, the warning where there
+  is one, and the session's cost.
+- On the left, a column of three cards:
+  - The context: its share used and its tokens, a bar of what fills it in
+    a color each (messages, system tools and so on, the rest in grey), with
+    a mark where auto-compact runs, each part's tokens and share under it,
+    and the last turn.
+  - The limits: each window's share used over its bar, this session's part,
+    when it resets and where its pace would take it (`~37% at reset`, or
+    `>100% at reset` in red), and what the bar's colors mean.
+  - The recent turns, as a table: when each began and how long it ran, what
+    it added to the context over a bar beside the others', and its tool
+    calls; with **☐ Persist** above. Press a turn to show its updates on
+    the right, marked ▸; the next prompt shows its own again.
+- On the right: the subagents, with all their tokens on the card's top line,
+  and the thinking summary, showing the turn picked, ⌃ and ⌄ scrolling it.
+- With the summary off, the cards stand in one column.
+
+Colors follow the theme where text takes them; the fills, the bars and the
+icons are tones that read on a light theme and a dark one alike. The cards
+have square corners and the app's own font.
 
 **Weather**
 

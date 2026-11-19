@@ -20,6 +20,7 @@ import type {
   Compactions,
   Facts,
   Fill,
+  LastTurn,
   Limit,
   Reading,
   RecentTurn,
@@ -3291,13 +3292,12 @@ const tileSvg = (name: IconName, ink: string, size: number) => {
 type Stretch = { from: number; to: number; ink: string }
 const HATCH = 'hatch'
 
-// A bar for a slot `cells` wide: its runs over a faint track, rounded at both
-// ends, and, where `mark` is given (0 to 1), a mark standing across it. Drawn
-// BAR_STRETCH wider than the cells and squeezed into the slot, so it is drawn
-// at the height it gives with the source.
-const barSvg = (stretches: readonly Stretch[], cells: number, mark?: number) => {
+// A bar `thick` pixels tall for a slot `cells` wide: its runs over a faint
+// track, rounded at both ends, and, where `mark` is given (0 to 1), a mark
+// standing across it. Drawn BAR_STRETCH wider than the cells and squeezed
+// into the slot, so it is drawn at the height it gives with the source.
+const barSvg = (stretches: readonly Stretch[], cells: number, mark?: number, thick = 6) => {
   const width = Math.max(40, Math.round(cells * CELL_PX * BAR_STRETCH))
-  const thick = 6
   const height = mark === undefined ? thick : thick + 6
   const top = (height - thick) / 2
   const runs = stretches
@@ -3336,6 +3336,32 @@ const WINDOW_TITLES: Readonly<Record<string, string>> = { five_hour: '5-hour', s
 // A window as the tiles draw it: `liveWindows`' figures and this session's
 // part of its share, in points.
 type ShownWindow = ReturnType<typeof liveWindows>[number] & { mine: number }
+
+const shownWindowsOf = (readings: readonly Limit[], parts: readonly Share[], at: number): ShownWindow[] =>
+  liveWindows(readings, at).map(window => ({
+    ...window,
+    mine: window.percent * (parts.find(part => part.kind === window.kind)?.ratio ?? 0),
+  }))
+
+// The sky as the desktop names it: the forecast from the fill, or that a
+// compaction emptied it; null before the first reading.
+const skyOf = (now: Reading | null, compactAt: AutoCompact | null) =>
+  now?.tokens !== undefined && now.percent !== undefined
+    ? forecast(levelOf(now.tokens, now.percent, compactAt))
+    : now?.isCompacted === true
+      ? { label: 'Compacted', color: 'warning' }
+      : null
+
+// The last turn in a few parts: what it added to the context ("+11k"), and
+// how long it ran, its tool calls and its cache rate.
+const lastTurnPartsOf = (added: number | null, turn: LastTurn | null) => ({
+  grown: added === null ? null : added < 0 ? `-${formatTokens(-added)}` : `+${formatTokens(added)}`,
+  rest: [
+    turn === null ? null : `${formatDuration(turn.durationMs)}${turn.isAborted ? ' (interrupted)' : ''}`,
+    turn === null ? null : plural(turn.tools, 'tool'),
+    turn?.cacheRate === undefined ? null : `cache ${Math.round(turn.cacheRate * 100)}%`,
+  ].filter((part): part is string => part !== null),
+})
 
 // Where the share used of a window stands at its reset at this pace, 0 to 1
 // of it, from PACE_FROM of its time on; null before.
@@ -3442,18 +3468,10 @@ const drawNarrowDesktop = async ($: EngineInterface, ui: DesktopUi, columns: num
   isRoomyDrawn = listed.length > 0
   isWideDrawn = false
 
-  const windows: ShownWindow[] = liveWindows(readings, at).map(window => ({
-    ...window,
-    mine: window.percent * (parts.find(part => part.kind === window.kind)?.ratio ?? 0),
-  }))
+  const windows = shownWindowsOf(readings, parts, at)
   const tokens = now?.tokens
   const percent = now?.percent
-  const sky =
-    tokens !== undefined && percent !== undefined
-      ? forecast(levelOf(tokens, percent, compactAt))
-      : now?.isCompacted === true
-        ? { label: 'Compacted', color: 'warning' }
-        : null
+  const sky = skyOf(now, compactAt)
   const skyLook = sky === null ? undefined : SKIES[sky.label]
   const sessionLine = sessionParts(known, counted, null, at).join(' · ')
 
@@ -3561,12 +3579,7 @@ const drawNarrowDesktop = async ($: EngineInterface, ui: DesktopUi, columns: num
   )
 
   // "Last turn +11k · 1m 36s · 5 tools · cache 100%".
-  const grown = added === null ? null : added < 0 ? `-${formatTokens(-added)}` : `+${formatTokens(added)}`
-  const lastParts = [
-    turn === null ? null : `${formatDuration(turn.durationMs)}${turn.isAborted ? ' (interrupted)' : ''}`,
-    turn === null ? null : plural(turn.tools, 'tool'),
-    turn?.cacheRate === undefined ? null : `cache ${Math.round(turn.cacheRate * 100)}%`,
-  ].filter((part): part is string => part !== null)
+  const { grown, rest: lastParts } = lastTurnPartsOf(added, turn)
   const lastTurnChip = (grown !== null || lastParts.length > 0) && (
     <Box flexDirection="row" alignItems="center" gap={1} paddingX={1} paddingY="xs" backgroundColor={DESK.card}>
       <Text size="caption" weight="medium" dimColor>
@@ -3602,22 +3615,7 @@ const drawNarrowDesktop = async ($: EngineInterface, ui: DesktopUi, columns: num
       overhead: PANE_OVERHEAD,
     })
 
-  // The summary's footer: what it cost, and its switch.
-  const footer = (
-    <Box flexDirection="row" alignItems="center" justifyContent="space-between" gap={1}>
-      <Text size="caption" dimColor wrap="truncate">
-        {isOn
-          ? `Summary ${formatSummaryCost(summarySpent)} · ${HAIKU_NAME}${isDebugging ? ' · debug log on' : ''}`
-          : 'Thinking summary is off'}
-      </Text>
-      <Button
-        key={TOGGLE}
-        variant="secondary"
-        label={isOn ? 'Turn summary off' : 'Turn summary on'}
-        onPress={() => setSummary($, !isOn).catch(() => {})}
-      />
-    </Box>
-  )
+  const footer = footerOf($, ui, isOn, summarySpent, isDebugging)
 
   // A body tall enough pins the cards and lets the summary take what is
   // left, cut at the bottom; a shorter one scrolls whole, as the engine does.
@@ -3636,16 +3634,18 @@ const drawNarrowDesktop = async ($: EngineInterface, ui: DesktopUi, columns: num
   )
 }
 
-// The subagents' card: how many work and finished, then a row for each, five
-// at most and the rest said in one: its state, its task, how long it has run
-// (once ended, how long it ran), its model, effort and context, what it is at,
-// and its tokens, with a bar of its share of all the subagents' tokens.
+// The subagents' card: how many work and finished (with `showTotal`, the
+// tokens of them all), then a row for each, five at most and the rest said
+// in one: its state, its task, how long it has run (once ended, how long it
+// ran), its model, effort and context, what it is at, and its tokens, with a
+// bar of its share of all the subagents' tokens.
 const subagentsCardOf = (
   ui: DesktopUi,
   listed: readonly Subagent[],
   figured: readonly SubagentFigures[],
   at: number,
   columns: number,
+  showTotal = false,
 ) => {
   const { Box, Svg, Text } = ui
   const working = workingOf(listed)
@@ -3666,6 +3666,12 @@ const subagentsCardOf = (
         {finished > 0 && (
           <Text size="caption" weight="medium" dimColor backgroundColor={DESK.raised}>
             {` ${finished} finished `}
+          </Text>
+        )}
+        {showTotal && total > 0 && <Box flexGrow={1} />}
+        {showTotal && total > 0 && (
+          <Text size="caption" dimColor tabular>
+            {`${formatTokens(total)} tokens`}
           </Text>
         )}
       </Box>
@@ -3866,6 +3872,429 @@ const thinkingCardOf = ($: EngineInterface, ui: DesktopUi, view: ThinkingView) =
           ])}
         </Box>
       )}
+    </Box>
+  )
+}
+
+// The summary's footer on the desktop: what it cost, and its switch.
+const footerOf = ($: EngineInterface, ui: DesktopUi, isOn: boolean, spent: number, isDebugging: boolean) => {
+  const { Box, Button, Text } = ui
+
+  return (
+    <Box flexDirection="row" alignItems="center" justifyContent="space-between" gap={1}>
+      <Text size="caption" dimColor wrap="truncate">
+        {isOn ? `Summary ${formatSummaryCost(spent)} · ${HAIKU_NAME}${isDebugging ? ' · debug log on' : ''}` : 'Thinking summary is off'}
+      </Text>
+      <Button
+        key={TOGGLE}
+        variant="secondary"
+        label={isOn ? 'Turn summary off' : 'Turn summary on'}
+        onPress={() => setSummary($, !isOn).catch(() => {})}
+      />
+    </Box>
+  )
+}
+
+// What fills the context, as the wide card colors it, largest first; the
+// rest, folded together, grey.
+const FILL_INKS = ['#F47920', '#00AEEF', '#7FD7F7', '#FACAA7'] as const
+
+const inkOfFill = (fill: Fill, index: number) => (fill.name === REST ? INK.grey : (FILL_INKS[index] ?? INK.grey))
+
+// A small swatch of `ink`, or of the hatch, for a legend.
+const swatchSvg = (ink: string) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8" viewBox="0 0 12 8">` +
+  `<defs><pattern id="h" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="1.6" height="4" fill="${INK.hatch}"/></pattern></defs>` +
+  `<rect width="12" height="8" rx="2" fill="${ink === HATCH ? 'url(#h)' : ink}"/></svg>`
+
+// The cells of the wide layout's left column, the design's 344 pixels; and,
+// in its table of recent turns, the cells of the time, the duration and the
+// tool calls.
+const LEFT_CELLS = 43
+const TIME_CELLS = 7
+const TOOK_CELLS = 9
+const TOOLS_CELLS = 5
+
+// The tokens a recent turn added to the context, where both ends are known.
+const grownOf = (one: RecentTurn) =>
+  one.fromTokens === undefined || one.toTokens === undefined ? null : one.toTokens - one.fromTokens
+
+// The pane on the desktop from WIDE_FROM columns, as the design's wide
+// layout draws it: across the top the sky with the session's line, a
+// warning where a window would run out, and the session's cost; on the left
+// the context with what fills it, the limits with their pace, and the recent
+// turns, one pressed to show its updates; on the right the subagents and the
+// thinking summary, its arrows scrolling the turn shown. With the summary
+// off, the cards stand in one column. Each read subscribes the drawing.
+const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: number, rows: number) => {
+  const { Box, Button, Svg, Text } = ui
+  const [at, now, added, readings, parts, compactAt, turn, spent, listed, figured, known, counted, filled, recent, isSaved, isOn] =
+    await Promise.all([
+      $.clock.now(),
+      read($, reading),
+      read($, delta),
+      read($, limits),
+      read($, shares),
+      read($, autoCompact),
+      read($, lastTurn),
+      read($, cost),
+      read($, subagents),
+      read($, subagentFigures),
+      read($, facts),
+      read($, compactions),
+      read($, fills),
+      read($, recentTurns),
+      read($, isSaving),
+      read($, isSummaryOn),
+    ])
+  const [turnNow, picked, place, summarySpent, isDebugging] = isOn
+    ? await Promise.all([read($, thinking), read($, pickedTurn), read($, summaryPlace), read($, summaryCost), read($, isDebugOn)])
+    : ([null, null, { line: 0, row: 0 }, 0, false] as const)
+  isRoomyDrawn = true
+  isWideDrawn = isOn
+
+  const windows = shownWindowsOf(readings, parts, at)
+  const tokens = now?.tokens
+  const percent = now?.percent
+  const sky = skyOf(now, compactAt)
+  const skyLook = sky === null ? undefined : SKIES[sky.label]
+  const sessionLine = sessionParts(known, counted, null, at).join(' · ')
+  const alert = paceAlertOf(windows)
+  // Beside the weather the summary shows the turn picked from the recent
+  // turns, the current one unless the person pressed another.
+  const view = isOn ? shownTurnOf(turnNow, picked, recent) : { turn: null, isPast: false }
+  const rightCells = columns - LEFT_CELLS - COLUMN_GAP
+  const leftCells = isOn ? LEFT_CELLS : columns
+  const barCells = leftCells - 2
+
+  const head = (
+    <Box flexDirection="row" alignItems="center" gap={2}>
+      {skyLook !== undefined && <Svg source={tileSvg(skyLook.icon, skyLook.ink, 44)} alt={sky?.label ?? 'Sky'} width={44} height={44} />}
+      <Box flexDirection="column" flexShrink={1} minWidth={0}>
+        <Text size="heading" weight="semibold" color={sky?.color}>
+          {sky?.label ?? 'Waiting for the first response'}
+        </Text>
+        {sessionLine !== '' && (
+          <Text size="caption" dimColor wrap="truncate">
+            {sessionLine}
+          </Text>
+        )}
+      </Box>
+      <Box flexGrow={1} />
+      {alert !== null && (
+        <Box flexDirection="row" alignItems="center" gap={1} paddingX={1} flexShrink={1} minWidth={0} backgroundColor={DESK.alert}>
+          <Svg source={iconSvg('warning', INK.red, 14)} alt="Warning" width={14} height={14} />
+          <Text size="caption" color="error" wrap="truncate">
+            {alert}
+          </Text>
+        </Box>
+      )}
+      {spent !== null && (
+        <Box flexDirection="column" alignItems="flex-end">
+          <Text size="caption" dimColor>
+            Session cost
+          </Text>
+          <Text size="title" weight="medium" tabular>
+            {formatCost(spent)}
+          </Text>
+        </Box>
+      )}
+    </Box>
+  )
+
+  // The context: its share used, a bar of what fills it, each part's share
+  // under it, and the last turn.
+  const compactLine = now === null ? null : compactLineOf(compactAt, now.window)
+  const compactMark =
+    now !== null && compactAt?.isEnabled === true && compactAt.threshold !== undefined && now.window > 0
+      ? compactAt.threshold / now.window
+      : undefined
+  let from = 0
+  const fillRuns: Stretch[] =
+    now === null || now.window <= 0
+      ? []
+      : filled !== null && filled.length > 0
+        ? filled.map((fill, index) => {
+            const run = { from, to: Math.min(1, from + fill.tokens / now.window), ink: inkOfFill(fill, index) }
+            from = run.to
+
+            return run
+          })
+        : percent === undefined
+          ? []
+          : [{ from: 0, to: clamp01(percent / 100), ink: INK.mine }]
+  const contextBar = barSvg(fillRuns, barCells, compactMark, 10)
+  const { grown, rest: lastParts } = lastTurnPartsOf(added, turn)
+
+  const contextCard = (
+    <Box flexDirection="column" gap="xs" paddingX={1} paddingY="sm" backgroundColor={DESK.card}>
+      <Box flexDirection="row" justifyContent="space-between" gap={1}>
+        <Text size="caption" weight="medium" dimColor>
+          Context
+        </Text>
+        {compactLine !== null && (
+          <Text size="caption" dimColor wrap="truncate">
+            {`${compactLine.charAt(0).toUpperCase()}${compactLine.slice(1)}`}
+          </Text>
+        )}
+      </Box>
+      {tokens !== undefined && percent !== undefined && now !== null ? (
+        <Box flexDirection="row" alignItems="flex-end" gap={1}>
+          <Text size="title" weight="medium" tabular>
+            {`${percent}%`}
+          </Text>
+          <Text dimColor tabular>
+            {`${formatTokens(tokens)} / ${formatTokens(now.window)}`}
+          </Text>
+        </Box>
+      ) : (
+        <Text dimColor>
+          {now?.isCompacted === true
+            ? `Compacted${added === null ? '' : ` ${formatDelta(added)}`}`
+            : 'Waiting for the first response.'}
+        </Text>
+      )}
+      <Svg source={contextBar.source} alt={percent === undefined ? 'Context' : `Context ${percent}% full`} height={contextBar.height} />
+      {now !== null &&
+        filled?.map((fill, index) => (
+          <Box flexDirection="row" alignItems="center" gap={1}>
+            <Svg source={swatchSvg(inkOfFill(fill, index))} alt={fill.name} width={12} height={8} />
+            <Box flexGrow={1} flexShrink={1} minWidth={0}>
+              <Text wrap="truncate">{fill.name}</Text>
+            </Box>
+            <Text dimColor tabular>
+              {formatTokens(fill.tokens)}
+            </Text>
+            <Text size="caption" dimColor tabular>
+              {formatPart((fill.tokens / now.window) * 100)}
+            </Text>
+          </Box>
+        ))}
+      {(grown !== null || lastParts.length > 0) && (
+        <Box flexDirection="row" alignItems="center" gap={1}>
+          <Text size="caption" weight="medium" dimColor>
+            Last turn
+          </Text>
+          {grown !== null && (
+            <Text size="caption" weight="semibold" tabular>
+              {grown}
+            </Text>
+          )}
+          {lastParts.length > 0 && (
+            <Text size="caption" dimColor wrap="truncate">
+              {lastParts.join(' · ')}
+            </Text>
+          )}
+        </Box>
+      )}
+    </Box>
+  )
+
+  // The limits: each window's share used over a bar of this session's part
+  // and its pace, when it resets and where the pace would take it.
+  const limitsCard = windows.length > 0 && (
+    <Box flexDirection="column" gap="sm" paddingX={1} paddingY="sm" backgroundColor={DESK.card}>
+      <Text size="caption" weight="medium" dimColor>
+        Usage limits
+      </Text>
+      {windows.map(window => {
+        const title = WINDOW_TITLES[window.kind] ?? window.name
+        const pace = paceOf(window.percent, window.elapsed)
+        const limitBar = barSvg(limitStretches(window), barCells, undefined, 8)
+
+        return (
+          <Box flexDirection="column">
+            <Box flexDirection="row" justifyContent="space-between" gap={1}>
+              <Text weight="medium">{title}</Text>
+              <Text weight="semibold" tabular>
+                {`${window.used}%`}
+              </Text>
+            </Box>
+            <Svg
+              source={limitBar.source}
+              alt={`${title} ${window.used}% used${window.mine > 0 ? `, this session ${formatPart(window.mine)}` : ''}`}
+              height={limitBar.height}
+            />
+            <Box flexDirection="row" justifyContent="space-between" gap={1}>
+              <Text size="caption" dimColor>
+                {window.mine > 0 ? `This session ${formatPart(window.mine)}` : ''}
+              </Text>
+              <Text size="caption" dimColor wrap="truncate">
+                {window.left === undefined ? '' : `Resets in ${formatLeft(window.left)}`}
+                {pace !== null && (
+                  <Text size="caption" {...(pace.startsWith('>') ? { color: 'error' } : { dimColor: true })}>
+                    {`${window.left === undefined ? '' : ' · '}${pace}`}
+                  </Text>
+                )}
+              </Text>
+            </Box>
+          </Box>
+        )
+      })}
+      <Box flexDirection="row" gap={2} flexWrap="wrap">
+        {(
+          [
+            [INK.others, 'Other sessions'],
+            [INK.mine, 'This session'],
+            [HATCH, 'Projected at reset'],
+          ] as const
+        ).map(([ink, label]) => (
+          <Box flexDirection="row" alignItems="center" gap={1}>
+            <Svg source={swatchSvg(ink)} alt={label} width={12} height={8} />
+            <Text size="caption" dimColor>
+              {label}
+            </Text>
+          </Box>
+        ))}
+      </Box>
+    </Box>
+  )
+
+  // The recent turns, newest first, as a table: when each began and how long
+  // it ran (pressed beside the summary to show its updates, the one shown
+  // marked ▸), what it added to the context over a bar beside the others',
+  // and its tool calls; and the person's switch for persisting them.
+  const turnsShown = recent.slice(-maxRecent()).reverse()
+  const mostGrown = Math.max(1, ...turnsShown.map(one => grownOf(one) ?? 0))
+  const turnsCard = turnsShown.length > 0 && (
+    <Box
+      flexDirection="column"
+      gap="xs"
+      paddingX={1}
+      paddingY="sm"
+      backgroundColor={DESK.card}
+      {...(isOn && rows >= MIN_PINNED_ROWS ? { flexGrow: 1, flexShrink: 1, overflow: 'hidden' as const } : {})}
+    >
+      <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+        <Text size="caption" weight="medium" dimColor>
+          Recent turns
+        </Text>
+        <Button
+          key={SAVE_TOGGLE}
+          plain
+          dimColor={!isSaved}
+          label={isSaved ? '☑ Persist' : '☐ Persist'}
+          onPress={() => setSaving($, !isSaved).catch(() => {})}
+        />
+      </Box>
+      <Box flexDirection="row" gap={1}>
+        <Box width={TIME_CELLS + 1 + TOOK_CELLS}>
+          <Text size="caption" dimColor>
+            Time · Duration
+          </Text>
+        </Box>
+        <Box flexGrow={1} flexShrink={1} minWidth={0}>
+          <Text size="caption" dimColor>
+            Context added
+          </Text>
+        </Box>
+        <Box width={TOOLS_CELLS} justifyContent="flex-end">
+          <Text size="caption" dimColor>
+            Tools
+          </Text>
+        </Box>
+      </Box>
+      {turnsShown.map((one, index) => {
+        const isShown = isOn && one.turnId === view.turn?.turnId
+        const time = formatTime(one.startedAt)
+        const took =
+          one.durationMs !== undefined
+            ? formatDuration(one.durationMs)
+            : index === 0 && one.isAborted !== true
+              ? one.isWaiting === true
+                ? 'waiting'
+                : 'running'
+              : '—'
+        const ran = `${took}${one.isAborted === true ? ' · interrupted' : ''}`
+        const added = grownOf(one)
+        const growth = barSvg([{ from: 0, to: added === null ? 0 : clamp01(added / mostGrown), ink: isShown ? INK.mine : INK.grey }], 12)
+
+        return (
+          <Box flexDirection="row" alignItems="center" gap={1} {...(isShown ? { backgroundColor: DESK.raised } : {})}>
+            <Box width={TIME_CELLS + 1 + TOOK_CELLS}>
+              {isOn ? (
+                <Button
+                  key={`turn-${one.turnId}`}
+                  plain
+                  dimColor={!isShown}
+                  onPress={() => pickTurn($, one.turnId === turnNow?.turnId ? null : one.turnId).catch(() => {})}
+                >
+                  {`${isShown ? '▸ ' : ''}${time}  `}
+                  <Text>{ran}</Text>
+                </Button>
+              ) : (
+                <Text dimColor wrap="truncate">
+                  {`${time}  ${ran}`}
+                </Text>
+              )}
+            </Box>
+            <Box flexDirection="row" alignItems="center" gap={1} flexGrow={1} flexShrink={1} minWidth={0}>
+              <Box flexGrow={1} flexShrink={1} minWidth={0}>
+                <Svg source={growth.source} alt={added === null ? 'Context added not known' : `Added ${formatTokens(Math.abs(added))}`} height={growth.height} />
+              </Box>
+              <Text size="caption" dimColor={!isShown} tabular>
+                {added === null ? '—' : added < 0 ? `-${formatTokens(-added)}` : `+${formatTokens(added)}`}
+              </Text>
+            </Box>
+            <Box width={TOOLS_CELLS} justifyContent="flex-end">
+              <Text size="caption" dimColor={!isShown} tabular>
+                {`${one.tools}`}
+              </Text>
+            </Box>
+          </Box>
+        )
+      })}
+    </Box>
+  )
+
+  const subagentsCard = listed.length > 0 && subagentsCardOf(ui, listed, figured, at, isOn ? rightCells : columns, true)
+  const footer = footerOf($, ui, isOn, summarySpent, isDebugging)
+
+  // With the summary off there is nothing to stand beside: one column.
+  if (!isOn) {
+    return (
+      <Box flexDirection="column" gap="sm">
+        {head}
+        {contextCard}
+        {limitsCard}
+        {subagentsCard}
+        {turnsCard}
+        {footer}
+      </Box>
+    )
+  }
+
+  // A body tall enough pins both columns to it, each cut at the bottom: the
+  // oldest turns go first on the left, the oldest lines of the summary on
+  // the right, where the arrows scroll them.
+  const isPinned = rows >= MIN_PINNED_ROWS
+  const thinkingCard = thinkingCardOf($, ui, {
+    turnNow,
+    shown: view.turn,
+    isPast: view.isPast,
+    place,
+    at,
+    rows,
+    cardColumns: rightCells - 2,
+    isWide: true,
+    overhead: WIDE_OVERHEAD,
+  })
+
+  return (
+    <Box flexDirection="column" gap="sm" {...(isPinned ? { height: rows } : {})}>
+      {head}
+      <Box flexDirection="row" gap={COLUMN_GAP} {...(isPinned ? { flexGrow: 1, flexShrink: 1, minHeight: 0 } : {})}>
+        <Box flexDirection="column" gap="sm" width={LEFT_CELLS} flexShrink={0} {...(isPinned ? { overflow: 'hidden' as const } : {})}>
+          {contextCard}
+          {limitsCard}
+          {turnsCard}
+        </Box>
+        <Box flexDirection="column" gap="sm" flexGrow={1} flexShrink={1} minWidth={0}>
+          {subagentsCard}
+          {thinkingCard}
+          {footer}
+        </Box>
+      </Box>
     </Box>
   )
 }
@@ -4520,11 +4949,13 @@ export const register: Register = (on, options) => {
       )
     }
 
-    // On the desktop under WIDE_FROM columns, the design's narrow layout. The
-    // terminal draws no Svg (its table has one that draws nothing), and keeps
-    // the rows of text below.
-    if (e.surface !== 'terminal' && 'Svg' in ui && e.props.bodyColumns < WIDE_FROM) {
-      return drawNarrowDesktop($, ui as DesktopUi, e.props.bodyColumns, e.props.scroll.bodyRows)
+    // On the desktop, the design's layouts: under WIDE_FROM columns the
+    // narrow one, from it the wide one. The terminal draws no Svg (its table
+    // has one that draws nothing), and keeps the rows of text below.
+    if (e.surface !== 'terminal' && 'Svg' in ui) {
+      return e.props.bodyColumns < WIDE_FROM
+        ? drawNarrowDesktop($, ui as DesktopUi, e.props.bodyColumns, e.props.scroll.bodyRows)
+        : drawWideDesktop($, ui as DesktopUi, e.props.bodyColumns, e.props.scroll.bodyRows)
     }
 
     // Each read subscribes the drawing to its value; they go all at once.
