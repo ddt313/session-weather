@@ -4441,6 +4441,15 @@ test('on the desktop a window on pace to run out before it resets gets a warning
   const sourceOf = (alt: string) => svgs.find(one => one.alt === alt)?.source ?? ''
   expect(sourceOf('Week 60% used')).toContain('url(#h)')
   expect(sourceOf('5-hour 9% used')).not.toContain('url(#h)')
+
+  // From WIDE_FROM columns the warning is a pill in the header, 32 pixels
+  // tall, its words escaped in the drawing and whole in its alt.
+  const wide = await desk($, WIDE_FROM)
+  const warning = 'Week limit on pace for >100% before it resets in 3d 12h.'
+  const pill = wide.svgs.find(one => one.alt === warning)?.source ?? ''
+  expect(pill).toContain('height="32"')
+  expect(pill).toContain('<tspan font-weight="600">Week limit</tspan> on pace for &gt;100% before it resets in 3d 12h</text>')
+  expect(wide.texts.some(text => text.includes('on pace'))).toBe(false)
 })
 
 test("on the desktop each subagent's row says its state, task and time, its model, effort and context, what it is at, and its tokens", async ($, on) => {

@@ -3314,6 +3314,38 @@ const tileSvg = (name: IconName, ink: string, size: number) => {
   )
 }
 
+// Text written into an Svg, its markup's characters escaped.
+const svgText = (text: string) =>
+  text.replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch] ?? ch)
+
+// The width of `text` in the system face at `size` pixels, about: a narrow
+// letter, a wide one, the rest.
+const textPx = (text: string, size: number) =>
+  [...text].reduce(
+    (width, ch) => width + size * (/[\s.,:;'|!il1()[\]tfr]/.test(ch) ? 0.3 : /[A-Z%>mw@]/.test(ch) ? 0.68 : 0.55),
+    0,
+  )
+
+// The warning as the wide layout's header draws it, a pill 32 pixels tall
+// and round at both ends, as the design has it: its icon, then its words,
+// the window's name and "limit" heavier, in a red that reads on a dark
+// theme or a light one. Drawn whole, as a Box with a round border stands
+// taller than the design's 32 pixels.
+const pillSvg = (words: string) => {
+  const strong = /^\S+ limit/.exec(words)?.[0] ?? ''
+  const rest = words.slice(strong.length).replace(/\.$/, '')
+  const width = Math.ceil(12 + 14 + 8 + textPx(strong, 12) * 1.06 + textPx(rest, 12) + 14)
+
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="32" viewBox="0 0 ${width} 32">` +
+    `<style>.w{fill:#B4232A;stroke:#B4232A}@media (prefers-color-scheme: dark){.w{fill:#FFB0B3;stroke:#FFB0B3}}</style>` +
+    `<rect width="${width}" height="32" rx="16" fill="rgba(227, 27, 35, 0.14)"/>` +
+    `<g class="w" transform="translate(12 9) scale(${(14 / 24).toFixed(3)})" fill="none" style="fill:none" stroke-width="${strokeOf(14)}" stroke-linecap="round" stroke-linejoin="round">${ICONS.warning}</g>` +
+    `<text class="w" x="34" y="20" stroke="none" style="stroke:none" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12">` +
+    `<tspan font-weight="600">${svgText(strong)}</tspan>${svgText(rest)}</text></svg>`
+  )
+}
+
 // A run along a bar, from and to as shares of its length (0 to 1), in an ink
 // or, for a projection, the hatch.
 type Stretch = { from: number; to: number; ink: string }
@@ -4046,11 +4078,8 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
       </Box>
       <Box flexGrow={1} />
       {alert !== null && (
-        <Box flexDirection="row" alignItems="center" gap={1} paddingX={1} flexShrink={1} minWidth={0} {...cardLook(DESK.alert)}>
-          <Svg source={iconSvg('warning', INK.red, 14)} alt="Warning" width={14} height={14} />
-          <Text size="caption" color="error" wrap="truncate">
-            {alert}
-          </Text>
+        <Box flexShrink={1} minWidth={0}>
+          <Svg source={pillSvg(alert)} alt={alert} />
         </Box>
       )}
       {spent !== null && (
