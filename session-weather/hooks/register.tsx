@@ -3282,6 +3282,17 @@ const strokeOf = (pixels: number) => ((1.75 * 24) / pixels).toFixed(2)
 const iconSvg = (name: IconName, ink: string, size: number) =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="${ink}" stroke-width="${strokeOf(size)}" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</svg>`
 
+// The pixels a line of body text stands in on the desktop: its 14 pixels
+// and the space above and below them.
+const LINE_PX = 20
+
+// An icon `size` pixels square, in `ink`, standing in the middle of a box a
+// line of text tall: set at the top of a row, beside words that may wrap, it
+// sits level with their first line.
+const lineIconSvg = (name: IconName, ink: string, size: number) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${LINE_PX}" viewBox="0 0 ${size} ${LINE_PX}">` +
+  `<g transform="translate(0 ${((LINE_PX - size) / 2).toFixed(1)}) scale(${(size / 24).toFixed(3)})" fill="none" stroke="${ink}" stroke-width="${strokeOf(size)}" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</g></svg>`
+
 // An icon on a faint square of its own ink: the sky's, a subagent's state.
 const tileSvg = (name: IconName, ink: string, size: number) => {
   const inner = size * 0.56
@@ -3904,7 +3915,7 @@ const thinkingCardOf = ($: EngineInterface, ui: DesktopUi, view: ThinkingView) =
                     {item.isCut ? (
                       <Box width={2} />
                     ) : (
-                      <Svg source={iconSvg(look.icon, look.ink, 14)} alt={look.alt} width={14} height={14} />
+                      <Svg source={lineIconSvg(look.icon, look.ink, 14)} alt={look.alt} width={14} height={LINE_PX} />
                     )}
                     <Box flexDirection="column" flexShrink={1} minWidth={0}>
                       <Text {...(look.color === undefined ? { dimColor: true } : { color: look.color })}>{item.words}</Text>
