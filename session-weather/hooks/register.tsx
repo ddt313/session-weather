@@ -10,6 +10,7 @@ import type {
   PluginOptions,
   Register,
   Timer,
+  TurnUsage,
   UiLogOptions,
 } from 'claude-code'
 
@@ -23,6 +24,7 @@ import type {
   RecentTurn,
   Share,
   Subagent,
+  SubagentFigures,
   Thinking,
   ThinkingEntry,
   TurnMark,
@@ -35,6 +37,7 @@ const limits = atom({ plugin: 'session-weather', key: 'limits' } as const, [])
 const shares = atom({ plugin: 'session-weather', key: 'shares' } as const, [])
 const turnTools = atom({ plugin: 'session-weather', key: 'turnTools' } as const, 0)
 const subagents = atom({ plugin: 'session-weather', key: 'subagents' } as const, [])
+const subagentFigures = atom({ plugin: 'session-weather', key: 'subagentFigures' } as const, [])
 const lastTurn = atom({ plugin: 'session-weather', key: 'lastTurn' } as const, null)
 const autoCompact = atom({ plugin: 'session-weather', key: 'autoCompact' } as const, null)
 const fills = atom({ plugin: 'session-weather', key: 'fills' } as const, null)
@@ -528,19 +531,21 @@ const recount = async ($: EngineInterface) => {
 
 const openPane = ($: EngineInterface) => $.ui.open({ id: PANE, title: TITLE, rows: PANE_ROWS })
 
-// "☁ 42% · 5h 30% (4h 38m) · $1.23": the weather's key figures in one line,
-// for the status line under the prompt. The sky (how far the fill has come
-// toward compaction, as the pane's) and the context's share used, the 5-hour
-// window's share used and the time until it resets, and the session's cost.
+// "☁ 42% · 5h 30% (4h 38m) · $1.23 · 2 subagents": the weather's key figures
+// in one line, for the status line under the prompt. The sky (how far the
+// fill has come toward compaction, as the pane's) and the context's share
+// used, the 5-hour window's share used and the time until it resets, the
+// session's cost, and how many subagents the main loop started are at work.
 // A part with nothing read yet is left out rather than shown as zero: the
 // fill before the first response or right after a compaction, the window off
-// a subscription or past its reset, a cost with no ledger or nothing spent.
-// Undefined where no part has a reading.
+// a subscription or past its reset, a cost with no ledger or nothing spent,
+// no subagent at work. Undefined where no part has a reading.
 const statusTextOf = (
   now: Reading | null,
   compactAt: AutoCompact | null,
   readings: readonly Limit[],
   spent: number | null,
+  working: number,
   at: number,
 ) => {
   const tokens = now?.tokens
@@ -555,6 +560,7 @@ const statusTextOf = (
       ? null
       : `${fiveHour.name} ${fiveHour.used}%${left === undefined || Number.isNaN(left) ? '' : ` (${formatLeft(left)})`}`,
     spent === null || spent <= 0 ? null : formatCost(spent),
+    working > 0 ? plural(working, 'subagent') : null,
   ].filter((part): part is string => part !== null)
 
   return parts.length === 0 ? undefined : parts.join(' · ')
@@ -622,20 +628,22 @@ const setStatus = ($: EngineInterface, text: string | undefined) => {
 // too narrow to place it unasked), none while it is, where the pane says it
 // all. The engine's record of the panes says which. Called wherever what the
 // line shows may have changed: a reading, a compaction, a /clear, the minute
-// that moves the countdown, the pane opened or closed.
+// that moves the countdown, the pane opened or closed, a subagent started or
+// ended.
 const showStatus = ($: EngineInterface) =>
   inStatusOrder(async () => {
-    const [panes, now, compactAt, readings, spent, at] = await Promise.all([
+    const [panes, now, compactAt, readings, spent, listed, at] = await Promise.all([
       $.ui.panes(),
       read($, reading),
       read($, autoCompact),
       read($, limits),
       read($, cost),
+      read($, subagents),
       $.clock.now(),
     ])
     const isDrawn = panes.some(pane => pane.id === PANE && pane.isPlaced)
 
-    setStatus($, isDrawn ? undefined : statusTextOf(now, compactAt, readings, spent, at))
+    setStatus($, isDrawn ? undefined : statusTextOf(now, compactAt, readings, spent, workingOf(listed), at))
   })
 
 // The pane being drawn, as when a widened terminal places it: the line goes,
@@ -1412,11 +1420,11 @@ const countShares = async ($: EngineInterface) => {
 const recountShares = ($: EngineInterface) => queued(() => countShares($))
 
 // What the session spent since the last count: `cost`, its total as the
-// engine counts it, past what its file counted already, and `extra`, spent
-// beside it (the summary's requests, which the engine leaves out of that
-// total), each kept in the minute it came; then the parts are counted
-// again. Off a subscription no window has a reading, and nothing is kept.
-const addSpend = ($: EngineInterface, spend: { cost?: number; extra?: number }) =>
+// engine counts it (the summary's Haiku requests among it, as a mod's
+// requests are), past what its file counted already, kept in the minute it
+// came; then the parts are counted again. Off a subscription no window has a
+// reading, and nothing is kept.
+const addSpend = ($: EngineInterface, cost: number) =>
   queued(async () => {
     if ((await read($, limits)).length === 0) return
 
@@ -1429,29 +1437,26 @@ const addSpend = ($: EngineInterface, spend: { cost?: number; extra?: number }) 
     const file = (await $.fs.exists(path)) ? parseSpend(await $.fs.read(path)) : null
     let spans = (file?.spans ?? []).filter(([, to]) => to > now - LONGEST)
     let seen = file?.seen ?? (costCounted?.sessionId === sessionId ? costCounted.cost : undefined)
-    let added = spend.extra ?? 0
-    const { cost } = spend
+    let added = 0
 
-    if (cost !== undefined) {
-      // After a /clear the total went on from the session before's, or
-      // started over.
-      if (seen === undefined && costCarried !== null) seen = cost >= costCarried ? costCarried : 0
+    // After a /clear the total went on from the session before's, or started
+    // over.
+    if (seen === undefined && costCarried !== null) seen = cost >= costCarried ? costCarried : 0
 
-      if (seen === undefined) {
-        // Counted for the first time, as in a session that ran before the
-        // mod loaded: what it spent until now, spread over its life so far.
-        const { startedAt } = await $.session.usage()
+    if (seen === undefined) {
+      // Counted for the first time, as in a session that ran before the mod
+      // loaded: what it spent until now, spread over its life so far.
+      const { startedAt } = await $.session.usage()
 
-        if (cost > 0) spans = [...spans, [Math.min(startedAt, now - MINUTE), now, cost]]
-      } else {
-        // A total that went down started over.
-        added += cost >= seen ? cost - seen : cost
-      }
-
-      seen = cost
-      costCounted = { sessionId, cost }
-      costCarried = null
+      if (cost > 0) spans = [...spans, [Math.min(startedAt, now - MINUTE), now, cost]]
+    } else {
+      // A total that went down started over.
+      added = cost >= seen ? cost - seen : cost
     }
+
+    seen = cost
+    costCounted = { sessionId, cost }
+    costCarried = null
 
     if (added > 0) {
       const from = Math.floor(now / MINUTE) * MINUTE
@@ -2222,54 +2227,248 @@ const isResumedBy = (text: string) => {
 
 // The states a subagent's loop is at work in: not yet started, running a
 // turn, or held on its own background work.
-const AT_WORK: ReadonlySet<AgentStatus> = new Set(['pending', 'running', 'waiting'])
+const AT_WORK: ReadonlySet<string> = new Set<AgentStatus>(['pending', 'running', 'waiting'])
+// The states of one that ended: it answered, it failed, or it was stopped. A
+// teammate idle between turns is neither: it has no row until it works again.
+const ENDED: ReadonlySet<string> = new Set<AgentStatus>(['completed', 'failed', 'killed'])
+
+// How many of the subagents listed are at work.
+const workingOf = (listed: readonly Subagent[]) => listed.filter(one => AT_WORK.has(one.status)).length
 
 // When each subagent the main loop started was spawned, as `agent.spawn` saw
-// it, until a list of the agents shows it. The module's own: a reload loses
-// only a spawn not listed yet.
+// it, until a list written since gives its row that time. The module's own:
+// a reload loses only a spawn not listed yet.
 const spawnedAt = new Map<string, number>()
 
-// The subagents of `agents` at work as the pane lists them: what each is
-// called, where it stands, and since when it runs, kept from the last list
-// or taken from its spawn. Written only where it changed.
-const keepSubagents = async ($: EngineInterface, agents: readonly AgentInfo[]) => {
-  const before = await read($, subagents)
-  const fresh: Subagent[] = agents.map(agent => {
-    const startedAt = before.find(one => one.id === agent.id)?.startedAt ?? spawnedAt.get(agent.id)
-    spawnedAt.delete(agent.id)
+// The agent whose loop spawned each nested subagent, by its id, as its spawn
+// or a list showed it: what a nested one reads and writes counts toward the
+// main loop's subagent above it. The module's own: a reload has it again
+// from the next list.
+const parentOf = new Map<string, string>()
 
-    return {
-      id: agent.id,
-      label: agent.description.trim() || agent.name || agent.type,
-      status: agent.status,
-      ...(startedAt === undefined ? {} : { startedAt }),
-    }
-  })
+// The loops that began a turn with no row, the list read for each once: a
+// subagent no `agent.spawn` raised (a forked skill) gets its row then, a
+// workflow's or the engine's own (compaction, memory) never does, and is not
+// looked for again. The module's own.
+const lookedFor = new Set<string>()
 
-  if (JSON.stringify(before) !== JSON.stringify(fresh)) await update($, subagents, () => fresh)
+// The list of subagents and their figures change one at a time, in order:
+// a list of the agents read before another subagent started never lands
+// after one read since, and a row a new prompt let go never comes back from
+// a list or a flush that read it before. The module's own, as the status
+// line's queue is.
+let subagentQueue: Promise<unknown> = Promise.resolve()
+
+const inSubagentOrder = <T,>(work: () => Promise<T>) => {
+  const run = subagentQueue.then(work)
+  subagentQueue = run.catch(() => {})
+
+  return run
 }
 
-// How many subagents the main loop started that still work: the model's, not
-// a plugin's, and not idle between turns, as a teammate waiting for a message
-// is. Their results wake Claude again. The pane keeps the list it read. None
-// where the list cannot be read.
-const runningSubagents = async ($: EngineInterface) => {
-  try {
-    const agents = (await $.agent.list()).filter(
-      agent => agent.parentId === undefined && agent.spawnedBy === undefined && AT_WORK.has(agent.status),
-    )
-    await keepSubagents($, agents)
+// The figures of the subagents `listed`; those of a row gone are let go.
+const keepFigures = async ($: EngineInterface, listed: readonly Subagent[]) => {
+  const ids = new Set(listed.map(one => one.id))
 
-    return agents.length
-  } catch {
-    return 0
+  if ((await read($, subagentFigures)).some(one => !ids.has(one.id))) {
+    await update($, subagentFigures, figures => figures.filter(one => ids.has(one.id)))
   }
 }
 
-// The subagents shown listed again, where any are: one may have ended.
-const relistSubagents = async ($: EngineInterface) => {
-  if ((await read($, subagents)).length > 0) await runningSubagents($)
+// The main loop's subagents (`agents`: the model's, not a plugin's) as the
+// pane lists them, over the list kept (`before`): those at work, and those
+// it saw at work, or saw spawn, that ended since the person's prompt. Each
+// with the words its row gives it, where it stands, since when it runs (kept
+// from the list or taken from its spawn) and, ended, since when it has, `now`
+// for one ending here. One the pane never saw at work (done before the mod
+// loaded, or in an earlier prompt) has no row; one ended that `agents` no
+// longer names keeps its own.
+const subagentsOf = (before: readonly Subagent[], agents: readonly AgentInfo[], now: number): Subagent[] => {
+  const fresh = agents.flatMap(agent => {
+    const was = before.find(one => one.id === agent.id)
+    const isEnded = ENDED.has(agent.status)
+
+    if (!AT_WORK.has(agent.status) && !(isEnded && (was !== undefined || spawnedAt.has(agent.id)))) return []
+
+    const startedAt = was?.startedAt ?? spawnedAt.get(agent.id)
+    const endedAt = isEnded ? (was?.endedAt ?? now) : undefined
+
+    return [
+      {
+        id: agent.id,
+        label: agent.description.trim() || agent.name || agent.type,
+        status: agent.status,
+        ...(startedAt === undefined ? {} : { startedAt }),
+        ...(endedAt === undefined ? {} : { endedAt }),
+      },
+    ]
+  })
+  const named = new Set(agents.map(agent => agent.id))
+
+  return [...fresh, ...before.filter(one => ENDED.has(one.status) && !named.has(one.id))]
 }
+
+// The list kept from `agents`, worked out again from the list as it stands
+// when written, and written only where it changed: a spawn whose time a row
+// took is let go, the figures of a row gone go with it, and the status line,
+// which counts those at work, is set again. In the subagents' order alone.
+const keepSubagents = async ($: EngineInterface, agents: readonly AgentInfo[]) => {
+  const [before, now] = await Promise.all([read($, subagents), $.clock.now()])
+
+  if (JSON.stringify(before) === JSON.stringify(subagentsOf(before, agents, now))) return
+
+  const kept = await update($, subagents, current => subagentsOf(current, agents, now))
+
+  for (const one of kept) {
+    if (one.startedAt !== undefined) spawnedAt.delete(one.id)
+  }
+
+  await keepFigures($, kept)
+  await showStatus($).catch(() => {})
+}
+
+// How many subagents the main loop started still work: the model's, not a
+// plugin's, and not idle between turns, as a teammate waiting for a message
+// is. Their results wake Claude again. The pane keeps the list it read, and
+// the agent that spawned each nested one. None where the list cannot be read.
+const runningSubagents = ($: EngineInterface) =>
+  inSubagentOrder(async () => {
+    const agents = await $.agent.list()
+
+    for (const agent of agents) {
+      if (agent.parentId !== undefined) parentOf.set(agent.id, agent.parentId)
+    }
+
+    const mine = agents.filter(agent => agent.parentId === undefined && agent.spawnedBy === undefined)
+    await keepSubagents($, mine)
+
+    return mine.filter(agent => AT_WORK.has(agent.status)).length
+  }).catch(() => 0)
+
+// The subagents shown listed again, where any is at work: one may have ended.
+const relistSubagents = async ($: EngineInterface) => {
+  if (workingOf(await read($, subagents)) > 0) await runningSubagents($)
+}
+
+// A loop began a turn: one with no row, not looked for before and not known
+// as a subagent's own, has the list read for it, once.
+const lookFor = async ($: EngineInterface, agentId: string) => {
+  if (lookedFor.has(agentId) || spawnedAt.has(agentId) || parentOf.has(agentId)) return
+  if ((await read($, subagents)).some(one => one.id === agentId)) return
+
+  lookedFor.add(agentId)
+  await runningSubagents($)
+}
+
+// A new prompt of the person's: the subagents that ended go from the list,
+// their figures with them; those still at work stay.
+const forgetEnded = ($: EngineInterface) =>
+  inSubagentOrder(async () => {
+    if (!(await read($, subagents)).some(one => ENDED.has(one.status))) return
+
+    const kept = await update($, subagents, list => list.filter(one => !ENDED.has(one.status)))
+    await keepFigures($, kept)
+  })
+
+// What the subagents' requests and tool calls came to since the pane last
+// took them in, by the id of the loop they ran in: the model and effort of
+// the latest request, the tokens the requests read and wrote, those the
+// latest one carried, and the latest tool call in a few words. Taken in at
+// most once per FIGURES_GAP, so subagents at work draw the pane no more often
+// than that. The module's own: a reload loses at most one gap's.
+type Noted = Omit<SubagentFigures, 'id' | 'nested'>
+
+const noted = new Map<string, Noted>()
+const FIGURES_GAP = SECOND
+let figuresTimer: Timer | null = null
+
+// A nested subagent's figures go up this many spawns at most to find the row
+// they count toward.
+const MAX_NESTING = 8
+
+// What a request or a tool call of the loop `agentId` showed, noted; the
+// figures are taken in once the gap has passed.
+const noteFigures = ($: EngineInterface, agentId: string, seen: Partial<Noted>) => {
+  const one = noted.get(agentId) ?? { tokens: 0 }
+  noted.set(agentId, { ...one, ...seen, tokens: one.tokens + (seen.tokens ?? 0) })
+  figuresTimer ??= $.clock.after(FIGURES_GAP, () => {
+    figuresTimer = null
+    void takeFigures($).catch(() => {})
+  })
+}
+
+// The row a loop's figures count toward: its own where it is listed, else,
+// for a nested subagent, the listed one above it. Undefined for a loop no row
+// stands for: a plugin's subagent, a workflow's, the engine's own forks.
+const rowOf = (id: string, listed: ReadonlySet<string>) => {
+  let at: string | undefined = id
+
+  for (let up = 0; at !== undefined && up <= MAX_NESTING; up += 1) {
+    if (listed.has(at)) return at
+
+    at = parentOf.get(at)
+  }
+
+  return undefined
+}
+
+// The figures noted since the pane last took them in, into the rows: a
+// loop's own to its row, a nested subagent's tokens to the row above it, as
+// its subagents'. Written only where one counts toward a row. In the
+// subagents' order alone.
+const takeNoted = async ($: EngineInterface) => {
+  const taken = [...noted]
+  noted.clear()
+  const listed = new Set((await read($, subagents)).map(one => one.id))
+  const counted = taken.flatMap(([id, one]) => {
+    const row = rowOf(id, listed)
+
+    return row === undefined ? [] : [{ row, isOwn: row === id, one }]
+  })
+
+  if (counted.length === 0) return
+
+  await update($, subagentFigures, figures => {
+    const rows = new Map(figures.map(figure => [figure.id, figure]))
+
+    for (const { row, isOwn, one } of counted) {
+      const was = rows.get(row) ?? { id: row, tokens: 0 }
+      rows.set(
+        row,
+        isOwn ? { ...was, ...one, tokens: was.tokens + one.tokens } : { ...was, nested: (was.nested ?? 0) + one.tokens },
+      )
+    }
+
+    return [...rows.values()].filter(figure => listed.has(figure.id))
+  })
+}
+
+const takeFigures = ($: EngineInterface) => inSubagentOrder(() => takeNoted($))
+
+// A subagent's turn ended: what it noted is taken in at once, for its row to
+// end on its last figures. Where the turn says its own requests read and
+// wrote more than the mod saw of them (it loaded part-way through), its own
+// count is the turn's; its subagents' stays as counted.
+const settleFigures = ($: EngineInterface, agentId: string, usage: TurnUsage | undefined) =>
+  inSubagentOrder(async () => {
+    await takeNoted($)
+
+    if (usage === undefined || !(await read($, subagents)).some(one => one.id === agentId)) return
+
+    const tokens = inputTokens(usage) + usage.output_tokens
+    const isShort = (figures: readonly SubagentFigures[]) =>
+      (figures.find(one => one.id === agentId)?.tokens ?? 0) < tokens
+
+    if (!isShort(await read($, subagentFigures))) return
+
+    await update($, subagentFigures, figures => {
+      if (!isShort(figures)) return figures
+
+      const was = figures.find(one => one.id === agentId) ?? (usage.model === '' ? {} : { model: usage.model })
+
+      return [...figures.filter(one => one.id !== agentId), { ...was, id: agentId, tokens }]
+    })
+  })
 
 // Whether the pane was last drawn with room for the subagents' rows, and
 // with the summary beside the weather, where a turn may be picked from the
@@ -2278,28 +2477,83 @@ let isRoomyDrawn = false
 let isWideDrawn = false
 
 // Each minute, as no ticker runs while the summary is off: the subagents
-// shown listed again, and, drawn, their times moved on a minute.
+// shown listed again, and, drawn, the times of those at work moved on a
+// minute.
 const minuteSubagents = async ($: EngineInterface) => {
   await relistSubagents($)
 
-  if (isRoomyDrawn && (await read($, subagents)).some(agent => agent.startedAt !== undefined)) {
+  if (
+    isRoomyDrawn &&
+    (await read($, subagents)).some(agent => AT_WORK.has(agent.status) && agent.startedAt !== undefined)
+  ) {
     $.ui.invalidate('ui.render')
   }
 }
 
-// The subagents' rows the weather shows at most, the rest said in one more:
+// The subagents the weather gives rows at most, the rest said in one more:
 // a workflow's dozens would push the recent turns out of the column.
 const MAX_SUBAGENT_ROWS = 5
+// The cells the rows under a subagent's own stand in from it.
+const SUBAGENT_INDENT = 2
+
+// "Subagents · 2 at work · 1 finished": how many of those listed work, and
+// how many ended since the person's prompt.
+const subagentsHeaderOf = (listed: readonly Subagent[]) => {
+  const working = workingOf(listed)
+  const finished = listed.length - working
+
+  return [
+    'Subagents',
+    ...(working > 0 ? [`${working} at work`] : []),
+    ...(finished > 0 ? [`${finished} finished`] : []),
+  ].join(' · ')
+}
+
+// The subagents in the order the weather lists them: those at work as
+// listed, the oldest first, then those that ended, the latest first.
+const subagentOrder = (listed: readonly Subagent[]) => [
+  ...listed.filter(one => AT_WORK.has(one.status)),
+  ...listed.filter(one => !AT_WORK.has(one.status)).sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0)),
+]
+
+// Where a subagent stands, in its row's words: as its loop says while at
+// work; done, failed or stopped once it ended.
+const STANDING = new Map([
+  ['completed', 'done'],
+  ['failed', 'failed'],
+  ['killed', 'stopped'],
+])
 
 // "fix the tests · running · 3m": a subagent's row in `chars`, its words cut
 // to leave room for where it stands and, where its spawn was seen, how long
-// it has run, to the minute.
+// it has run, to the minute; ended, how long it ran, "fix the tests · done ·
+// 2m 14s".
 const subagentLine = (agent: Subagent, now: number, chars: number) => {
-  const tail = ` · ${agent.status}${agent.startedAt === undefined ? '' : ` · ${formatLeft(Math.max(0, now - agent.startedAt))}`}`
+  const ran =
+    agent.startedAt === undefined
+      ? null
+      : agent.endedAt === undefined
+        ? formatLeft(Math.max(0, now - agent.startedAt))
+        : formatDuration(Math.max(0, agent.endedAt - agent.startedAt))
+  const tail = ` · ${STANDING.get(agent.status) ?? agent.status}${ran === null ? '' : ` · ${ran}`}`
   const label = clip(agent.label.replace(/\s+/g, ' '), Math.max(8, chars - tail.length)).replace(/\s+…$/, '…')
 
   return { label, tail }
 }
+
+// "Opus 5.5 · high · 222.3k tokens · ctx 29.3k": a subagent's figures in a
+// few parts, for the rows under its own. The model of its latest request and
+// the effort it asked for, the tokens its requests read and wrote, and,
+// while it works, those its latest request carried; a part not seen left out.
+const figureParts = (figure: SubagentFigures | undefined, isWorking: boolean) =>
+  figure === undefined
+    ? []
+    : [
+        figure.model === undefined ? null : modelNameOf(figure.model),
+        figure.effort ?? null,
+        figure.tokens + (figure.nested ?? 0) > 0 ? `${formatTokens(figure.tokens + (figure.nested ?? 0))} tokens` : null,
+        isWorking && figure.context !== undefined ? `ctx ${formatTokens(figure.context)}` : null,
+      ].filter((part): part is string => part !== null)
 
 // While the turn waits on its subagents, the tick counts them again each
 // WAIT_CHECK. Once none has worked for DRAIN_GRACE and no result has woken
@@ -2579,14 +2833,13 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
 
   const answeredAt = await $.clock.now()
 
+  // What the summaries cost, said under them. The engine counts the request
+  // in the session's cost, and so in this session's spend: nothing is added
+  // to that here.
   if (result !== null) {
     const spent = haikuCost(result.usage)
 
-    // It counts toward the account's windows too: this session's spend.
-    if (spent > 0) {
-      await update($, summaryCost, usd => usd + spent)
-      void addSpend($, { extra: spent }).catch(() => {})
-    }
+    if (spent > 0) await update($, summaryCost, usd => usd + spent)
   }
 
   const reply = result?.isAnswered
@@ -2959,7 +3212,7 @@ export const register: Register = (on, options) => {
 
     // What the session spent so far, and its part of each window.
     const spentSoFar = usage.cost?.usd
-    void (spentSoFar === undefined ? recountShares($) : addSpend($, { cost: spentSoFar })).catch(() => {})
+    void (spentSoFar === undefined ? recountShares($) : addSpend($, spentSoFar)).catch(() => {})
 
     // The summary as the person left it. A reload drops the request under
     // way and the clock with the old module: a turn still running gets a
@@ -3122,6 +3375,8 @@ export const register: Register = (on, options) => {
         // show, whichever turn was picked before.
         await openRecord($, e.turnId, startedAt, fill)
         await update($, pickedTurn, () => null)
+        // The subagents the prompt before saw end go; those at work stay.
+        await forgetEnded($)
       }
 
       if (isOn) {
@@ -3129,7 +3384,13 @@ export const register: Register = (on, options) => {
       }
     }
 
-    return next(e)
+    const started = await next(e)
+
+    // A subagent's run the list has no row for, as a forked skill's, which no
+    // `agent.spawn` raised: the list is read for it, once.
+    if (e.agentId !== undefined) await lookFor($, e.agentId).catch(() => {})
+
+    return started
   })
 
   // The main loop's thinking as it streams: each block that carries text
@@ -3137,10 +3398,24 @@ export const register: Register = (on, options) => {
   // them) and the rest once it ends. The text it shows the person is kept
   // too, a block once it ends, for the summary not to tell it again. Every
   // chunk passes on as it came, before anything is kept; a subagent's steps
-  // pass untouched.
+  // pass untouched, what each read and wrote, and the model and effort it
+  // named, noted for its row.
   on('turn.step', async function* ($, e, next) {
     if (e.agentId !== undefined) {
-      return yield* next(e)
+      const result = yield* next(e)
+      const usage = result.usage
+
+      if (usage !== null) {
+        const tokens = inputTokens(usage) + usage.output_tokens
+        noteFigures($, e.agentId, {
+          model: usage.model === '' ? e.model : usage.model,
+          ...(typeof e.effort === 'string' ? { effort: e.effort } : {}),
+          tokens,
+          context: tokens,
+        })
+      }
+
+      return result
     }
 
     const stream = next(e)
@@ -3191,13 +3466,17 @@ export const register: Register = (on, options) => {
   })
 
   // Every call counts toward the turn; the main loop's are kept in a few
-  // words, for the summary to read what Claude did beside what it thought.
+  // words, for the summary to read what Claude did beside what it thought,
+  // and a subagent's latest, for its row to say what it is at.
   on('tool.call', async ($, e, next) => {
     await update($, turnTools, n => n + 1)
     await countTool($)
+    const action = actionOf(e.tool, e as unknown as Readonly<Record<string, unknown>>)
 
     if (e.agentId === undefined) {
-      await keepMark($, 'actions', actionOf(e.tool, e as unknown as Readonly<Record<string, unknown>>))
+      await keepMark($, 'actions', action)
+    } else {
+      noteFigures($, e.agentId, { action })
     }
 
     return next(e)
@@ -3259,22 +3538,29 @@ export const register: Register = (on, options) => {
       return next(e)
     }
 
-    // A subagent's turn ended, and with its last the subagent: the rows of
-    // those at work are listed again once the engine has taken it.
+    // A subagent's turn ended, and with its last the subagent: the rows are
+    // listed again once the engine has taken it, and its figures taken in,
+    // the turn's own count where that is the larger.
+    const agentId = e.agentId
     const done = await next(e)
     await relistSubagents($).catch(() => {})
+    await settleFigures($, agentId, e.usage).catch(() => {})
 
     return done
   })
 
   // A subagent the main loop starts: when, for its row's time, and the list
-  // read again so its row shows at once. The spawn stands whatever this
-  // bookkeeping does, and a failed hook's spawn is not asked again.
+  // read again so its row shows at once. One a subagent starts has no row:
+  // what it reads and writes counts toward its parent's. The spawn stands
+  // whatever this bookkeeping does, and a failed hook's spawn is not asked
+  // again.
   on('agent.spawn', async ($, e, next) => {
     const done = await next(e)
 
     try {
-      if (e.parentAgentId === undefined && done.agentId !== undefined) {
+      if (done.agentId !== undefined && e.parentAgentId !== undefined) {
+        parentOf.set(done.agentId, e.parentAgentId)
+      } else if (done.agentId !== undefined) {
         spawnedAt.set(done.agentId, await $.clock.now())
         await runningSubagents($)
       }
@@ -3365,7 +3651,7 @@ export const register: Register = (on, options) => {
     if (e.changed.includes('cost')) {
       await update($, cost, () => e.cost?.usd ?? null)
 
-      if (e.cost !== undefined) void addSpend($, { cost: e.cost.usd }).catch(() => {})
+      if (e.cost !== undefined) void addSpend($, e.cost.usd).catch(() => {})
     }
 
     await showStatus($).catch(() => {})
@@ -3395,8 +3681,16 @@ export const register: Register = (on, options) => {
       await update($, fills, () => null)
       await update($, facts, () => null)
       await update($, compactions, () => null)
-      await update($, subagents, () => [])
+      await inSubagentOrder(async () => {
+        await update($, subagents, () => [])
+        await update($, subagentFigures, () => [])
+      })
       spawnedAt.clear()
+      parentOf.clear()
+      lookedFor.clear()
+      noted.clear()
+      figuresTimer?.cancel()
+      figuresTimer = null
       await update($, recentTurns, () => [])
       await update($, pickedTurn, () => null)
       await update($, isSaving, () => false)
@@ -3518,7 +3812,7 @@ export const register: Register = (on, options) => {
     }
 
     // Each read subscribes the drawing to its value; they go all at once.
-    const [at, now, added, lastSamples, readings, parts, compactAt, turn, spent, isOn] = await Promise.all([
+    const [at, now, added, lastSamples, readings, parts, compactAt, turn, spent, listed, isOn] = await Promise.all([
       $.clock.now(),
       read($, reading),
       read($, delta),
@@ -3528,26 +3822,29 @@ export const register: Register = (on, options) => {
       read($, autoCompact),
       read($, lastTurn),
       read($, cost),
+      read($, subagents),
       read($, isSummaryOn),
     ])
     // From WIDE_FROM columns the weather says more (`isRoomy`): the pace on
-    // the limits, what fills the context, the session, the subagents at work
-    // and the recent turns. That goes by the width alone, the summary on or
-    // off; the two columns need the summary on as well. What only a roomy
-    // pane shows is read only there: a narrower one redraws for none of it.
+    // the limits, what fills the context, the session, a row for each
+    // subagent and the recent turns. That goes by the width alone, the
+    // summary on or off; the two columns need the summary on as well. What
+    // only a roomy pane shows is read only there: a narrower one redraws for
+    // none of it. The subagents are read at any width, a narrower pane saying
+    // in one line how many work and finished; what each did, only a roomy one.
     const isRoomy = e.props.bodyColumns >= WIDE_FROM
     const isWide = isOn && isRoomy
-    const [filled, known, counted, atWork, recent, picked, isSaved] = isRoomy
+    const [filled, known, counted, figured, recent, picked, isSaved] = isRoomy
       ? await Promise.all([
           read($, fills),
           read($, facts),
           read($, compactions),
-          read($, subagents),
+          read($, subagentFigures),
           read($, recentTurns),
           read($, pickedTurn),
           read($, isSaving),
         ])
-      : ([null, null, null, [] as Subagent[], [] as RecentTurn[], null, false] as const)
+      : ([null, null, null, [] as SubagentFigures[], [] as RecentTurn[], null, false] as const)
     isRoomyDrawn = isRoomy
     isWideDrawn = isWide
     // The characters a row of the weather holds, what it adds cut to them
@@ -3764,9 +4061,10 @@ export const register: Register = (on, options) => {
       </Box>
     )
 
-    // The weather: the fill, the limits and the session's cost; roomy, the
-    // pace on the limits, what fills the context, the session's line, the
-    // subagents at work and the recent turns too. A column of its own beside
+    // The weather: the fill, the limits, the session's cost and how many
+    // subagents work and finished; roomy, the pace on the limits, what fills
+    // the context, the session's line, a row for each subagent and the recent
+    // turns too. A column of its own beside
     // the summary, which, pinned, cuts what runs past the body's height: the
     // oldest turns go first.
     const weather = (
@@ -3836,20 +4134,46 @@ export const register: Register = (on, options) => {
               </Box>
             )
           : spent !== null && <Text dimColor>Session cost {formatCost(spent)}</Text>}
-        {atWork.length > 0 && (
+        {listed.length > 0 && !isRoomy && <Text dimColor>{subagentsHeaderOf(listed)}</Text>}
+        {listed.length > 0 && isRoomy && (
           <Box flexDirection="column">
-            <Text {...BLOCK_HEADER}>Subagents at work</Text>
-            {atWork.slice(0, MAX_SUBAGENT_ROWS).map(agent => {
-              const { label, tail } = subagentLine(agent, at, weatherChars)
+            <Text {...BLOCK_HEADER}>{subagentsHeaderOf(listed)}</Text>
+            {subagentOrder(listed)
+              .slice(0, MAX_SUBAGENT_ROWS)
+              .map(agent => {
+                // Its row, then under it, at work, what it is at, and its
+                // figures in as many rows as they need.
+                const { label, tail } = subagentLine(agent, at, weatherChars)
+                const isWorking = AT_WORK.has(agent.status)
+                const figure = figured.find(one => one.id === agent.id)
+                const chars = weatherChars - SUBAGENT_INDENT
+                const action = isWorking ? figure?.action : undefined
+                const figureRows = packRows(figureParts(figure, isWorking), chars)
 
-              return (
-                <Text wrap="truncate">
-                  {label}
-                  <Text dimColor>{tail}</Text>
-                </Text>
-              )
-            })}
-            {atWork.length > MAX_SUBAGENT_ROWS && <Text dimColor>and {atWork.length - MAX_SUBAGENT_ROWS} more</Text>}
+                return (
+                  <Box flexDirection="column">
+                    <Text wrap="truncate">
+                      {label}
+                      <Text dimColor>{tail}</Text>
+                    </Text>
+                    {(action !== undefined || figureRows.length > 0) && (
+                      <Box flexDirection="column" paddingLeft={SUBAGENT_INDENT}>
+                        {action !== undefined && (
+                          <Text dimColor wrap="truncate">
+                            {clip(action, chars)}
+                          </Text>
+                        )}
+                        {figureRows.map(row => (
+                          <Text dimColor wrap="truncate">
+                            {row}
+                          </Text>
+                        ))}
+                      </Box>
+                    )}
+                  </Box>
+                )
+              })}
+            {listed.length > MAX_SUBAGENT_ROWS && <Text dimColor>and {listed.length - MAX_SUBAGENT_ROWS} more</Text>}
           </Box>
         )}
         {recent.length > 0 && (

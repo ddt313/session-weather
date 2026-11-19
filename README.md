@@ -6,7 +6,7 @@ so far.
 
 | Mod | What it does |
 | --- | --- |
-| [session-weather](session-weather) | A pane with the session's weather: how full the context is, the last turn, the 5-hour and weekly limits and this session's part of each, the cost, and a running Haiku summary of what Claude is thinking. A wide pane adds the limits' pace, what fills the context, the subagents at work and the recent turns. While the pane is not on screen, a status line under the prompt keeps its key figures. |
+| [session-weather](session-weather) | A pane with the session's weather: how full the context is, the last turn, the 5-hour and weekly limits and this session's part of each, the cost, how many subagents work, and a running Haiku summary of what Claude is thinking. A wide pane adds the limits' pace, what fills the context, a row for each subagent (what it is at, its model, the tokens it read and wrote) and the recent turns. While the pane is not on screen, a status line under the prompt keeps its key figures. |
 
 ## Session Weather
 
@@ -82,6 +82,9 @@ showing the turn picked from the list (▸ 23:31), its recap on top.
   kilobytes each; one last written before the week began is no longer read,
   and the clean-up (see **Old files**) deletes it in time.
 - The session's cost at API prices, as `/cost` reports it.
+- While the main loop has subagents at work, or has had some finish since
+  your prompt, how many of each: `Subagents · 2 at work · 1 finished`. From
+  90 columns each has rows of its own (see **Wide layout**).
 
 **Wide layout**
 
@@ -115,13 +118,31 @@ Each row is cut to the column, never wrapped.
   session it loaded into part-way (enabled or installed mid-session, or a
   resumed one) it reads `1+ compactions`, there may have been more before. A
   `/clear` starts the session, and the count, over.
-- The subagents at work, while there are any: one row each, five at most
-  and the rest said in one (`and 3 more`), with its task's description,
-  where it stands (`pending`, `running`, `waiting`) and how long it has run,
-  to the minute (not for one started before the mod loaded).
-  Only those the main loop started; listed again as one starts or ends, each
-  minute, and every ten seconds while a turn runs or waits with the summary
-  on.
+- The subagents, under the line that counts them: five at most, the rest
+  said in one (`and 3 more`), those at work first, then those that finished,
+  the latest first. Each one's row has its task's description, where it
+  stands (`pending`, `running`, `waiting`; once ended `done`, `failed` or
+  `stopped`) and how long it has run, to the minute, or once ended how long
+  it ran (neither for one started before the mod loaded). Under it, while it
+  works, its latest tool call in a few words (`Read: ProductList.tsx`, a
+  command by the description Claude gave it), then its figures: the model of
+  its latest request and the effort it asked for, the tokens its requests
+  read and wrote (its own subagents' included), and while it works the
+  tokens its latest request carried, `Opus 5.5 · high · 222.3k tokens · ctx
+  29.3k`.
+  - Tokens, not dollars: the engine reports what the session cost, never
+    what one subagent did.
+  - The figures are taken in at most once a second, so subagents at work
+    draw the pane no more often than that. Where the mod missed some of a
+    subagent's own requests (it loaded part-way through), its own count is,
+    as it ends, what its turn says it read and wrote; its subagents' stay as
+    counted.
+  - One that finished stays until your next prompt; a subagent's hand-back
+    is none. One still at work stays past it.
+  - Only those the main loop started, a forked skill's run among them, not
+    a plugin's or the engine's own; listed again as one starts or ends, each
+    minute, and every ten seconds while a turn runs or waits with the summary
+    on.
 - The recent turns, newest first: your last ten prompts' turns (a setting),
   a subagent's hand-back going on with the prompt it answers. When each began,
   how long it ran (or that it runs, or waits on its subagents), the tokens it
@@ -149,10 +170,11 @@ Each row is cut to the column, never wrapped.
 **Status line**
 
 - While the pane is not on screen, one line under the prompt carries the
-  weather's key figures: `☁ 42% · 5h 30% (4h 38m) · $1.23`, the forecast
-  (from how far the context has filled toward compaction, as in the pane)
-  and the share of the context used, the 5-hour limit's share used and the
-  time until it resets, and the session's cost.
+  weather's key figures: `☁ 42% · 5h 30% (4h 38m) · $1.23 · 2 subagents`,
+  the forecast (from how far the context has filled toward compaction, as in
+  the pane) and the share of the context used, the 5-hour limit's share used
+  and the time until it resets, the session's cost, and how many subagents
+  the main loop started are at work.
 - It shows while you have closed the pane, and while the pane waits undrawn
   on a terminal too narrow for it: a pane the session opens on its own is
   placed only from 144 columns, or from 110 once you opened it yourself and
@@ -160,15 +182,15 @@ Each row is cut to the column, never wrapped.
 - It goes as soon as the pane is drawn: `/session-weather` opens the pane
   at any width, and a terminal widened enough places it (the line goes at
   its first drawing, or at the latest within a minute).
-- It follows the readings: each response, a compaction, a `/clear`, and
-  the countdown, minute by minute. It is set again only when its text
-  changes.
+- It follows the readings: each response, a compaction, a `/clear`, a
+  subagent that starts or ends, and the countdown, minute by minute. It is
+  set again only when its text changes.
 - A part with nothing to show yet is left out rather than shown as zero:
   the context before the first response and right after a compaction, the
   5-hour limit off a subscription (and past its reset, until the next
   reading), the cost before anything is spent or where Claude Code keeps
-  no cost. The weekly limit stays in the pane. With no part at all there is
-  no line.
+  no cost, the subagents while none is at work. The weekly limit stays in
+  the pane. With no part at all there is no line.
 
 **Thinking summary**
 
@@ -243,10 +265,12 @@ Each row is cut to the column, never wrapped.
   has written for 30 days.
 - The summary is written in English unless you set another language.
 - Each update or WAIT is one Haiku request on the session's own account,
-  about $0.001; the pane shows what the summaries cost this session. The request
-  carries your prompt, Claude's thinking notes, its tool calls in a few words
-  and what it wrote to you. **Turn summary off** stops the requests, and the
-  choice is kept across sessions.
+  about $0.001; the pane shows what the summaries cost this session. Claude
+  Code counts each in the session's cost, as it counts any mod's requests,
+  so that cost, and this session's part of each limit, already hold them.
+  The request carries your prompt, Claude's thinking notes, its tool calls in
+  a few words and what it wrote to you. **Turn summary off** stops the
+  requests, and the choice is kept across sessions.
 - To see what the summary sends Haiku, `/session-weather-debug` turns on its
   debug log, kept on in later sessions until you run the command again. Each
   request goes as sent, with Haiku's reply as it came, to a Markdown file

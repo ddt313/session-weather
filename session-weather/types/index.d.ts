@@ -32,11 +32,28 @@ export type Fill = { name: string; tokens: number }
 // breakdown names it; each one absent until read.
 export type Facts = { startedAt: number; turns?: number; model?: string }
 
-// A subagent the main loop started, at work: its id, the words its row
-// gives it (the task's description, else its name or type), where its loop
-// stands (`pending`, `running` or `waiting`), and when it was spawned (ms
-// since the epoch), where the mod saw it spawn.
-export type Subagent = { id: string; label: string; status: string; startedAt?: number }
+// A subagent the main loop started, at work or ended since the person's
+// prompt: its id, the words its row gives it (the task's description, else
+// its name or type), where its loop stands (`pending`, `running` or
+// `waiting` at work; `completed`, `failed` or `killed` once ended), when it
+// was spawned (ms since the epoch), where the mod saw it spawn, and, ended,
+// when the mod saw it end.
+export type Subagent = { id: string; label: string; status: string; startedAt?: number; endedAt?: number }
+
+// What a subagent of the list did, as far as the mod saw it, by its id: the
+// model its latest request named and the effort it asked for, the tokens its
+// own requests read and wrote, those its own subagents' did (`nested`), the
+// tokens its latest request carried (its context), and its latest tool call
+// in a few words. A figure not seen yet is absent; tokens start at 0.
+export type SubagentFigures = {
+  id: string
+  model?: string
+  effort?: string
+  tokens: number
+  nested?: number
+  context?: number
+  action?: string
+}
 
 // The compactions of the session the mod has seen: how many, and whether it
 // has seen the session from its first prompt (`isWhole`), or only since it
@@ -137,9 +154,13 @@ declare module 'claude-code' {
       shares: Share[]
       // Tool calls since the main loop's turn began.
       turnTools: number
-      // The main loop's subagents at work as last listed, oldest first; empty
-      // while none is, or until listed.
+      // The main loop's subagents at work, and those that ended since the
+      // person's prompt, as last listed, oldest first; empty while there are
+      // none, or until listed.
       subagents: Subagent[]
+      // What each subagent of `subagents` did, taken in at most once a second
+      // while they work; one row where its requests or tool calls were seen.
+      subagentFigures: SubagentFigures[]
       lastTurn: LastTurn | null
       // Null until read, or where the engine gave no breakdown.
       autoCompact: AutoCompact | null
@@ -174,7 +195,7 @@ declare module 'claude-code' {
       // Whether the thinking summary runs; the person turns it off and on.
       isSummaryOn: boolean
       // What the summary's Haiku requests cost this session, in US dollars:
-      // the engine leaves them out of the session's cost.
+      // a part of the session's cost, which the engine counts them in.
       summaryCost: number
       // Where the updates' window stands, the newest at 0: the line on top
       // (lines scrolled past), and how many rows of it are above the window.

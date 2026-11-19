@@ -139,6 +139,9 @@ const engine = (
   const store = new Map(Object.entries(stored))
 
   on('turn.step', async function* ($, e) {
+    // What the response read and wrote, as its stop says.
+    let usage: unknown = null
+
     for (const chunk of steps.shift() ?? []) {
       const wait = (chunk as { wait?: number }).wait
 
@@ -147,10 +150,12 @@ const engine = (
         continue
       }
 
+      if ((chunk as { kind?: string }).kind === 'stop') usage = (chunk as { usage?: unknown }).usage ?? null
+
       yield chunk as never
     }
 
-    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'tool_use' as const, usage: null }
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'tool_use' as const, usage: usage as never }
   })
   // A `{ wait, reply }` comes back that many milliseconds of the clock late.
   on('model.complete', async ($, e) => {
@@ -499,17 +504,39 @@ const toolStart = (index: number) => ({ kind: 'tool', index, id: `toolu_${index}
 const toolInput = (index: number) => ({ kind: 'input', index, json: '{"file_path":"a.ts"}' })
 const stop = { kind: 'stop', stopReason: 'tool_use', usage: null }
 
+// What a model request read and wrote, as the API reports it: `input`
+// uncached, `cached` served by the cache, `output` generated.
+const requestUsage = (input: number, cached: number, output: number, model = 'claude-opus-5-5') => ({
+  input_tokens: input,
+  output_tokens: output,
+  cache_read_input_tokens: cached,
+  cache_creation_input_tokens: 0,
+  model,
+})
+
+// The stop of a response that read and wrote `usage`.
+const stopWith = (usage: ReturnType<typeof requestUsage>) => ({ kind: 'stop', stopReason: 'tool_use', usage })
+
 // Streams one model request of a turn through the mod, as the engine
-// queued it, and gives back what came out the top.
+// queued it, and gives back what came out the top: inside the subagent
+// `agentId` when given, at the `effort` given.
 const runStep = async (
   $: { turn: { step: (e: never) => AsyncGenerator<unknown, unknown> & { result: Promise<unknown> } } },
   queue: unknown[][],
   turnId: string,
   chunks: unknown[],
   agentId?: string,
+  effort?: string,
 ) => {
   queue.push(chunks)
-  const stream = $.turn.step({ turnId, index: 0, model: 'claude-opus-5-5', messageCount: 3, ...(agentId ? { agentId } : {}) } as never)
+  const stream = $.turn.step({
+    turnId,
+    index: 0,
+    model: 'claude-opus-5-5',
+    messageCount: 3,
+    ...(agentId ? { agentId } : {}),
+    ...(effort ? { effort } : {}),
+  } as never)
   const out: unknown[] = []
 
   for await (const chunk of stream) {
@@ -810,14 +837,20 @@ test('what other sessions spend moves this one\'s part, read again each minute o
   expect(await pane($)).toContain('5h 30% · this session 4% · reset in 2h 58m')
 })
 
-test("the summary's Haiku requests are this session's spend too", async ($, on) => {
-  const { clock, files, steps } = engine(on, { rateLimits: LIVE })
+test("the summary's Haiku requests are this session's spend once, as the engine counts them in its cost", async ($, on) => {
+  const { clock, files, steps } = engine(on, { rateLimits: LIVE, cost: 0 })
 
   await $.session.start(start)
   await oneTurn($, steps, clock, 't1', 'fix it')
-  // One update: 10k tokens in and 2k out, $0.002. The engine gave no total
-  // cost, so the file counts none.
-  expect(spendOf(files)).toEqual({ spans: [minuteOf(NOW, 0.002)] })
+  // One update: 10k tokens in and 2k out, $0.002, said under the summary.
+  // The mod adds nothing to the spend beside the engine's total.
+  expect((await thoughts($)).at(-1)).toBe('Summary cost $0.002 - Haiku 5.5')
+  expect(spendOf(files)).toBe(null)
+
+  // The engine's total takes the request in: the file counts it, once.
+  await $.session.measure(spent(0.002))
+  await clock.settle()
+  expect(spendOf(files)).toEqual({ seen: 0.002, spans: [minuteOf(NOW, 0.002)] })
 })
 
 test('off a subscription, where no window has a reading, no spend is kept', async ($, on) => {
@@ -1818,7 +1851,7 @@ const clockOf = (ms: number) => `${two(new Date(ms).getHours())}:${two(new Date(
 // above the subagents at work and the recent turns.
 const sessionShown = async ($: Test$, surface: 'desktop' | 'terminal') => {
   const texts = await pane($, surface, WIDE_FROM)
-  const end = texts.findIndex(text => text === 'Subagents at work' || text === 'Recent turns')
+  const end = texts.findIndex(text => text.startsWith('Subagents') || text === 'Recent turns')
 
   return end === -1 ? texts : texts.slice(0, end)
 }
@@ -1928,21 +1961,24 @@ test('a session the mod loads into under way counts its compactions from there, 
   expect((await sessionShown($, 'terminal')).at(-1)).toBe(`Fable 5.2 · ${began} · 1 compaction`)
 })
 
-// What the weather shows under "Subagents at work", in a pane `columns`
-// wide; none where it shows no such section.
+// What the weather shows of the subagents, in a pane `columns` wide: from
+// WIDE_FROM, the block's header and its rows (each subagent's own, then what
+// it is at and its figures), up to the recent turns; narrower, the one line.
+// None where it shows nothing of them.
 const subagentsShown = async ($: Test$, surface: 'desktop' | 'terminal', columns: number) => {
   const texts = await pane($, surface, columns)
-  const top = texts.indexOf('Subagents at work')
-  // Each row's own Text, not the dim part inside it.
-  const rows = texts.slice(top + 1).filter(text => !text.startsWith(' · '))
-  const end = rows.findIndex(text => !/ · (?:pending|running|waiting)(?: · |$)/.test(text))
+  const top = texts.findIndex(text => text.startsWith('Subagents'))
+  const end = texts.indexOf('Recent turns', top)
 
-  return top === -1 ? [] : rows.slice(0, end === -1 ? undefined : end)
+  // Each row's own Text, not the dim part inside it.
+  return top === -1 ? [] : texts.slice(top, end === -1 ? undefined : end).filter(text => !text.startsWith(' · '))
 }
 
-test('from WIDE_FROM columns the subagents at work show while there are any: each one, where it stands, how long it has run', async ($, on) => {
+test('from WIDE_FROM columns each subagent has a row, where it stands and how long it has run; one that ended stays until the next prompt', async ($, on) => {
   const { agents, clock } = engine(on)
-  on('agent.spawn', ($$, e) => ({ model: 'claude-haiku-5-5', agentId: e.description === 'Find the flaky test' ? 'a1' : 'a2' }))
+  const long = 'Read every file of the hooks module and list each helper that has no comment over it'
+  const ids: Record<string, string> = { 'Find the flaky test': 'a1', [long]: 'a2' }
+  on('agent.spawn', ($$, e) => ({ model: 'claude-haiku-5-5', agentId: ids[e.description] ?? 'w9' }))
 
   await $.session.start(start)
   await $.turn.start({ text: 'go', turnId: 't1' })
@@ -1957,45 +1993,239 @@ test('from WIDE_FROM columns the subagents at work show while there are any: eac
   await $.agent.spawn({ prompt: 'Find it.', description: 'Find the flaky test' } as never)
 
   for (const surface of ['desktop', 'terminal'] as const) {
-    expect(await subagentsShown($, surface, WIDE_FROM)).toEqual(['Find the flaky test · running · <1m'])
-    expect((await pane($, surface, WIDE_FROM - 1)).includes('Subagents at work')).toBe(false)
+    expect(await subagentsShown($, surface, WIDE_FROM)).toEqual([
+      'Subagents · 1 at work',
+      'Find the flaky test · running · <1m',
+    ])
   }
 
   // Three minutes on, a second, its description long: cut to leave room for
   // the rest.
   await clock.advance(3 * MINUTE)
-  const long = 'Read every file of the hooks module and list each helper that has no comment over it'
   agents.push({ id: 'a2', description: long, type: 'general-purpose', status: 'pending' })
   await $.agent.spawn({ prompt: 'Read it.', description: long } as never)
   expect(await subagentsShown($, 'terminal', WIDE_FROM)).toEqual([
+    'Subagents · 2 at work',
     'Find the flaky test · running · 3m',
     'Read every file of the hooks… · pending · <1m',
   ])
 
-  // The first ends with its last turn: its row goes; the last to end takes
-  // the section with it.
+  // The first ends with its last turn: its row stays, done, with how long it
+  // ran and, the mod having seen none of its requests, what its turn says it
+  // read and wrote.
   agents[0]!.status = 'completed'
-  await $.turn.complete(turnDone({ agentId: 'a1', durationMs: 200_000 }) as never)
-  expect(await subagentsShown($, 'terminal', WIDE_FROM)).toEqual(['Read every file of the hooks… · pending · <1m'])
+  await $.turn.complete(turnDone({ agentId: 'a1', durationMs: 180_000 }) as never)
+  expect(await subagentsShown($, 'terminal', WIDE_FROM)).toEqual([
+    'Subagents · 1 at work · 1 finished',
+    'Read every file of the hooks… · pending · <1m',
+    'Find the flaky test · done · 3m 0s',
+    'Opus 5.5 · 25.5k tokens',
+  ])
 
-  agents[3]!.status = 'completed'
-  await $.turn.complete(turnDone({ agentId: 'a2', durationMs: 5_000 }) as never)
-  expect((await pane($, 'terminal', WIDE_FROM)).includes('Subagents at work')).toBe(false)
+  // A minute on, the second fails: the latest to end first.
+  await clock.advance(MINUTE)
+  agents[3]!.status = 'failed'
+  await $.turn.complete(turnDone({ agentId: 'a2', durationMs: MINUTE, usage: undefined }) as never)
+  expect(await subagentsShown($, 'terminal', WIDE_FROM)).toEqual([
+    'Subagents · 2 finished',
+    'Read every file of the hooks… · failed · 1m 0s',
+    'Find the flaky test · done · 3m 0s',
+    'Opus 5.5 · 25.5k tokens',
+  ])
+
+  // A hand-back goes on with the prompt, and keeps them; the person's next
+  // prompt lets them go.
+  await resume($, handBack('a1'), 't2')
+  expect((await subagentsShown($, 'terminal', WIDE_FROM))[0]).toBe('Subagents · 2 finished')
+  await $.turn.start({ text: 'next', turnId: 't3' })
+  expect(await subagentsShown($, 'terminal', WIDE_FROM)).toEqual([])
 
   // A workflow's many, listed as one more starts: five rows, the rest in one.
   for (let at = 1; at <= 8; at += 1) {
     agents.push({ id: `w${at}`, description: `Step ${at}`, type: 'general-purpose', status: 'running' })
   }
   await $.agent.spawn({ prompt: 'Run it.', description: 'Step 9' } as never)
-  const shown = await pane($, 'terminal', WIDE_FROM)
-  const rows = shown.slice(shown.indexOf('Subagents at work') + 1, shown.indexOf('Recent turns'))
-  expect(rows.filter(text => !text.startsWith(' · '))).toEqual([
+  expect(await subagentsShown($, 'terminal', WIDE_FROM)).toEqual([
+    'Subagents · 8 at work',
     'Step 1 · running',
     'Step 2 · running',
     'Step 3 · running',
     'Step 4 · running',
     'Step 5 · running',
     'and 3 more',
+  ])
+})
+
+test("from WIDE_FROM columns a subagent's rows say what it is at, its model and effort, what it read and wrote, and its context", async ($, on) => {
+  const { agents, clock, steps } = engine(on)
+  on('agent.spawn', ($$, e) => ({ model: 'claude-opus-5-5', agentId: e.parentAgentId === undefined ? 'a1' : 'c1' }))
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  agents.push({ id: 'a1', description: 'Find the flaky test', type: 'general-purpose', status: 'running' })
+  await $.agent.spawn({ prompt: 'Find it.', description: 'Find the flaky test' } as never)
+
+  // Two requests and a tool call: taken in once a second has passed.
+  await runStep($, steps, 'a-turn', [stopWith(requestUsage(1_000, 20_000, 500))], 'a1', 'high')
+  await runStep($, steps, 'a-turn', [stopWith(requestUsage(2_000, 21_500, 800))], 'a1', 'high')
+  await $.tool.call({ tool: 'Read', file_path: '/work/app/src/ProductList.tsx', agentId: 'a1' } as never)
+  expect(await subagentsShown($, 'terminal', WIDE_FROM)).toEqual([
+    'Subagents · 1 at work',
+    'Find the flaky test · running · <1m',
+  ])
+
+  await clock.advance(SECOND)
+
+  for (const surface of ['desktop', 'terminal'] as const) {
+    expect(await subagentsShown($, surface, WIDE_FROM)).toEqual([
+      'Subagents · 1 at work',
+      'Find the flaky test · running · <1m',
+      'Read: ProductList.tsx',
+      'Opus 5.5 · high · 45.8k tokens · ctx 24.3k',
+    ])
+  }
+
+  // A subagent of its own: what it reads and writes counts toward its row,
+  // what it is at does not. A loop no row stands for (the engine's own fork)
+  // counts toward none.
+  agents.push({ id: 'c1', description: 'Look closer', type: 'Explore', status: 'running', parentId: 'a1' })
+  await $.agent.spawn({ prompt: 'Look.', description: 'Look closer', parentAgentId: 'a1' } as never)
+  await runStep($, steps, 'c-turn', [stopWith(requestUsage(10_000, 0, 200, 'claude-haiku-5-5'))], 'c1')
+  await $.tool.call({ tool: 'Grep', pattern: 'flaky', agentId: 'c1' } as never)
+  await runStep($, steps, 'f-turn', [stopWith(requestUsage(90_000, 0, 1_000))], 'fork-1')
+  await clock.advance(SECOND)
+  expect(await subagentsShown($, 'terminal', WIDE_FROM)).toEqual([
+    'Subagents · 1 at work',
+    'Find the flaky test · running · <1m',
+    'Read: ProductList.tsx',
+    'Opus 5.5 · high · 56k tokens · ctx 24.3k',
+  ])
+
+  // Ended: how long it ran, its model and what it read and wrote, more than
+  // its turn says (its subagent's too); what it was at and its context go.
+  await clock.advance(2 * MINUTE)
+  agents[0]!.status = 'completed'
+  await $.turn.complete(turnDone({ agentId: 'a1', durationMs: 2 * MINUTE }) as never)
+  expect(await subagentsShown($, 'terminal', WIDE_FROM)).toEqual([
+    'Subagents · 1 finished',
+    'Find the flaky test · done · 2m 2s',
+    'Opus 5.5 · high · 56k tokens',
+  ])
+
+  // Narrower, the one line.
+  expect(await subagentsShown($, 'terminal', WIDE_FROM - 1)).toEqual(['Subagents · 1 finished'])
+})
+
+test('subagents started at once each keep their row and since when they run', async ($, on) => {
+  const { agents, clock } = engine(on)
+  on('agent.spawn', ($$, e) => ({ model: 'claude-haiku-5-5', agentId: e.description === 'One' ? 'a1' : 'a2' }))
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  agents.push(
+    { id: 'a1', description: 'One', type: 'Explore', status: 'running' },
+    { id: 'a2', description: 'Two', type: 'Explore', status: 'running' },
+  )
+
+  // Two Agent calls of one response: their spawns, and the lists each reads,
+  // overlap.
+  await Promise.all([
+    $.agent.spawn({ prompt: 'One.', description: 'One' } as never),
+    $.agent.spawn({ prompt: 'Two.', description: 'Two' } as never),
+  ])
+  await clock.advance(2 * MINUTE)
+  expect(await subagentsShown($, 'terminal', WIDE_FROM)).toEqual([
+    'Subagents · 2 at work',
+    'One · running · 2m',
+    'Two · running · 2m',
+  ])
+})
+
+test("a subagent's own requests the mod missed count as its turn says, its subagents' kept beside them", async ($, on) => {
+  const { agents, clock, steps } = engine(on)
+  on('agent.spawn', ($$, e) => ({ model: 'claude-opus-5-5', agentId: e.parentAgentId === undefined ? 'a1' : 'c1' }))
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  agents.push(
+    { id: 'a1', description: 'Find it', type: 'general-purpose', status: 'running' },
+    { id: 'c1', description: 'Look', type: 'Explore', status: 'running', parentId: 'a1' },
+  )
+  await $.agent.spawn({ prompt: 'Find it.', description: 'Find it' } as never)
+  await $.agent.spawn({ prompt: 'Look.', description: 'Look', parentAgentId: 'a1' } as never)
+
+  // Of its own requests the mod sees one, 10k; its subagent's come to 50k.
+  await runStep($, steps, 'a-turn', [stopWith(requestUsage(10_000, 0, 0))], 'a1')
+  await runStep($, steps, 'c-turn', [stopWith(requestUsage(50_000, 0, 0))], 'c1')
+  await clock.advance(SECOND)
+  expect((await subagentsShown($, 'terminal', WIDE_FROM)).at(-1)).toBe('Opus 5.5 · 60k tokens · ctx 10k')
+
+  // Its turn says its own came to 30k: that, and its subagent's 50k beside.
+  agents[0]!.status = 'completed'
+  await $.turn.complete(turnDone({ agentId: 'a1', durationMs: 5_000, usage: requestUsage(20_000, 10_000, 0) }) as never)
+  expect((await subagentsShown($, 'terminal', WIDE_FROM)).at(-1)).toBe('Opus 5.5 · 80k tokens')
+})
+
+test('a subagent no spawn raised, as a forked skill, gets its row as its turn starts', async ($, on) => {
+  const { agents } = engine(on)
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+
+  // Nothing else at work, so no tick or minute lists it.
+  agents.push({ id: 's1', description: 'Run the review skill', type: 'general-purpose', status: 'running' })
+  await $.turn.start({ text: 'Review it.', turnId: 's-turn', agentId: 's1' })
+  expect(await subagentsShown($, 'terminal', WIDE_FROM)).toEqual([
+    'Subagents · 1 at work',
+    'Run the review skill · running',
+  ])
+
+  // It ends: its row says so, and what its turn read and wrote.
+  agents[0]!.status = 'completed'
+  await $.turn.complete(turnDone({ agentId: 's1', turnId: 's-turn', durationMs: 5_000 }) as never)
+  expect(await subagentsShown($, 'terminal', WIDE_FROM)).toEqual([
+    'Subagents · 1 finished',
+    'Run the review skill · done',
+    'Opus 5.5 · 25.5k tokens',
+  ])
+})
+
+test('under WIDE_FROM columns one line says how many subagents work and finished; the status line, how many work', async ($, on) => {
+  // A terminal too narrow to place the pane unasked: the status line stands
+  // in for it.
+  const { agents, clock, status } = engine(on, { columns: 120 })
+  on('agent.spawn', ($$, e) => ({ model: 'claude-haiku-5-5', agentId: e.description === 'One' ? 'a1' : 'a2' }))
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  agents.push(
+    { id: 'a1', description: 'One', type: 'Explore', status: 'running' },
+    { id: 'a2', description: 'Two', type: 'Explore', status: 'running' },
+  )
+  await $.agent.spawn({ prompt: 'One.', description: 'One' } as never)
+  await $.agent.spawn({ prompt: 'Two.', description: 'Two' } as never)
+  expect(status()).toBe('2 subagents')
+
+  for (const surface of ['desktop', 'terminal'] as const) {
+    expect(await subagentsShown($, surface, WIDE_FROM - 1)).toEqual(['Subagents · 2 at work'])
+  }
+
+  agents[0]!.status = 'completed'
+  await $.turn.complete(turnDone({ agentId: 'a1', durationMs: 5_000 }) as never)
+  expect(status()).toBe('1 subagent')
+  expect(await subagentsShown($, 'terminal', WIDE_FROM - 1)).toEqual(['Subagents · 1 at work · 1 finished'])
+
+  // The last stopped: nothing left for the line to say.
+  await clock.advance(MINUTE)
+  agents[1]!.status = 'killed'
+  await $.turn.complete(turnDone({ agentId: 'a2', durationMs: 5_000, reason: 'aborted', isAborted: true }) as never)
+  expect(status()).toBe(undefined)
+  expect(await subagentsShown($, 'terminal', WIDE_FROM)).toEqual([
+    'Subagents · 2 finished',
+    'Two · stopped · 1m 0s',
+    'Opus 5.5 · 25.5k tokens',
+    'One · done · 0s',
+    'Opus 5.5 · 25.5k tokens',
   ])
 })
 
@@ -2364,7 +2594,7 @@ test("each block's header reads as one: a step larger than its rows, heavier, mu
   for (const surface of ['desktop', 'terminal'] as const) {
     expect(await styleOf(surface, WIDE_FROM - 1, 'Usage limits')).toEqual(header)
 
-    for (const text of ['Usage limits', 'Subagents at work', 'Recent turns']) {
+    for (const text of ['Usage limits', 'Subagents · 1 at work', 'Recent turns']) {
       expect([text, await styleOf(surface, WIDE_FROM, text)]).toEqual([text, header])
     }
   }
@@ -2373,7 +2603,8 @@ test("each block's header reads as one: a step larger than its rows, heavier, mu
 test('under WIDE_FROM columns, in a widget and on the status line, nothing of the wide layout shows', async ($, on) => {
   // Everything the wide layout's additions read is there: the breakdown and
   // its model, prompts and a compaction, a subagent at work, recent turns,
-  // windows far enough in for their pace.
+  // windows far enough in for their pace. Of the subagent, the narrower pane
+  // and the status line say only that it works.
   const { agents, clock, status, steps } = engine(on, {
     breakdown: BREAKDOWN,
     rateLimits: PACED,
@@ -2392,7 +2623,7 @@ test('under WIDE_FROM columns, in a widget and on the status line, nothing of th
   await $.turn.start({ text: 'go', turnId: 't1' })
   agents.push({ id: 'a1', description: 'Find it', type: 'Explore', status: 'running' })
   await $.agent.spawn({ prompt: 'Find it.', description: 'Find it' } as never)
-  expect((await pane($, 'terminal', WIDE_FROM)).includes('Subagents at work')).toBe(true)
+  expect((await pane($, 'terminal', WIDE_FROM)).includes('Find it · running · <1m')).toBe(true)
 
   for (const surface of ['desktop', 'terminal'] as const) {
     expect(await pane($, surface, WIDE_FROM - 1)).toEqual([
@@ -2414,6 +2645,7 @@ test('under WIDE_FROM columns, in a widget and on the status line, nothing of th
       '█'.repeat(15),
       '░'.repeat(5),
       'Session cost $1.23',
+      'Subagents · 1 at work',
     ])
     expect(await turnRows($, surface, WIDE_FROM - 1)).toEqual([])
   }
@@ -2423,7 +2655,7 @@ test('under WIDE_FROM columns, in a widget and on the status line, nothing of th
   // On a terminal too narrow to place the pane unasked, the line stands in,
   // as it reads at the next minute.
   await clock.advance(MINUTE)
-  expect(status()).toBe('☁ 45% · 5h 11% (2h 21m) · $1.23')
+  expect(status()).toBe('☁ 45% · 5h 11% (2h 21m) · $1.23 · 1 subagent')
 })
 
 test('minimized to a widget, the pane reads at a glance: the sky, the windows and the cost, the newest update', async ($, on) => {
