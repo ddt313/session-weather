@@ -4512,25 +4512,30 @@ const threeUpdates = async (
 // wide: across the card's text, a cell in from each side.
 const DESK_RULE = '─'.repeat(60 - 2 - 1)
 
-test("on the desktop under WIDE_FROM columns the thinking card lists the turn's updates as the terminal does, newest first, a rule between two", async ($, on) => {
+test("on the desktop under WIDE_FROM columns the thinking card lists the turn's updates newest first, each gist by its time, what follows by an icon", async ($, on) => {
   const { replies, steps, clock } = engine(on)
   await threeUpdates($, replies, steps, clock)
 
+  // Each gist a Text, its time a heavier one inside it; what follows each
+  // by its icon, in its color; a rule between two updates.
   const { texts, labels, alts } = await desk($)
   expect(texts.slice(texts.indexOf('Thinking'))).toEqual([
     'Thinking',
     '31s',
     '31s · Ba.',
-    '? Test đã xanh',
+    '31s ·',
+    'Test đã xanh',
     DESK_RULE,
     '16s · Hai.',
-    '→ Chạy test',
+    '16s ·',
+    'Chạy test',
     DESK_RULE,
     '1s · Một.',
-    '★ Chỉ sửa file A',
+    '1s ·',
+    'Chỉ sửa file A',
     'Summary $0.006 · Haiku 5.5',
   ])
-  expect(alts).toContain('Thinking')
+  expect(alts).toEqual(expect.arrayContaining(['Thinking', 'Decided', 'To check', 'Next']))
   // Pinned in a body of 30 rows: the arrows to scroll it.
   expect(labels).toEqual(['⌃', '⌄', 'Turn summary off'])
 })
@@ -4548,7 +4553,7 @@ test("on the desktop ⌃ and ⌄ scroll the turn's updates about half the window
   // updates' gists above the window.
   await pressDesk($, 'older')
   expect(await card()).toEqual({
-    lines: ['★ Chỉ sửa file A'],
+    lines: ['Chỉ sửa file A'],
     labels: ['⌃', '⌄', '↑ 3 newer updates', 'Turn summary off'],
   })
 
@@ -4565,7 +4570,7 @@ test("on the desktop ⌃ and ⌄ scroll the turn's updates about half the window
   await clock.settle()
   await oneTurn($, steps, clock, 't2', 'and this')
   const second = await card()
-  expect(second.lines.at(-1)).toBe('1s · Claude đang sửa lỗi.')
+  expect(second.lines).toContain('1s · Claude đang sửa lỗi.')
   expect(second.lines.some(line => line.includes('Ba.'))).toBe(false)
   expect(second.labels).toEqual(['Turn summary off'])
 })
@@ -4656,7 +4661,7 @@ test('on the desktop from WIDE_FROM columns a recent turn pressed shows beside t
   // The current turn, its one update: nothing to scroll.
   expect(await card()).toEqual({
     title: 'Thinking',
-    lines: ['1s · Bốn.'],
+    lines: ['1s · Bốn.', '1s ·'],
     labels: ['☐ Persist', `▸ ${second}  2s`, `${first}  31s`, 'Turn summary off'],
   })
 
@@ -4668,16 +4673,20 @@ test('on the desktop from WIDE_FROM columns a recent turn pressed shows beside t
   expect(await card()).toEqual({
     title: `Turn at ${first}`,
     lines: [
-      'Recap · Claude đang sửa lỗi.',
+      'Recap. Claude đang sửa lỗi.',
+      'Recap.',
       rule,
       '31s · Ba.',
-      '? Test đã xanh',
+      '31s ·',
+      'Test đã xanh',
       rule,
       '16s · Hai.',
-      '→ Chạy test',
+      '16s ·',
+      'Chạy test',
       rule,
       '1s · Một.',
-      '★ Chỉ sửa file A',
+      '1s ·',
+      'Chỉ sửa file A',
     ],
     labels: ['☐ Persist', `${second}  2s`, `▸ ${first}  31s`, '⌃', '⌄', 'Turn summary off'],
   })
@@ -4686,11 +4695,11 @@ test('on the desktop from WIDE_FROM columns a recent turn pressed shows beside t
   await pressDesk($, 'older', WIDE_FROM)
   expect(await card()).toEqual({
     title: `Turn at ${first}`,
-    lines: ['★ Chỉ sửa file A'],
+    lines: ['Chỉ sửa file A'],
     labels: ['☐ Persist', `${second}  2s`, `▸ ${first}  31s`, '⌃', '⌄', '↑ 4 newer updates', 'Turn summary off'],
   })
   await pressDesk($, 'newer', WIDE_FROM)
-  expect((await card()).lines[0]).toBe('Recap · Claude đang sửa lỗi.')
+  expect((await card()).lines[0]).toBe('Recap. Claude đang sửa lỗi.')
 
   // The current turn pressed again: back to it.
   await pressDesk($, 'turn-t2', WIDE_FROM)

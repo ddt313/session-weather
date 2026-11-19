@@ -890,6 +890,12 @@ const toNewest = async ($: EngineInterface) => {
   if (place.line !== 0 || place.row !== 0) await update($, summaryPlace, () => ({ line: 0, row: 0 }))
 }
 
+// A line of the updates as the window shows it: its kind; its text as the
+// terminal draws it, its mark leading (★, ?, →); its words as the desktop
+// draws them, by an icon in place of the mark; and whether it is shown from
+// part-way, `… ` leading both, where the desktop draws no icon.
+type ShownLine = { kind: UpdateLine['kind']; text: string; words: string; isCut: boolean }
+
 // The updates' window over `turn`, its lines measured `width` characters a
 // row, standing at `place`: the lines showing, the first from the row on top
 // and, where the window is pinned, a body's `rows` of them at most (else
@@ -908,7 +914,7 @@ const windowOf = (
   const topLine = laid.rows[top]?.line ?? 0
   const topChar = laid.rows[top]?.start ?? 0
   const newer = laid.starts.filter((first, at) => lines[at]?.kind === 'gist' && first < top).length
-  const shown: UpdateLine[][] = []
+  const shown: ShownLine[][] = []
   let budget = isPinned ? rows : Number.POSITIVE_INFINITY
 
   for (let at = topLine; at < lines.length && budget > 0; at += 1) {
@@ -916,9 +922,10 @@ const windowOf = (
 
     if (one === undefined) break
 
-    const text = at === topLine && topChar > 0 ? `… ${shownText(one).slice(topChar)}` : shownText(one)
+    const isCut = at === topLine && topChar > 0
+    const text = isCut ? `… ${shownText(one).slice(topChar)}` : shownText(one)
     const group = shown.at(-1)
-    const item = { kind: one.kind, text }
+    const item = { kind: one.kind, text, words: isCut ? text : one.text, isCut }
 
     if (group === undefined || one.kind === 'gist') shown.push([item])
     else group.push(item)
@@ -3402,6 +3409,18 @@ const STATE_TILES: Readonly<Record<string, { icon: IconName; ink: string }>> = {
   killed: { icon: 'stop', ink: INK.grey },
 }
 
+// How the desktop draws an update's lines after its gist: what Claude
+// decided by a star in the accent, what it takes as true unchecked by a
+// question in blue, and what it does next by an arrow, dim; each with the
+// words a reader hears for its icon.
+const MARK_LOOKS: Readonly<
+  Record<'decision' | 'assumption' | 'next', { icon: IconName; ink: string; color?: string; alt: string }>
+> = {
+  decision: { icon: 'star', ink: INK.mine, color: 'claude', alt: 'Decided' },
+  assumption: { icon: 'question', ink: INK.sky, color: 'suggestion', alt: 'To check' },
+  next: { icon: 'arrow', ink: INK.grey, alt: 'Next' },
+}
+
 // The icon of a tool call as `actionOf` words it: a file read or written, a
 // search, a command, the web, or any other tool.
 const toolIconOf = (action: string): IconName => {
@@ -3855,19 +3874,44 @@ const thinkingCardOf = ($: EngineInterface, ui: DesktopUi, view: ThinkingView) =
         />
       )}
       {groups.length > 0 && (
-        <Box flexDirection="column">
+        <Box flexDirection="column" gap="xs">
           {groups.flatMap((group, at) => [
             ...(at === 0 ? [] : [rule]),
-            <Box flexDirection="column">
-              {group.map(item =>
-                item.kind === 'decision' ? (
-                  <Text color="warning">{item.text}</Text>
-                ) : item.kind === 'assumption' ? (
-                  <Text color="suggestion">{item.text}</Text>
-                ) : (
-                  <Text>{item.text}</Text>
-                ),
-              )}
+            <Box flexDirection="column" gap="xs">
+              {group.map(item => {
+                // The gist: when it was written (or Recap), heavier, then
+                // its words.
+                if (item.kind === 'gist') {
+                  const split = item.isCut ? -1 : item.words.indexOf(' · ')
+
+                  if (split === -1) return <Text>{item.words}</Text>
+
+                  const stamp = item.words.slice(0, split)
+
+                  return (
+                    <Text>
+                      <Text weight="semibold">{stamp === 'Recap' ? 'Recap.' : `${stamp} ·`}</Text> {item.words.slice(split + 3)}
+                    </Text>
+                  )
+                }
+
+                // A decision, an assumption, the next step: its icon, then
+                // its words in its color; none for a line shown part-way.
+                const look = MARK_LOOKS[item.kind]
+
+                return (
+                  <Box flexDirection="row" alignItems="flex-start" gap={1}>
+                    {item.isCut ? (
+                      <Box width={2} />
+                    ) : (
+                      <Svg source={iconSvg(look.icon, look.ink, 14)} alt={look.alt} width={14} height={14} />
+                    )}
+                    <Box flexDirection="column" flexShrink={1} minWidth={0}>
+                      <Text {...(look.color === undefined ? { dimColor: true } : { color: look.color })}>{item.words}</Text>
+                    </Box>
+                  </Box>
+                )
+              })}
             </Box>,
           ])}
         </Box>

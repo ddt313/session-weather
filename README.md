@@ -77,8 +77,11 @@ section tells. Under 90 columns, from the top:
   tokens over a bar of its share of all the subagents' tokens.
 - The thinking summary, as a card: the current turn's updates as the
   terminal lists them (see **Thinking summary**), newest first, a rule
-  between two. ⌃ and ⌄ scroll them about half the window a press, within
-  the turn; they never go to another turn.
+  between two; each gist led by its time (or `Recap.`) in a heavier face,
+  and what Claude decided, takes as true unchecked and does next each by
+  its icon (a star, a question mark, an arrow), in orange, blue and dim.
+  ⌃ and ⌄ scroll them about half the window a press, within the turn; they
+  never go to another turn.
 - Under it, what the summary cost and its switch.
 
 From 90 columns, with the summary on:
