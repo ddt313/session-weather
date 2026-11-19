@@ -3219,10 +3219,15 @@ const statusOf = (turn: Thinking | null) => {
 // Fills the desktop draws cards with: neutral greys with alpha over the
 // pane's ground, which read on a dark theme and a light one alike, and the
 // warning's red. The mod cannot read the person's theme; text takes the
-// theme's own colors, by name.
+// theme's own colors, by name. The alphas are set so that on the desktop's
+// dark pane (#191919, measured) a card is the design's #242424, a row raised
+// in it (a subagent at work, the turn shown) #2E2E2E, and a chip on it
+// (`Done`, `2 at work`) #333333: each fill lies over the card's, and the
+// desktop rounds each alpha to a 255th, which a card's 0.1 sat on the edge of.
 const DESK = {
-  card: 'rgba(128, 128, 128, 0.12)',
-  raised: 'rgba(128, 128, 128, 0.2)',
+  card: 'rgba(128, 128, 128, 0.105)',
+  raised: 'rgba(128, 128, 128, 0.11)',
+  chip: 'rgba(128, 128, 128, 0.165)',
   alert: 'rgba(227, 27, 35, 0.14)',
 } as const
 
@@ -3236,10 +3241,15 @@ const NO_INK = 'rgba(0, 0, 0, 0)'
 const cardLook = (fill: string) => ({ backgroundColor: fill, borderStyle: 'round', borderColor: NO_INK })
 
 // Colors inside an Svg, which the theme never reaches: tones that read on
-// either ground. This session's part takes the design's orange.
+// either ground. This session's part takes the design's orange. On the dark
+// pane's card, a bar's track is the design's #333333 (near its #3A3A3A on a
+// raised row), and what other sessions used its #5C5C5C: `others` where it
+// lies on the card, as a legend's swatch does, and `othersOnTrack` where it
+// lies over a bar's track, which shows through it.
 const INK = {
-  track: 'rgba(128, 128, 128, 0.28)',
-  others: 'rgba(128, 128, 128, 0.7)',
+  track: 'rgba(128, 128, 128, 0.165)',
+  others: 'rgba(128, 128, 128, 0.61)',
+  othersOnTrack: 'rgba(128, 128, 128, 0.53)',
   mine: '#F47920',
   sky: '#00AEEF',
   red: '#E5484D',
@@ -3302,14 +3312,15 @@ const lineIconSvg = (name: IconName, ink: string, size: number) =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${LINE_PX}" viewBox="0 0 ${size} ${LINE_PX}">` +
   `<g transform="translate(0 ${((LINE_PX - size) / 2).toFixed(1)}) scale(${(size / 24).toFixed(3)})" fill="none" stroke="${ink}" stroke-width="${strokeOf(size)}" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</g></svg>`
 
-// An icon on a faint square of its own ink: the sky's, a subagent's state.
-const tileSvg = (name: IconName, ink: string, size: number) => {
+// An icon on a faint square of its own ink, filled at `opacity`: a
+// subagent's state, and the sky's, which the design fills a little fainter.
+const tileSvg = (name: IconName, ink: string, size: number, opacity = 0.16) => {
   const inner = size * 0.56
   const at = ((size - inner) / 2).toFixed(2)
 
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">` +
-    `<rect width="${size}" height="${size}" rx="${(size * 0.3).toFixed(1)}" fill="${ink}" fill-opacity="0.16"/>` +
+    `<rect width="${size}" height="${size}" rx="${(size * 0.3).toFixed(1)}" fill="${ink}" fill-opacity="${opacity}"/>` +
     `<g transform="translate(${at} ${at}) scale(${(inner / 24).toFixed(3)})" fill="none" stroke="${ink}" stroke-width="${strokeOf(inner)}" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</g></svg>`
   )
 }
@@ -3445,7 +3456,7 @@ const limitStretches = (window: ShownWindow): Stretch[] => {
   const projected = Math.min(1, projectedOf(window) ?? 0)
 
   return [
-    { from: 0, to: used - mine, ink: INK.others },
+    { from: 0, to: used - mine, ink: INK.othersOnTrack },
     { from: used - mine, to: used, ink: INK.mine },
     ...(projected > used ? [{ from: used, to: projected, ink: HATCH }] : []),
   ]
@@ -3548,7 +3559,7 @@ const drawNarrowDesktop = async ($: EngineInterface, ui: DesktopUi, columns: num
 
   const skyRow = (
     <Box flexDirection="row" alignItems="center" gap={1}>
-      {skyLook !== undefined && <Svg source={tileSvg(skyLook.icon, skyLook.ink, 40)} alt={sky?.label ?? 'Sky'} width={40} height={40} />}
+      {skyLook !== undefined && <Svg source={tileSvg(skyLook.icon, skyLook.ink, 40, 0.14)} alt={sky?.label ?? 'Sky'} width={40} height={40} />}
       <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
         <Text size="heading" weight="semibold" color={sky?.color}>
           {sky?.label ?? 'Waiting for the first response'}
@@ -3730,12 +3741,12 @@ const subagentsCardOf = (
         <Svg source={iconSvg('fork', INK.mine, 18)} alt="Subagents" width={18} height={18} />
         <Text weight="semibold">Subagents</Text>
         {working > 0 && (
-          <Text size="caption" weight="medium" color="claude" backgroundColor={DESK.raised}>
+          <Text size="caption" weight="medium" color="claude" backgroundColor={DESK.chip}>
             {` ${working} at work `}
           </Text>
         )}
         {finished > 0 && (
-          <Text size="caption" weight="medium" dimColor backgroundColor={DESK.raised}>
+          <Text size="caption" weight="medium" dimColor backgroundColor={DESK.chip}>
             {` ${finished} finished `}
           </Text>
         )}
@@ -3894,7 +3905,7 @@ const thinkingCardOf = ($: EngineInterface, ui: DesktopUi, view: ThinkingView) =
           </Text>
         )}
         {standing !== null && (
-          <Text size="caption" weight="medium" dimColor backgroundColor={DESK.raised}>
+          <Text size="caption" weight="medium" dimColor backgroundColor={DESK.chip}>
             {` ${standing} `}
           </Text>
         )}
@@ -4065,7 +4076,7 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
 
   const head = (
     <Box flexDirection="row" alignItems="center" gap={2}>
-      {skyLook !== undefined && <Svg source={tileSvg(skyLook.icon, skyLook.ink, 44)} alt={sky?.label ?? 'Sky'} width={44} height={44} />}
+      {skyLook !== undefined && <Svg source={tileSvg(skyLook.icon, skyLook.ink, 44, 0.14)} alt={sky?.label ?? 'Sky'} width={44} height={44} />}
       <Box flexDirection="column" flexShrink={1} minWidth={0}>
         <Text size="heading" weight="semibold" color={sky?.color}>
           {sky?.label ?? 'Waiting for the first response'}
