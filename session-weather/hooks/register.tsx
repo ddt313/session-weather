@@ -3226,6 +3226,12 @@ const DESK = {
   alert: 'rgba(227, 27, 35, 0.14)',
 } as const
 
+// A card's look: its fill, and a border of no color with round corners. The
+// API names no corner radius: a desktop that draws a round border with
+// rounded corners rounds the card's fill with it, and one that draws it
+// square draws a border nobody sees.
+const cardLook = (fill: string) => ({ backgroundColor: fill, borderStyle: 'round', borderColor: 'transparent' })
+
 // Colors inside an Svg, which the theme never reaches: tones that read on
 // either ground. This session's part takes the design's orange.
 const INK = {
@@ -3548,7 +3554,7 @@ const drawNarrowDesktop = async ($: EngineInterface, ui: DesktopUi, columns: num
           ? null
           : `compact at ${Math.round((compactAt.threshold / now.window) * 100)}%`
   const tile = (label: string, value: string, bar: { source: string; height: number }, alt: string, lines: readonly (string | null)[]) => (
-    <Box flexDirection="column" width={tileCells} paddingX={1} paddingY="xs" backgroundColor={DESK.card}>
+    <Box flexDirection="column" width={tileCells} paddingX={1} paddingY="xs" {...cardLook(DESK.card)}>
       <Text size="caption" weight="medium" dimColor>
         {label}
       </Text>
@@ -3598,7 +3604,7 @@ const drawNarrowDesktop = async ($: EngineInterface, ui: DesktopUi, columns: num
 
   const alert = paceAlertOf(windows)
   const alertBox = alert !== null && (
-    <Box flexDirection="row" alignItems="flex-start" gap={1} paddingX={1} paddingY="xs" backgroundColor={DESK.alert}>
+    <Box flexDirection="row" alignItems="flex-start" gap={1} paddingX={1} paddingY="xs" {...cardLook(DESK.alert)}>
       <Svg source={iconSvg('warning', INK.red, 16)} alt="Warning" width={16} height={16} />
       <Box flexDirection="column" flexShrink={1} minWidth={0}>
         <Text size="caption" color="error">
@@ -3611,7 +3617,7 @@ const drawNarrowDesktop = async ($: EngineInterface, ui: DesktopUi, columns: num
   // "Last turn +11k · 1m 36s · 5 tools · cache 100%".
   const { grown, rest: lastParts } = lastTurnPartsOf(added, turn)
   const lastTurnChip = (grown !== null || lastParts.length > 0) && (
-    <Box flexDirection="row" alignItems="center" gap={1} paddingX={1} paddingY="xs" backgroundColor={DESK.card}>
+    <Box flexDirection="row" alignItems="center" gap={1} paddingX={1} paddingY="xs" {...cardLook(DESK.card)}>
       <Text size="caption" weight="medium" dimColor>
         Last turn
       </Text>
@@ -3684,7 +3690,7 @@ const subagentsCardOf = (
   const barCells = Math.max(10, columns - ROW_INDENT - 18)
 
   return (
-    <Box flexDirection="column" gap="xs" paddingX={1} paddingY="sm" backgroundColor={DESK.card}>
+    <Box flexDirection="column" gap="xs" paddingX={1} paddingY="sm" {...cardLook(DESK.card)}>
       <Box flexDirection="row" alignItems="center" gap={1}>
         <Svg source={iconSvg('fork', INK.mine, 18)} alt="Subagents" width={18} height={18} />
         <Text weight="semibold">Subagents</Text>
@@ -3727,7 +3733,7 @@ const subagentsCardOf = (
           const share = barSvg([{ from: 0, to: total > 0 ? tokens / total : 0, ink: isWorking ? INK.mine : INK.grey }], barCells)
 
           return (
-            <Box flexDirection="column" paddingX={1} paddingY="xs" {...(isWorking ? { backgroundColor: DESK.raised } : {})}>
+            <Box flexDirection="column" paddingX={1} paddingY="xs" {...(isWorking ? cardLook(DESK.raised) : {})}>
               <Box flexDirection="row" alignItems="flex-start" gap={1}>
                 <Svg source={tileSvg(look.icon, look.ink, 28)} alt={standing} width={28} height={28} />
                 <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
@@ -3841,7 +3847,7 @@ const thinkingCardOf = ($: EngineInterface, ui: DesktopUi, view: ThinkingView) =
       gap="xs"
       paddingX={1}
       paddingY="sm"
-      backgroundColor={DESK.card}
+      {...cardLook(DESK.card)}
       {...(isPinned ? { flexGrow: 1, flexShrink: 1, overflow: 'hidden' as const } : {})}
     >
       <Box flexDirection="row" alignItems="center" gap={1}>
@@ -4037,7 +4043,7 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
       </Box>
       <Box flexGrow={1} />
       {alert !== null && (
-        <Box flexDirection="row" alignItems="center" gap={1} paddingX={1} flexShrink={1} minWidth={0} backgroundColor={DESK.alert}>
+        <Box flexDirection="row" alignItems="center" gap={1} paddingX={1} flexShrink={1} minWidth={0} {...cardLook(DESK.alert)}>
           <Svg source={iconSvg('warning', INK.red, 14)} alt="Warning" width={14} height={14} />
           <Text size="caption" color="error" wrap="truncate">
             {alert}
@@ -4082,7 +4088,7 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
   const { grown, rest: lastParts } = lastTurnPartsOf(added, turn)
 
   const contextCard = (
-    <Box flexDirection="column" gap="xs" paddingX={1} paddingY="sm" backgroundColor={DESK.card}>
+    <Box flexDirection="column" gap="xs" paddingX={1} paddingY="sm" {...cardLook(DESK.card)}>
       <Box flexDirection="row" justifyContent="space-between" gap={1}>
         <Text size="caption" weight="medium" dimColor>
           Context
@@ -4148,7 +4154,7 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
   // The limits: each window's share used over a bar of this session's part
   // and its pace, when it resets and where the pace would take it.
   const limitsCard = windows.length > 0 && (
-    <Box flexDirection="column" gap="sm" paddingX={1} paddingY="sm" backgroundColor={DESK.card}>
+    <Box flexDirection="column" gap="sm" paddingX={1} paddingY="sm" {...cardLook(DESK.card)}>
       <Text size="caption" weight="medium" dimColor>
         Usage limits
       </Text>
@@ -4217,7 +4223,7 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
       gap="xs"
       paddingX={1}
       paddingY="sm"
-      backgroundColor={DESK.card}
+      {...cardLook(DESK.card)}
       {...(isOn && rows >= MIN_PINNED_ROWS ? { flexGrow: 1, flexShrink: 1, overflow: 'hidden' as const } : {})}
     >
       <Box flexDirection="row" justifyContent="space-between" alignItems="center">
@@ -4265,7 +4271,7 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
         const growth = barSvg([{ from: 0, to: added === null ? 0 : clamp01(added / mostGrown), ink: isShown ? INK.mine : INK.grey }], 12)
 
         return (
-          <Box flexDirection="row" alignItems="center" gap={1} {...(isShown ? { backgroundColor: DESK.raised } : {})}>
+          <Box flexDirection="row" alignItems="center" gap={1} {...(isShown ? cardLook(DESK.raised) : {})}>
             <Box width={TIME_CELLS + 1 + TOOK_CELLS}>
               {isOn ? (
                 <Button
