@@ -3227,10 +3227,13 @@ const DESK = {
 } as const
 
 // A card's look: its fill, and a border of no color with round corners. The
-// API names no corner radius: a desktop that draws a round border with
-// rounded corners rounds the card's fill with it, and one that draws it
-// square draws a border nobody sees.
-const cardLook = (fill: string) => ({ backgroundColor: fill, borderStyle: 'round', borderColor: 'transparent' })
+// API names no corner radius, but the desktop draws a round border with
+// rounded corners, and rounds the card's fill with it. The border's color
+// is spelled as the fills are: the desktop knows no name `transparent`, and
+// drew a border of its own for it.
+const NO_INK = 'rgba(0, 0, 0, 0)'
+
+const cardLook = (fill: string) => ({ backgroundColor: fill, borderStyle: 'round', borderColor: NO_INK })
 
 // Colors inside an Svg, which the theme never reaches: tones that read on
 // either ground. This session's part takes the design's orange.
