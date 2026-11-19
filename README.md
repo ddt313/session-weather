@@ -18,14 +18,16 @@ keeps its key figures.
 The pane lays itself out by its width, and changes over as you drag it wider
 or narrower.
 
-![The Session Weather pane under 90 columns in the Claude desktop app: the weather above the thinking summary](session-weather/screenshot.png)
+![The Session Weather pane under 90 columns: the weather above the thinking summary](session-weather/screenshot.png)
 
-Under 90 columns, in the desktop app as a turn ends: the weather on top (the
-sky, the context's fill and where auto-compact runs, the last turn, the
-5-hour and weekly limits with this session's part of each in yellow, the
-session's cost), then Haiku's updates on Claude's thinking, newest first,
-each with its gist, a decision (★), what Claude takes as true unchecked (?)
-and its next step (→).
+Under 90 columns, as a turn ends: the weather on top (the sky, the context's
+fill and where auto-compact runs, the last turn, the 5-hour and weekly
+limits with this session's part of each in yellow, the session's cost), then
+Haiku's updates on Claude's thinking, newest first, each with its gist, a
+decision (★), what Claude takes as true unchecked (?) and its next step (→).
+The terminal draws it so at that width; the desktop app now draws its own
+cards there (see **On the desktop, under 90 columns**), which the picture
+predates.
 
 ![The Session Weather pane from 90 columns: the weather in a column of its own, the summary of a picked turn beside it](session-weather/screenshot-wide.png)
 
@@ -49,6 +51,40 @@ showing the turn picked from the list (▸ 23:31), its recap on top.
 - Minimized to a widget on the desktop app, the pane shows what reads at a
   glance, with no buttons: `☁ Cloudy · 42%`, `5h 30% · Week 74% · $1.23`, and
   the summary's newest update.
+
+**On the desktop, under 90 columns**
+
+The desktop app draws the pane as the design "Session Weather layouts" lays
+it out: cards on a fill of their own, the bars and icons drawn as images.
+The terminal, which draws no images, keeps the rows of text the rest of this
+section tells; so, for now, does a desktop pane from 90 columns.
+
+- The sky: its icon on a tile of its color, its name (`Showers`), the
+  session's line under it (`Opus 5.5 · since 19:59 · 8 turns`), and the
+  session's cost on the right.
+- A tile each for the context and the 5-hour and weekly windows, side by
+  side: the share used, large, over a bar, and two lines under it. The
+  context's bar has a mark where auto-compact runs (`compact at 92%`); a
+  window's bar shows what the account used in grey and this session's part
+  in orange (`session 10%`, `reset 4h 38m`), and, from a fifth of the way
+  into the window, the share its pace would reach by the reset, hatched.
+- A warning, where a window's pace would pass all of it before the reset:
+  `Week limit on pace for >100% before it resets in 4d 17h.`
+- The last turn in one line: `Last turn +11k 1m 36s · 5 tools · cache 100%`.
+- The subagents, as a card: how many work and finished, then a row each
+  with its state's icon, its task, how long it has run, its model, effort
+  and context, its latest tool call with an icon for its kind, and its
+  tokens over a bar of its share of all the subagents' tokens.
+- The thinking summary, as a card: the turn shown (the current one, or one
+  stepped to with ⌃ and ⌄ through the recent turns, `1 of 2`), its newest
+  update or its recap whole, with what Claude decided (★), takes as true
+  unchecked (?) and does next (→) each by an icon; then its earlier updates,
+  newest first, a line each, opened and closed by a press. The scroll
+  arrows ▲ ▼ are the terminal's.
+- Under it, what the summary cost and its switch.
+- Colors follow the theme where text takes them; the fills, the bars and the
+  icons are tones that read on a light theme and a dark one alike. The
+  cards have square corners and the app's own font.
 
 **Weather**
 

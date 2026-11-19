@@ -359,7 +359,7 @@ type Test$ = { ui: { mount: (target: never) => Promise<unknown>; press: (target:
 // over the fixture's (a placement, a body's rows).
 const mount = async (
   $: Test$,
-  surface: 'desktop' | 'terminal' = 'desktop',
+  surface: 'desktop' | 'terminal' = 'terminal',
   columns?: number,
   props: Record<string, unknown> = {},
 ) =>
@@ -374,7 +374,7 @@ const mount = async (
 // pane `columns` wide when given, with `props` over the fixture's.
 const allTexts = async (
   $: Test$,
-  surface: 'desktop' | 'terminal' = 'desktop',
+  surface: 'desktop' | 'terminal' = 'terminal',
   columns?: number,
   props: Record<string, unknown> = {},
 ) => {
@@ -390,7 +390,7 @@ const SUMMARY_TOP = (text: string) => text.startsWith('🧭')
 
 // The weather: what the pane shows above the thinking summary, or beside it,
 // in a pane `columns` wide when given.
-const pane = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop', columns?: number) => {
+const pane = async ($: Test$, surface: 'desktop' | 'terminal' = 'terminal', columns?: number) => {
   const texts = await allTexts($, surface, columns)
   const top = texts.findIndex(SUMMARY_TOP)
 
@@ -399,7 +399,7 @@ const pane = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop', colum
 
 // The thinking summary, from its header down, in a pane `columns` wide when
 // given.
-const thoughts = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop', columns?: number) => {
+const thoughts = async ($: Test$, surface: 'desktop' | 'terminal' = 'terminal', columns?: number) => {
   const texts = await allTexts($, surface, columns)
   const top = texts.findIndex(SUMMARY_TOP)
 
@@ -408,7 +408,7 @@ const thoughts = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop', c
 
 // The labels of the pane's Buttons, with `props` over the fixture's.
 const buttons = async ($: Test$, props: Record<string, unknown> = {}) => {
-  const ui = await mount($, 'desktop', undefined, props)
+  const ui = await mount($, 'terminal', undefined, props)
   const labels = (await ui.findAll({ type: 'Button' })).map(one => one.text)
   await ui.unmount()
 
@@ -457,7 +457,7 @@ const WIDGET = { placement: 'widget', anchoredEdges: ['bottom', 'right'] }
 // The person pressing a Button of the pane, by its key, in a pane `columns`
 // wide when given.
 const press = async ($: Test$, key: string, columns?: number) => {
-  const ui = await mount($, 'desktop', columns)
+  const ui = await mount($, 'terminal', columns)
   await $.ui.press({ plugin: 'session-weather', key } as never)
   await ui.unmount()
 }
@@ -558,19 +558,18 @@ test('the pane opens as the session starts, with the weather, its fill, the grow
 
   await $.session.measure(measure(90_000, 45))
 
-  for (const surface of ['desktop', 'terminal'] as const) {
-    expect(await pane($, surface)).toEqual([
-      '☁ Cloudy',
-      '45% of context · 90k / 200k',
-      bar(9),
-      'Last turn ▲ +90k',
-      'Usage limits',
-      '5h 3% · reset in 3h 26m',
-      bar(1),
-      'Week 25% · reset in 2d 5h',
-      bar(5),
-    ])
-  }
+  // The desktop draws its own layout: see the desktop tests.
+  expect(await pane($, 'terminal')).toEqual([
+    '☁ Cloudy',
+    '45% of context · 90k / 200k',
+    bar(9),
+    'Last turn ▲ +90k',
+    'Usage limits',
+    '5h 3% · reset in 3h 26m',
+    bar(1),
+    'Week 25% · reset in 2d 5h',
+    bar(5),
+  ])
 })
 
 test('the forecast follows the table, edge by edge', async ($, on) => {
@@ -702,7 +701,7 @@ const spent = (usd: number) => ({ context: { window: 200_000 }, rateLimits: LIVE
 
 // The pane's limits under "Usage limits": each Text's shown text, with its
 // color where it has one, or [dim]; in a pane `columns` wide when given.
-const limitsShown = async ($: Test$, surface: 'desktop' | 'terminal' = 'desktop', columns?: number) => {
+const limitsShown = async ($: Test$, surface: 'desktop' | 'terminal' = 'terminal', columns?: number) => {
   const ui = await mount($, surface, columns)
   const texts = (await ui.findAll({ type: 'Text' })) as unknown as { text: string; props: { color?: string; dimColor?: boolean } }[]
   await ui.unmount()
@@ -735,20 +734,18 @@ test("this session's part of each window shows in yellow, its cells the last of 
   await $.session.measure(spent(1))
   await clock.settle()
 
-  for (const surface of ['desktop', 'terminal'] as const) {
-    expect(await limitsShown($, surface)).toEqual([
-      '5h 30% · this session 8% · reset in 3h 0m',
-      'this session 8% [warning]',
-      bar(6),
-      `${'█'.repeat(4)} [dim]`,
-      `${'█'.repeat(2)} [warning]`,
-      `${'░'.repeat(14)} [dim]`,
-      // Under half a cell: the part shows in words alone.
-      'Week 12% · this session 1% · reset in 2d 0h',
-      'this session 1% [warning]',
-      `${bar(2)} [dim]`,
-    ])
-  }
+  expect(await limitsShown($)).toEqual([
+    '5h 30% · this session 8% · reset in 3h 0m',
+    'this session 8% [warning]',
+    bar(6),
+    `${'█'.repeat(4)} [dim]`,
+    `${'█'.repeat(2)} [warning]`,
+    `${'░'.repeat(14)} [dim]`,
+    // Under half a cell: the part shows in words alone.
+    'Week 12% · this session 1% · reset in 2d 0h',
+    'this session 1% [warning]',
+    `${bar(2)} [dim]`,
+  ])
 })
 
 test('a session alone in the files takes the whole of each window: spend no file holds counts toward it', async ($, on) => {
@@ -1385,7 +1382,7 @@ test('updates keep 15 seconds apart, stay newest first, and the end adds a recap
   expect(asks.length).toBe(3)
 })
 
-test('a rule of box drawing stands between two updates, on the desktop as in the terminal', async ($, on) => {
+test('a rule of box drawing stands between two updates, beside the weather on the desktop as in the terminal', async ($, on) => {
   const { steps, clock } = engine(on)
 
   await $.session.start(start)
@@ -1400,13 +1397,12 @@ test('a rule of box drawing stands between two updates, on the desktop as in the
     await clock.advance(15 * SECOND)
   }
 
-  // Three updates, two rules between them, each across the body.
-  for (const surface of ['desktop', 'terminal'] as const) {
-    const texts = await thoughts($, surface)
-    expect(texts.filter(text => text === RULE).length).toBe(2)
-    expect(texts.indexOf(RULE)).toBe(texts.indexOf('31s · Claude đang sửa lỗi.') + 1)
-    expect(texts.lastIndexOf(RULE)).toBe(texts.indexOf('16s · Claude đang sửa lỗi.') + 1)
-  }
+  // Three updates, two rules between them, each across the body. (Under
+  // WIDE_FROM columns the desktop lists earlier updates one line each.)
+  const texts = await thoughts($)
+  expect(texts.filter(text => text === RULE).length).toBe(2)
+  expect(texts.indexOf(RULE)).toBe(texts.indexOf('31s · Claude đang sửa lỗi.') + 1)
+  expect(texts.lastIndexOf(RULE)).toBe(texts.indexOf('16s · Claude đang sửa lỗi.') + 1)
 })
 
 test('a new prompt starts the updates over', async ($, on) => {
@@ -1609,9 +1605,9 @@ test('in a narrow pane the lines wrap as the surface wraps them, and a click on 
   await clock.advance(SECOND)
 
   // One Text a line, for the surface to wrap at its full width. At 21
-  // columns a desktop row holds about 23 characters: the long line is three
-  // rows, the next step a fourth.
-  expect(await thoughts($, 'desktop', 21)).toEqual([
+  // columns a terminal row holds 20 characters: the long line is four rows,
+  // the next step a fifth.
+  expect(await thoughts($, 'terminal', 21)).toEqual([
     '🧭 Thinking · 1s',
     '1s · Claude đang đọc file cấu hình rồi chạy lại toàn bộ test',
     '→ Chạy lại test',
@@ -1619,9 +1615,9 @@ test('in a narrow pane the lines wrap as the surface wraps them, and a click on 
   ])
 
   await press($, 'older', 21)
-  expect((await thoughts($, 'desktop', 21)).slice(1, -1)).toEqual(['→ Chạy lại test'])
+  expect((await thoughts($, 'terminal', 21)).slice(1, -1)).toEqual(['→ Chạy lại test'])
   await press($, 'newer', 21)
-  expect((await thoughts($, 'desktop', 21))[1]).toBe('1s · Claude đang đọc file cấu hình rồi chạy lại toàn bộ test')
+  expect((await thoughts($, 'terminal', 21))[1]).toBe('1s · Claude đang đọc file cấu hình rồi chạy lại toàn bộ test')
 })
 
 test('a click on ▼ shows a long line from part-way, marked, and a new update keeps that place', async ($, on) => {
@@ -1634,22 +1630,22 @@ test('a click on ▼ shows a long line from part-way, marked, and a new update k
   await runStep($, steps, 't1', [thought(0, 'A note.'), stop])
   await clock.advance(SECOND)
 
-  // About 23 characters a row at 21 columns: the line is a score of rows,
-  // and a click passes five of them.
+  // 20 characters a terminal row at 21 columns: the line is a score of rows,
+  // and a click passes five of them, about a hundred characters.
   await press($, 'older', 21)
-  const moved = (await thoughts($, 'desktop', 21))[1] ?? ''
+  const moved = (await thoughts($, 'terminal', 21))[1] ?? ''
   expect(moved.startsWith('… ')).toBe(true)
-  expect(moved.length).toBeLessThan(`1s · ${words}`.length - 100)
-  expect(moved.length).toBeGreaterThan(`1s · ${words}`.length - 130)
+  expect(moved.length).toBeLessThan(`1s · ${words}`.length - 90)
+  expect(moved.length).toBeGreaterThan(`1s · ${words}`.length - 110)
 
   // An update lands on top: the line still shows from the same word.
   await runStep($, steps, 't1', [thought(0, 'Another note.'), stop])
   await clock.advance(15 * SECOND)
-  expect((await thoughts($, 'desktop', 21))[1]).toBe(moved)
+  expect((await thoughts($, 'terminal', 21))[1]).toBe(moved)
 
   // ▲ goes back five rows, to the start of the long line, under the new one.
   await press($, 'newer', 21)
-  expect((await thoughts($, 'desktop', 21))[1]).toBe(`1s · ${words}`)
+  expect((await thoughts($, 'terminal', 21))[1]).toBe(`1s · ${words}`)
 })
 
 test('from WIDE_FROM columns the weather stands in a column of its own, the summary beside it; narrower, one above the other', async ($, on) => {
@@ -1659,15 +1655,14 @@ test('from WIDE_FROM columns the weather stands in a column of its own, the summ
   await $.session.measure(measure(90_000, 45))
   await oneTurn($, steps, clock, 't1', 'fix it')
 
-  // A column short of it: one column, the weather on top.
-  for (const surface of ['desktop', 'terminal'] as const) {
-    expect(await layout($, surface, WIDE_FROM - 1)).toEqual({
-      direction: 'column',
-      weatherWidth: undefined,
-      weather: expect.stringContaining('45% of context · 90k / 200k'),
-      summary: undefined,
-    })
-  }
+  // A column short of it: one column, the weather on top. (The desktop draws
+  // its own layout there: see the desktop tests.)
+  expect(await layout($, 'terminal', WIDE_FROM - 1)).toEqual({
+    direction: 'column',
+    weatherWidth: undefined,
+    weather: expect.stringContaining('45% of context · 90k / 200k'),
+    summary: undefined,
+  })
 
   // From it: the weather on the left, wide enough for its longest line on
   // one row (46 characters: 41 cells of the desktop's narrower face, 47 of
@@ -1689,8 +1684,8 @@ test('from WIDE_FROM columns the weather stands in a column of its own, the summ
   // Nothing is lost on the way: each line one column shows stands beside the
   // weather in the same order, but the limits' bars, which gain their pace.
   const isBar = (text: string) => /^[█░]/.test(text)
-  const narrow = (await allTexts($, 'desktop', WIDE_FROM - 1)).filter(text => !isBar(text))
-  expect(missingFrom(narrow, await allTexts($, 'desktop', WIDE_FROM))).toEqual([])
+  const narrow = (await allTexts($, 'terminal', WIDE_FROM - 1)).filter(text => !isBar(text))
+  expect(missingFrom(narrow, await allTexts($, 'terminal', WIDE_FROM))).toEqual([])
 })
 
 test('beside the weather the rule spans the summary, and a click moves half its taller window', async ($, on) => {
@@ -1756,15 +1751,15 @@ test('from WIDE_FROM columns each limit bar marks the share of its time gone, an
 
   await $.session.start(start)
 
-  for (const surface of ['desktop', 'terminal'] as const) {
-    // A column short of it: the bars as they were, no mark, no pace.
-    expect(await limitsShown($, surface, WIDE_FROM - 1)).toEqual([
-      '5h 11% · reset in 2h 22m',
-      `${bar(2)} [dim]`,
-      'Week 75% · reset in 18h 52m',
-      `${bar(15)} [dim]`,
-    ])
+  // A column short of it: the bars as they were, no mark, no pace.
+  expect(await limitsShown($, 'terminal', WIDE_FROM - 1)).toEqual([
+    '5h 11% · reset in 2h 22m',
+    `${bar(2)} [dim]`,
+    'Week 75% · reset in 18h 52m',
+    `${bar(15)} [dim]`,
+  ])
 
+  for (const surface of ['desktop', 'terminal'] as const) {
     // From it: the cell where the time gone falls is │ (the 11th of the 5-hour
     // bar, the 18th of the week's), and 11% over 53% of the time reads 21% at
     // the reset, 75% over 89% of it 84%.
@@ -1872,16 +1867,16 @@ test('from WIDE_FROM columns what fills the context stands under the auto-compac
   await $.session.start(start)
   await $.session.measure(measure(90_000, 45))
 
-  for (const surface of ['desktop', 'terminal'] as const) {
-    // A column short of it, as it was.
-    expect(await pane($, surface, WIDE_FROM - 1)).toEqual([
-      '☁ Cloudy',
-      '45% of context · 90k / 200k',
-      bar(9),
-      'auto-compact at 92% · 184k',
-      'Last turn ▲ +90k',
-    ])
+  // A column short of it, as it was.
+  expect(await pane($, 'terminal', WIDE_FROM - 1)).toEqual([
+    '☁ Cloudy',
+    '45% of context · 90k / 200k',
+    bar(9),
+    'auto-compact at 92% · 184k',
+    'Last turn ▲ +90k',
+  ])
 
+  for (const surface of ['desktop', 'terminal'] as const) {
     // From it: the rows in use, never the free space, the buffer or the tools
     // loaded on demand; past four, the rest in one (MCP tools and Skills);
     // the rows on the branches of a tree.
@@ -1917,12 +1912,12 @@ test("from WIDE_FROM columns the session cost becomes the session's line: its mo
 
   await $.session.start(start)
 
-  for (const surface of ['desktop', 'terminal'] as const) {
-    // A column short of it, the cost as it was.
-    const narrow = await pane($, surface, WIDE_FROM - 1)
-    expect(narrow.at(-1)).toBe('Session cost $16.17')
-    expect(narrow.some(text => text.includes('Fable'))).toBe(false)
+  // A column short of it, the cost as it was.
+  const narrow = await pane($, 'terminal', WIDE_FROM - 1)
+  expect(narrow.at(-1)).toBe('Session cost $16.17')
+  expect(narrow.some(text => text.includes('Fable'))).toBe(false)
 
+  for (const surface of ['desktop', 'terminal'] as const) {
     // From it, no prompt yet: none said.
     expect((await sessionShown($, surface)).at(-1)).toBe(`Fable 5.2 · ${since} · $16.17`)
   }
@@ -1935,8 +1930,9 @@ test("from WIDE_FROM columns the session cost becomes the session's line: its mo
 
   for (const surface of ['desktop', 'terminal'] as const) {
     expect((await sessionShown($, surface)).slice(-2)).toEqual([`Fable 5.2 · ${since} · 23 turns`, '2 compactions · $16.17'])
-    expect((await pane($, surface, WIDE_FROM - 1)).at(-1)).toBe('Session cost $16.17')
   }
+
+  expect((await pane($, 'terminal', WIDE_FROM - 1)).at(-1)).toBe('Session cost $16.17')
 })
 
 test('a session the mod loads into under way counts its compactions from there, as 1+; after /clear it counts them all', async ($, on) => {
@@ -2205,10 +2201,8 @@ test('under WIDE_FROM columns one line says how many subagents work and finished
   await $.agent.spawn({ prompt: 'One.', description: 'One' } as never)
   await $.agent.spawn({ prompt: 'Two.', description: 'Two' } as never)
   expect(status()).toBe('2 subagents')
-
-  for (const surface of ['desktop', 'terminal'] as const) {
-    expect(await subagentsShown($, surface, WIDE_FROM - 1)).toEqual(['Subagents · 2 at work'])
-  }
+  // (The desktop gives them rows at any width: see the desktop tests.)
+  expect(await subagentsShown($, 'terminal', WIDE_FROM - 1)).toEqual(['Subagents · 2 at work'])
 
   agents[0]!.status = 'completed'
   await $.turn.complete(turnDone({ agentId: 'a1', durationMs: 5_000 }) as never)
@@ -2323,8 +2317,8 @@ test('a recent turn pressed shows its updates beside the weather; a new prompt s
     '1s · Một.',
     'Summary cost $0.004 - Haiku 5.5',
   ])
-  // In one column the current turn shows, as it always has.
-  expect((await thoughts($, 'desktop'))[1]).toBe('1s · Hai.')
+  // In one column the terminal shows the current turn, as it always has.
+  expect((await thoughts($, 'terminal'))[1]).toBe('1s · Hai.')
 
   // The newest pressed again: back to it.
   await press($, 'turn-t2', WIDE_FROM)
@@ -2591,9 +2585,9 @@ test("each block's header reads as one: a step larger than its rows, heavier, mu
   }
   const header = { size: 'heading', weight: 'semibold', dim: true }
 
-  for (const surface of ['desktop', 'terminal'] as const) {
-    expect(await styleOf(surface, WIDE_FROM - 1, 'Usage limits')).toEqual(header)
+  expect(await styleOf('terminal', WIDE_FROM - 1, 'Usage limits')).toEqual(header)
 
+  for (const surface of ['desktop', 'terminal'] as const) {
     for (const text of ['Usage limits', 'Subagents · 1 at work', 'Recent turns']) {
       expect([text, await styleOf(surface, WIDE_FROM, text)]).toEqual([text, header])
     }
@@ -2625,30 +2619,29 @@ test('under WIDE_FROM columns, in a widget and on the status line, nothing of th
   await $.agent.spawn({ prompt: 'Find it.', description: 'Find it' } as never)
   expect((await pane($, 'terminal', WIDE_FROM)).includes('Find it · running · <1m')).toBe(true)
 
-  for (const surface of ['desktop', 'terminal'] as const) {
-    expect(await pane($, surface, WIDE_FROM - 1)).toEqual([
-      '☁ Cloudy',
-      '45% of context · 90k / 200k',
-      bar(9),
-      'auto-compact at 92% · 184k',
-      'Last turn ▼ -160k · 2s · 0 tools · cache 96%',
-      'Usage limits',
-      // Alone in the spend files, the session takes the whole of each.
-      '5h 11% · this session 11% · reset in 2h 22m',
-      'this session 11%',
-      bar(2),
-      '██',
-      '░'.repeat(18),
-      'Week 75% · this session 75% · reset in 18h 52m',
-      'this session 75%',
-      bar(15),
-      '█'.repeat(15),
-      '░'.repeat(5),
-      'Session cost $1.23',
-      'Subagents · 1 at work',
-    ])
-    expect(await turnRows($, surface, WIDE_FROM - 1)).toEqual([])
-  }
+  // (The desktop draws its own layout there: see the desktop tests.)
+  expect(await pane($, 'terminal', WIDE_FROM - 1)).toEqual([
+    '☁ Cloudy',
+    '45% of context · 90k / 200k',
+    bar(9),
+    'auto-compact at 92% · 184k',
+    'Last turn ▼ -160k · 2s · 0 tools · cache 96%',
+    'Usage limits',
+    // Alone in the spend files, the session takes the whole of each.
+    '5h 11% · this session 11% · reset in 2h 22m',
+    'this session 11%',
+    bar(2),
+    '██',
+    '░'.repeat(18),
+    'Week 75% · this session 75% · reset in 18h 52m',
+    'this session 75%',
+    bar(15),
+    '█'.repeat(15),
+    '░'.repeat(5),
+    'Session cost $1.23',
+    'Subagents · 1 at work',
+  ])
+  expect(await turnRows($, 'terminal', WIDE_FROM - 1)).toEqual([])
 
   expect(await allTexts($, 'desktop', undefined, WIDGET)).toEqual(['☁ Cloudy · 45%', '5h 11% · Week 75% · $1.23'])
 
@@ -4367,4 +4360,207 @@ test('a setting changed in /config is stored as the mod will use it; other rows 
     { key: 'theme', value: 'dark' },
     { key: 'other-mod.summaryGapSeconds', value: 1 },
   ])
+})
+
+// The desktop pane under WIDE_FROM columns, `columns` wide: each Text's
+// words, each Svg's alt and markup, and each Button's words, in order.
+const desk = async ($: Test$, columns = 60) => {
+  const ui = await mount($, 'desktop', columns)
+  const texts = (await ui.findAll({ type: 'Text' })).map(one => one.text)
+  const svgs = ((await ui.findAll({ type: 'Svg' })) as unknown as Found[]).map(one => ({
+    alt: String(one.props.alt),
+    source: String(one.props.source),
+  }))
+  const labels = (await ui.findAll({ type: 'Button' })).map(one => one.text)
+  await ui.unmount()
+
+  return { texts, alts: svgs.map(one => one.alt), svgs, labels }
+}
+
+// The person pressing a Button of the desktop pane under WIDE_FROM columns.
+const pressDesk = async ($: Test$, key: string) => {
+  const ui = await mount($, 'desktop', 60)
+  await $.ui.press({ plugin: 'session-weather', key } as never)
+  await ui.unmount()
+}
+
+test('on the desktop under WIDE_FROM columns: the sky and the session, a tile each for the context and the windows, the last turn', async ($, on) => {
+  const { clock } = engine(on, { rateLimits: limits(25), breakdown: BREAKDOWN, cost: 1.234, startedAt: NOW, turns: 3 })
+
+  await $.session.start(start)
+  await clock.settle()
+  await $.session.measure(measure(90_000, 45))
+
+  const { texts, alts } = await desk($)
+  // Alone in the spend files, the session takes the whole of each window.
+  expect(texts.slice(0, texts.indexOf('Thinking'))).toEqual([
+    'Cloudy',
+    `Fable 5.2 · since ${clockOf(NOW)} · 3 turns`,
+    '$1.23',
+    'session',
+    'Context',
+    '45%',
+    '90k / 200k',
+    'compact at 92%',
+    '5-hour',
+    '3%',
+    'session 3%',
+    'reset 3h 26m',
+    'Week',
+    '25%',
+    'session 25%',
+    'reset 2d 5h',
+    'Last turn',
+    '+90k',
+  ])
+  expect(alts.slice(0, 4)).toEqual([
+    'Cloudy',
+    'Context 45% full',
+    '5-hour 3% used, this session 3%',
+    'Week 25% used, this session 25%',
+  ])
+  // No window on pace to run out: no warning.
+  expect(texts.some(text => text.includes('on pace'))).toBe(false)
+
+  // The terminal draws no Svg: it keeps its rows of text.
+  const ui = await mount($, 'terminal', 60)
+  expect(await ui.findAll({ type: 'Svg' })).toEqual([])
+  await ui.unmount()
+})
+
+test('on the desktop a window on pace to run out before it resets gets a warning, and its bar is hatched on to where it would stand', async ($, on) => {
+  // The 5-hour window a tenth of its time gone; the week 60% used half way.
+  engine(on, {
+    rateLimits: [
+      { kind: 'five_hour', percentUsed: 9, resetsAt: at(4 * HOUR + 30 * MINUTE) },
+      { kind: 'seven_day', percentUsed: 60, resetsAt: at(3 * DAY + 12 * HOUR) },
+    ],
+  })
+
+  await $.session.start(start)
+  const { texts, svgs } = await desk($)
+  expect(texts).toContain('Week limit on pace for >100% before it resets in 3d 12h.')
+  expect(svgs.map(one => one.alt)).toContain('Warning')
+
+  // The week's bar hatched past its 60%; the 5-hour window says nothing yet.
+  const sourceOf = (alt: string) => svgs.find(one => one.alt === alt)?.source ?? ''
+  expect(sourceOf('Week 60% used')).toContain('url(#h)')
+  expect(sourceOf('5-hour 9% used')).not.toContain('url(#h)')
+})
+
+test("on the desktop each subagent's row says its state, task and time, its model, effort and context, what it is at, and its tokens", async ($, on) => {
+  const { agents, clock, steps } = engine(on)
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: 'a1' }))
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  agents.push({ id: 'a1', description: 'Find the flaky test', type: 'general-purpose', status: 'running' })
+  await $.agent.spawn({ prompt: 'Find it.', description: 'Find the flaky test' } as never)
+  await runStep($, steps, 'a-turn', [stopWith(requestUsage(1_000, 20_000, 500))], 'a1', 'high')
+  await runStep($, steps, 'a-turn', [stopWith(requestUsage(2_000, 21_500, 800))], 'a1', 'high')
+  await $.tool.call({ tool: 'Read', file_path: '/work/app/src/ProductList.tsx', agentId: 'a1' } as never)
+  await clock.advance(SECOND)
+
+  const card = (texts: string[]) => texts.slice(texts.indexOf('Subagents'), texts.indexOf('Thinking'))
+  const working = await desk($)
+  expect(card(working.texts)).toEqual([
+    'Subagents',
+    ' 1 at work ',
+    'Find the flaky test',
+    'Opus 5.5 · high · ctx 24.3k',
+    '<1m',
+    'Read: ProductList.tsx',
+    '45.8k tokens',
+  ])
+  expect(working.alts).toEqual(expect.arrayContaining(['Subagents', 'running', 'Read', "100% of the subagents' tokens"]))
+
+  // Ended: done, how long it ran, its model and effort; what it was at and
+  // its context go.
+  await clock.advance(2 * MINUTE)
+  agents[0]!.status = 'completed'
+  await $.turn.complete(turnDone({ agentId: 'a1', durationMs: 2 * MINUTE }) as never)
+  expect(card((await desk($)).texts)).toEqual([
+    'Subagents',
+    ' 1 finished ',
+    'Find the flaky test',
+    'Done · Opus 5.5 · high',
+    '2m 1s',
+    '45.8k tokens',
+  ])
+})
+
+test('on the desktop the thinking card shows the newest update whole, the earlier ones a line each, opened and closed by a press', async ($, on) => {
+  const { replies, steps, clock } = engine(on)
+  replies.push(
+    answer('GIST: Một.\nDECISION: Chỉ sửa file A'),
+    answer('GIST: Hai.\nNEXT: Chạy test'),
+    answer('GIST: Ba.\nASSUMPTION: Test đã xanh'),
+  )
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await runStep($, steps, 't1', [thought(0, 'First note.'), stop])
+  await clock.advance(SECOND)
+
+  for (const text of ['Second note.', 'Third note.']) {
+    await runStep($, steps, 't1', [thought(0, text), stop])
+    await clock.advance(15 * SECOND)
+  }
+
+  const thinkingCard = (texts: string[]) => texts.slice(texts.indexOf('Thinking'))
+  const shown = await desk($)
+  expect(thinkingCard(shown.texts)).toEqual([
+    'Thinking',
+    '31s',
+    '31s · Ba.',
+    '31s ·',
+    'Test đã xanh',
+    'Earlier this turn',
+    'Hai.',
+    'Một.',
+    'Summary $0.006 · Haiku 5.5',
+  ])
+  expect(shown.labels).toEqual(['⌃', '⌄', '▸ 16s  Hai.', '▸ 1s  Một.', 'Turn summary off'])
+  expect(shown.alts).toEqual(expect.arrayContaining(['Thinking', 'To check']))
+
+  // Opened: its gist whole, and what comes next.
+  await pressDesk($, 'update-1')
+  const opened = await desk($)
+  expect(thinkingCard(opened.texts).slice(5, 9)).toEqual(['Earlier this turn', 'Hai.', 'Chạy test', 'Một.'])
+  expect(opened.labels).toContain('▾ 16s')
+
+  // Closed again.
+  await pressDesk($, 'update-1')
+  expect((await desk($)).labels).toContain('▸ 16s  Hai.')
+})
+
+test('on the desktop ⌃ and ⌄ step through the recent turns, and say where the turn shown stands among them', async ($, on) => {
+  const { replies, steps, clock } = engine(on)
+  replies.push(answer('GIST: Một.'), answer('GIST: Hai.'))
+
+  await $.session.start(start)
+  await oneTurn($, steps, clock, 't1', 'fix it')
+  await clock.advance(MINUTE)
+  await oneTurn($, steps, clock, 't2', 'and this')
+
+  // The card from its title down to its footer, which it leaves out.
+  const thinkingCard = async () => {
+    const { texts } = await desk($)
+    const top = texts.findIndex(text => text === 'Thinking' || text.startsWith('Turn at '))
+
+    return texts.slice(top, -1)
+  }
+
+  // The current turn, the newest of two.
+  expect(await thinkingCard()).toEqual(['Thinking', '2s', ' Done ', '2 of 2', '1s · Hai.', '1s ·'])
+
+  // ⌃: the one before, said by when it began.
+  await pressDesk($, 'turn-older')
+  expect(await thinkingCard()).toEqual([`Turn at ${clockOf(NOW)}`, '2s', ' Done ', '1 of 2', '1s · Một.', '1s ·'])
+
+  // ⌃ again: there is none older. ⌄: back to the current turn.
+  await pressDesk($, 'turn-older')
+  expect((await thinkingCard())[3]).toBe('1 of 2')
+  await pressDesk($, 'turn-newer')
+  expect(await thinkingCard()).toEqual(['Thinking', '2s', ' Done ', '2 of 2', '1s · Hai.', '1s ·'])
 })

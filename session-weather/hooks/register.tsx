@@ -4,6 +4,7 @@ import type {
   AgentStatus,
   ConfigValue,
   ContextCategory,
+  ElementTable,
   EngineInterface,
   ModelCompleteResult,
   ModelUsage,
@@ -55,6 +56,7 @@ const isSaving = atom({ plugin: 'session-weather', key: 'isSaving' } as const, f
 const isSummaryOn = atom({ plugin: 'session-weather', key: 'isSummaryOn' } as const, true)
 const summaryCost = atom({ plugin: 'session-weather', key: 'summaryCost' } as const, 0)
 const summaryPlace = atom({ plugin: 'session-weather', key: 'summaryPlace' } as const, { line: 0, row: 0 })
+const openUpdates = atom({ plugin: 'session-weather', key: 'openUpdates' } as const, [])
 const isDebugOn = atom({ plugin: 'session-weather', key: 'isDebugOn' } as const, false)
 
 const COMMAND = 'session-weather'
@@ -3162,6 +3164,712 @@ const statusOf = (turn: Thinking | null) => {
   return `Summarizing ${plural(turn.notes.length, 'note')}…`
 }
 
+// ---------------------------------------------------------------------------
+// The desktop pane, laid out as the design "Session Weather layouts" draws
+// it: cards on a fill of their own, its bars and icons drawn as Svg. The
+// terminal draws no Svg and keeps the rows of text the hook draws below; so,
+// for now, does a desktop pane WIDE_FROM columns wide.
+
+// Fills the desktop draws cards with: neutral greys with alpha over the
+// pane's ground, which read on a dark theme and a light one alike, and the
+// warning's red. The mod cannot read the person's theme; text takes the
+// theme's own colors, by name.
+const DESK = {
+  card: 'rgba(128, 128, 128, 0.12)',
+  raised: 'rgba(128, 128, 128, 0.2)',
+  alert: 'rgba(227, 27, 35, 0.14)',
+} as const
+
+// Colors inside an Svg, which the theme never reaches: tones that read on
+// either ground. This session's part takes the design's orange.
+const INK = {
+  track: 'rgba(128, 128, 128, 0.28)',
+  others: 'rgba(128, 128, 128, 0.7)',
+  mine: '#F47920',
+  sky: '#00AEEF',
+  red: '#E5484D',
+  amber: '#F5B731',
+  grey: '#8A8A8A',
+  hatch: 'rgba(227, 27, 35, 0.75)',
+} as const
+
+// The pixels a cell of the desktop pane holds across, about: its code font's
+// advance. A bar is drawn BAR_STRETCH wider than its cells, and the surface
+// squeezes it into its slot, so it fills the slot whatever the advance.
+const CELL_PX = 8
+const BAR_STRETCH = 1.3
+
+const clamp01 = (n: number) => Math.min(1, Math.max(0, n))
+
+// Stroke icons on a 24-unit grid.
+const ICONS = {
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2.5V5M12 19v2.5M4.6 4.6l1.8 1.8M17.6 17.6l1.8 1.8M2.5 12H5M19 12h2.5M4.6 19.4l1.8-1.8M17.6 6.4l1.8-1.8"/>',
+  cloud: '<path d="M7 18.5h10a4.5 4.5 0 0 0 .6-8.96A6 6 0 0 0 6.1 10.6 4 4 0 0 0 7 18.5z"/>',
+  showers: '<path d="M4 14.9A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 2.5 8.2"/><path d="M8 14v6M12 16v6M16 14v6"/>',
+  storm: '<path d="M4 14.9A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 2.5 8.2"/><path d="M13 11l-3 5h4l-3 5"/>',
+  bolt: '<path d="M13 2L4.5 13.5H12L11 22l8.5-11.5H12z"/>',
+  compass: '<circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-2 5-5 2 2-5z"/>',
+  star: '<path d="M12 3.5l2.6 5.3 5.9.9-4.25 4.1 1 5.8L12 16.9l-5.25 2.7 1-5.8L3.5 9.7l5.9-.9z"/>',
+  question: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 0 1 4.9.7c0 1.7-2.4 2.2-2.4 3.8M12 17h.01"/>',
+  arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+  check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+  warning: '<path d="M12 4L2.5 20h19z"/><path d="M12 10v4M12 17h.01"/>',
+  fork: '<circle cx="6" cy="5.5" r="2.5"/><circle cx="18" cy="5.5" r="2.5"/><circle cx="12" cy="18.5" r="2.5"/><path d="M6 8v1.5A2.5 2.5 0 0 0 8.5 12h7A2.5 2.5 0 0 0 18 9.5V8M12 12v4"/>',
+  loader: '<path d="M12 3a9 9 0 1 1-9 9"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  pause: '<path d="M9 6v12M15 6v12"/>',
+  cross: '<path d="M6 6l12 12M18 6L6 18"/>',
+  stop: '<rect x="6.5" y="6.5" width="11" height="11" rx="1.5"/>',
+  file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
+  search: '<circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/>',
+  terminal: '<path d="M4 6l5 6-5 6M12 18h8"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+  tool: '<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3.5 17.5l3 3 5.8-5.8a4 4 0 0 0 5.4-5.4l-2.4 2.4-2.6-.6-.6-2.6z"/>',
+} as const
+
+type IconName = keyof typeof ICONS
+
+// Its strokes about 1.75 pixels at any size.
+const strokeOf = (pixels: number) => ((1.75 * 24) / pixels).toFixed(2)
+
+// An icon `size` pixels square, in `ink`.
+const iconSvg = (name: IconName, ink: string, size: number) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="${ink}" stroke-width="${strokeOf(size)}" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</svg>`
+
+// An icon on a faint square of its own ink: the sky's, a subagent's state.
+const tileSvg = (name: IconName, ink: string, size: number) => {
+  const inner = size * 0.56
+  const at = ((size - inner) / 2).toFixed(2)
+
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">` +
+    `<rect width="${size}" height="${size}" rx="${(size * 0.3).toFixed(1)}" fill="${ink}" fill-opacity="0.16"/>` +
+    `<g transform="translate(${at} ${at}) scale(${(inner / 24).toFixed(3)})" fill="none" stroke="${ink}" stroke-width="${strokeOf(inner)}" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</g></svg>`
+  )
+}
+
+// A run along a bar, from and to as shares of its length (0 to 1), in an ink
+// or, for a projection, the hatch.
+type Stretch = { from: number; to: number; ink: string }
+const HATCH = 'hatch'
+
+// A bar for a slot `cells` wide: its runs over a faint track, rounded at both
+// ends, and, where `mark` is given (0 to 1), a mark standing across it. Drawn
+// BAR_STRETCH wider than the cells and squeezed into the slot, so it is drawn
+// at the height it gives with the source.
+const barSvg = (stretches: readonly Stretch[], cells: number, mark?: number) => {
+  const width = Math.max(40, Math.round(cells * CELL_PX * BAR_STRETCH))
+  const thick = 6
+  const height = mark === undefined ? thick : thick + 6
+  const top = (height - thick) / 2
+  const runs = stretches
+    .filter(one => one.to > one.from)
+    .map(
+      one =>
+        `<rect x="${(one.from * width).toFixed(1)}" y="${top}" width="${((one.to - one.from) * width).toFixed(1)}" height="${thick}" fill="${one.ink === HATCH ? 'url(#h)' : one.ink}"/>`,
+    )
+    .join('')
+  const marked =
+    mark === undefined ? '' : `<rect x="${(clamp01(mark) * width - 1).toFixed(1)}" y="0" width="2" height="${height}" fill="${INK.others}"/>`
+
+  return {
+    height,
+    source:
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">` +
+      `<defs><clipPath id="r"><rect y="${top}" width="${width}" height="${thick}" rx="${thick / 2}"/></clipPath>` +
+      `<pattern id="h" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="2" height="5" fill="${INK.hatch}"/></pattern></defs>` +
+      `<g clip-path="url(#r)"><rect y="${top}" width="${width}" height="${thick}" fill="${INK.track}"/>${runs}</g>${marked}</svg>`,
+  }
+}
+
+// The sky's icon and its ink, by the forecast's label.
+const SKIES: Readonly<Record<string, { icon: IconName; ink: string }>> = {
+  Clear: { icon: 'sun', ink: INK.amber },
+  Cloudy: { icon: 'cloud', ink: INK.grey },
+  Showers: { icon: 'showers', ink: INK.sky },
+  Storm: { icon: 'storm', ink: INK.red },
+  'Compact soon': { icon: 'bolt', ink: INK.red },
+  Compacted: { icon: 'sun', ink: INK.amber },
+}
+
+// A window's name over its tile and in the warning.
+const WINDOW_TITLES: Readonly<Record<string, string>> = { five_hour: '5-hour', seven_day: 'Week' }
+
+// A window as the tiles draw it: `liveWindows`' figures and this session's
+// part of its share, in points.
+type ShownWindow = ReturnType<typeof liveWindows>[number] & { mine: number }
+
+// Where the share used of a window stands at its reset at this pace, 0 to 1
+// of it, from PACE_FROM of its time on; null before.
+const projectedOf = (window: ShownWindow) =>
+  window.elapsed === undefined || window.elapsed < PACE_FROM ? null : window.percent / window.elapsed / 100
+
+// "Week limit on pace for >100% before it resets in 4d 17h.": the first
+// window that at this pace would run out before it resets; null for none.
+const paceAlertOf = (windows: readonly ShownWindow[]) => {
+  const over = windows.find(window => (projectedOf(window) ?? 0) > 1 && window.left !== undefined && !Number.isNaN(window.left))
+
+  return over === undefined
+    ? null
+    : `${WINDOW_TITLES[over.kind] ?? over.name} limit on pace for >100% before it resets in ${formatLeft(over.left ?? 0)}.`
+}
+
+// A window's bar: what the account used beside this session, this session's
+// part, and, where the pace says more by the reset, that much more hatched.
+const limitStretches = (window: ShownWindow): Stretch[] => {
+  const used = clamp01(window.percent / 100)
+  const mine = Math.min(used, Math.max(0, window.mine) / 100)
+  const projected = Math.min(1, projectedOf(window) ?? 0)
+
+  return [
+    { from: 0, to: used - mine, ink: INK.others },
+    { from: used - mine, to: used, ink: INK.mine },
+    ...(projected > used ? [{ from: used, to: projected, ink: HATCH }] : []),
+  ]
+}
+
+// A subagent's state as its row's tile shows it.
+const STATE_TILES: Readonly<Record<string, { icon: IconName; ink: string }>> = {
+  pending: { icon: 'clock', ink: INK.mine },
+  running: { icon: 'loader', ink: INK.mine },
+  waiting: { icon: 'pause', ink: INK.mine },
+  completed: { icon: 'check', ink: INK.grey },
+  failed: { icon: 'cross', ink: INK.red },
+  killed: { icon: 'stop', ink: INK.grey },
+}
+
+// The icon of a tool call as `actionOf` words it: a file read or written, a
+// search, a command, the web, or any other tool.
+const toolIconOf = (action: string): IconName => {
+  const tool = action.split(':')[0] ?? ''
+
+  if (/^(?:Read|Edit|Write|MultiEdit|NotebookEdit)$/.test(tool)) return 'file'
+  if (/^(?:Grep|Glob|ToolSearch|LS)$/.test(tool)) return 'search'
+  if (/^(?:Bash|PowerShell)$/.test(tool)) return 'terminal'
+  if (/^(?:WebFetch|WebSearch)$/.test(tool)) return 'globe'
+
+  return 'tool'
+}
+
+// "Opus 5.5 · high · ctx 38.2k": a desktop row's line under its task, the
+// model of the subagent's latest request, the effort it asked for and,
+// while it works, what its latest request carried; a part not seen left
+// out. Its tokens stand on a line of their own.
+const figureMeta = (figure: SubagentFigures | undefined, isWorking: boolean) =>
+  figure === undefined
+    ? []
+    : [
+        figure.model === undefined ? null : modelNameOf(figure.model),
+        figure.effort ?? null,
+        isWorking && figure.context !== undefined ? `ctx ${formatTokens(figure.context)}` : null,
+      ].filter((part): part is string => part !== null)
+
+// What a subagent's requests read and wrote, its own subagents' included.
+const tokensOf = (figure: SubagentFigures | undefined) => (figure === undefined ? 0 : figure.tokens + (figure.nested ?? 0))
+
+// The earlier updates a turn shows at most, the rest said in one line.
+const MAX_EARLIER = 20
+// The earlier updates kept open at most.
+const MAX_OPEN = 50
+
+// The person opens an earlier update, or closes it again.
+const toggleUpdate = ($: EngineInterface, key: string) =>
+  update($, openUpdates, list => (list.includes(key) ? list.filter(one => one !== key) : [...list, key].slice(-MAX_OPEN)))
+
+// The cells a subagent's lines under its own stand in by: its tile's width
+// and the gap beside it.
+const ROW_INDENT = 5
+
+type DesktopUi = ElementTable<'desktop'>
+
+// The pane on the desktop under WIDE_FROM columns, as the design's narrow
+// layout draws it: the sky, the context and the windows in tiles, a warning
+// where a window is on pace to run out, the last turn, the subagents, the
+// thinking summary and its footer. Each read subscribes the drawing to its
+// value.
+const drawNarrowDesktop = async ($: EngineInterface, ui: DesktopUi, columns: number, rows: number) => {
+  const { Box, Button, Svg, Text } = ui
+  const [at, now, added, readings, parts, compactAt, turn, spent, listed, figured, known, counted, isOn] =
+    await Promise.all([
+      $.clock.now(),
+      read($, reading),
+      read($, delta),
+      read($, limits),
+      read($, shares),
+      read($, autoCompact),
+      read($, lastTurn),
+      read($, cost),
+      read($, subagents),
+      read($, subagentFigures),
+      read($, facts),
+      read($, compactions),
+      read($, isSummaryOn),
+    ])
+  const [turnNow, recent, picked, opened, summarySpent, isDebugging] = isOn
+    ? await Promise.all([
+        read($, thinking),
+        read($, recentTurns),
+        read($, pickedTurn),
+        read($, openUpdates),
+        read($, summaryCost),
+        read($, isDebugOn),
+      ])
+    : ([null, [] as RecentTurn[], null, [] as string[], 0, false] as const)
+  // Its subagents' rows say how long each has run, to the minute.
+  isRoomyDrawn = listed.length > 0
+  isWideDrawn = false
+
+  const windows: ShownWindow[] = liveWindows(readings, at).map(window => ({
+    ...window,
+    mine: window.percent * (parts.find(part => part.kind === window.kind)?.ratio ?? 0),
+  }))
+  const tokens = now?.tokens
+  const percent = now?.percent
+  const sky =
+    tokens !== undefined && percent !== undefined
+      ? forecast(levelOf(tokens, percent, compactAt))
+      : now?.isCompacted === true
+        ? { label: 'Compacted', color: 'warning' }
+        : null
+  const skyLook = sky === null ? undefined : SKIES[sky.label]
+  const sessionLine = sessionParts(known, counted, null, at).join(' · ')
+
+  const skyRow = (
+    <Box flexDirection="row" alignItems="center" gap={1}>
+      {skyLook !== undefined && <Svg source={tileSvg(skyLook.icon, skyLook.ink, 40)} alt={sky?.label ?? 'Sky'} width={40} height={40} />}
+      <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
+        <Text size="heading" weight="semibold" color={sky?.color}>
+          {sky?.label ?? 'Waiting for the first response'}
+        </Text>
+        {sessionLine !== '' && (
+          <Text size="caption" dimColor wrap="truncate">
+            {sessionLine}
+          </Text>
+        )}
+      </Box>
+      {spent !== null && (
+        <Box flexDirection="column" alignItems="flex-end">
+          <Text size="heading" weight="semibold" tabular>
+            {formatCost(spent)}
+          </Text>
+          <Text size="caption" dimColor>
+            session
+          </Text>
+        </Box>
+      )}
+    </Box>
+  )
+
+  // The context and each window in a tile of its own, side by side.
+  const tileCount = 1 + windows.length
+  const tileCells = Math.max(10, Math.floor((columns - (tileCount - 1)) / tileCount))
+  const barCells = tileCells - 2
+  const compactMark =
+    now !== null && compactAt?.isEnabled === true && compactAt.threshold !== undefined && now.window > 0
+      ? compactAt.threshold / now.window
+      : undefined
+  const compactWords =
+    compactAt === null
+      ? null
+      : !compactAt.isEnabled
+        ? 'auto-compact off'
+        : compactAt.threshold === undefined || now === null
+          ? null
+          : `compact at ${Math.round((compactAt.threshold / now.window) * 100)}%`
+  const tile = (label: string, value: string, bar: { source: string; height: number }, alt: string, lines: readonly (string | null)[]) => (
+    <Box flexDirection="column" width={tileCells} paddingX={1} paddingY="xs" backgroundColor={DESK.card}>
+      <Text size="caption" weight="medium" dimColor>
+        {label}
+      </Text>
+      <Text size="title" weight="medium" tabular>
+        {value}
+      </Text>
+      <Svg source={bar.source} alt={alt} height={bar.height} />
+      {lines
+        .filter((line): line is string => line !== null)
+        .map(line => (
+          <Text size="caption" dimColor wrap="truncate">
+            {line}
+          </Text>
+        ))}
+    </Box>
+  )
+  const contextTile =
+    tokens !== undefined && percent !== undefined && now !== null
+      ? tile(
+          'Context',
+          `${percent}%`,
+          barSvg([{ from: 0, to: clamp01(percent / 100), ink: INK.mine }], barCells, compactMark),
+          `Context ${percent}% full`,
+          [`${formatTokens(tokens)} / ${formatTokens(now.window)}`, compactWords],
+        )
+      : tile(
+          'Context',
+          '—',
+          barSvg([], barCells, compactMark),
+          'Context not measured yet',
+          now?.isCompacted === true ? ['compacted', added === null ? null : formatDelta(added)] : ['waiting for a response'],
+        )
+  const tiles = (
+    <Box flexDirection="row" gap={1}>
+      {contextTile}
+      {windows.map(window =>
+        tile(
+          WINDOW_TITLES[window.kind] ?? window.name,
+          `${window.used}%`,
+          barSvg(limitStretches(window), barCells),
+          `${WINDOW_TITLES[window.kind] ?? window.name} ${window.used}% used${window.mine > 0 ? `, this session ${formatPart(window.mine)}` : ''}`,
+          [window.mine > 0 ? `session ${formatPart(window.mine)}` : null, window.left === undefined ? null : `reset ${formatLeft(window.left)}`],
+        ),
+      )}
+    </Box>
+  )
+
+  const alert = paceAlertOf(windows)
+  const alertBox = alert !== null && (
+    <Box flexDirection="row" alignItems="flex-start" gap={1} paddingX={1} paddingY="xs" backgroundColor={DESK.alert}>
+      <Svg source={iconSvg('warning', INK.red, 16)} alt="Warning" width={16} height={16} />
+      <Box flexDirection="column" flexShrink={1} minWidth={0}>
+        <Text size="caption" color="error">
+          {alert}
+        </Text>
+      </Box>
+    </Box>
+  )
+
+  // "Last turn +11k · 1m 36s · 5 tools · cache 100%".
+  const grown = added === null ? null : added < 0 ? `-${formatTokens(-added)}` : `+${formatTokens(added)}`
+  const lastParts = [
+    turn === null ? null : `${formatDuration(turn.durationMs)}${turn.isAborted ? ' (interrupted)' : ''}`,
+    turn === null ? null : plural(turn.tools, 'tool'),
+    turn?.cacheRate === undefined ? null : `cache ${Math.round(turn.cacheRate * 100)}%`,
+  ].filter((part): part is string => part !== null)
+  const lastTurnChip = (grown !== null || lastParts.length > 0) && (
+    <Box flexDirection="row" alignItems="center" gap={1} paddingX={1} paddingY="xs" backgroundColor={DESK.card}>
+      <Text size="caption" weight="medium" dimColor>
+        Last turn
+      </Text>
+      {grown !== null && (
+        <Text size="caption" weight="semibold" tabular>
+          {grown}
+        </Text>
+      )}
+      {lastParts.length > 0 && (
+        <Text size="caption" dimColor wrap="truncate">
+          {lastParts.join(' · ')}
+        </Text>
+      )}
+    </Box>
+  )
+
+  const subagentsCard = listed.length > 0 && subagentsCardOf(ui, listed, figured, at, columns)
+  const thinkingCard = isOn && thinkingCardOf($, ui, { turnNow, recent, picked, opened, known, at, rows, columns })
+
+  // The summary's footer: what it cost, and its switch.
+  const footer = (
+    <Box flexDirection="row" alignItems="center" justifyContent="space-between" gap={1}>
+      <Text size="caption" dimColor wrap="truncate">
+        {isOn
+          ? `Summary ${formatSummaryCost(summarySpent)} · ${HAIKU_NAME}${isDebugging ? ' · debug log on' : ''}`
+          : 'Thinking summary is off'}
+      </Text>
+      <Button
+        key={TOGGLE}
+        variant="secondary"
+        label={isOn ? 'Turn summary off' : 'Turn summary on'}
+        onPress={() => setSummary($, !isOn).catch(() => {})}
+      />
+    </Box>
+  )
+
+  // A body tall enough pins the cards and lets the summary take what is
+  // left, cut at the bottom; a shorter one scrolls whole, as the engine does.
+  const isPinned = isOn && rows >= MIN_PINNED_ROWS
+
+  return (
+    <Box flexDirection="column" gap="sm" {...(isPinned ? { height: rows } : {})}>
+      {skyRow}
+      {tiles}
+      {alertBox}
+      {lastTurnChip}
+      {subagentsCard}
+      {thinkingCard}
+      {footer}
+    </Box>
+  )
+}
+
+// The subagents' card: how many work and finished, then a row for each, five
+// at most and the rest said in one: its state, its task, how long it has run
+// (once ended, how long it ran), its model, effort and context, what it is at,
+// and its tokens, with a bar of its share of all the subagents' tokens.
+const subagentsCardOf = (
+  ui: DesktopUi,
+  listed: readonly Subagent[],
+  figured: readonly SubagentFigures[],
+  at: number,
+  columns: number,
+) => {
+  const { Box, Svg, Text } = ui
+  const working = workingOf(listed)
+  const finished = listed.length - working
+  const total = listed.reduce((sum, one) => sum + tokensOf(figured.find(figure => figure.id === one.id)), 0)
+  const barCells = Math.max(10, columns - ROW_INDENT - 18)
+
+  return (
+    <Box flexDirection="column" gap="xs" paddingX={1} paddingY="sm" backgroundColor={DESK.card}>
+      <Box flexDirection="row" alignItems="center" gap={1}>
+        <Svg source={iconSvg('fork', INK.mine, 18)} alt="Subagents" width={18} height={18} />
+        <Text weight="semibold">Subagents</Text>
+        {working > 0 && (
+          <Text size="caption" weight="medium" color="claude" backgroundColor={DESK.raised}>
+            {` ${working} at work `}
+          </Text>
+        )}
+        {finished > 0 && (
+          <Text size="caption" weight="medium" dimColor backgroundColor={DESK.raised}>
+            {` ${finished} finished `}
+          </Text>
+        )}
+      </Box>
+      {subagentOrder(listed)
+        .slice(0, MAX_SUBAGENT_ROWS)
+        .map(agent => {
+          const isWorking = AT_WORK.has(agent.status)
+          const figure = figured.find(one => one.id === agent.id)
+          const look = STATE_TILES[agent.status] ?? { icon: 'loader' as const, ink: INK.mine }
+          const standing = STANDING.get(agent.status) ?? agent.status
+          const ran =
+            agent.startedAt === undefined
+              ? null
+              : agent.endedAt === undefined
+                ? formatLeft(Math.max(0, at - agent.startedAt))
+                : formatDuration(Math.max(0, agent.endedAt - agent.startedAt))
+          const meta = [
+            ...(agent.status === 'running' ? [] : [`${standing.charAt(0).toUpperCase()}${standing.slice(1)}`]),
+            ...figureMeta(figure, isWorking),
+          ]
+          const action = isWorking ? figure?.action : undefined
+          const tokens = tokensOf(figure)
+          const share = barSvg([{ from: 0, to: total > 0 ? tokens / total : 0, ink: isWorking ? INK.mine : INK.grey }], barCells)
+
+          return (
+            <Box flexDirection="column" paddingX={1} paddingY="xs" {...(isWorking ? { backgroundColor: DESK.raised } : {})}>
+              <Box flexDirection="row" alignItems="flex-start" gap={1}>
+                <Svg source={tileSvg(look.icon, look.ink, 28)} alt={standing} width={28} height={28} />
+                <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
+                  <Text weight="medium" dimColor={!isWorking} wrap="truncate">
+                    {agent.label}
+                  </Text>
+                  {meta.length > 0 && (
+                    <Text size="caption" dimColor wrap="truncate">
+                      {meta.join(' · ')}
+                    </Text>
+                  )}
+                </Box>
+                {ran !== null && (
+                  <Text size="caption" dimColor tabular>
+                    {ran}
+                  </Text>
+                )}
+              </Box>
+              {action !== undefined && (
+                <Box flexDirection="row" alignItems="center" gap={1} paddingLeft={ROW_INDENT}>
+                  <Svg source={iconSvg(toolIconOf(action), INK.grey, 14)} alt={action.split(':')[0] ?? 'Tool'} width={14} height={14} />
+                  <Text size="caption" dimColor wrap="truncate">
+                    {action}
+                  </Text>
+                </Box>
+              )}
+              {tokens > 0 && (
+                <Box flexDirection="row" alignItems="center" gap={1} paddingLeft={ROW_INDENT}>
+                  <Box flexGrow={1} flexShrink={1} minWidth={0}>
+                    <Svg source={share.source} alt={`${Math.round((tokens / Math.max(1, total)) * 100)}% of the subagents' tokens`} height={share.height} />
+                  </Box>
+                  <Text size="caption" dimColor={!isWorking} tabular>
+                    {`${formatTokens(tokens)} tokens`}
+                  </Text>
+                </Box>
+              )}
+            </Box>
+          )
+        })}
+      {listed.length > MAX_SUBAGENT_ROWS && (
+        <Text size="caption" dimColor>
+          and {listed.length - MAX_SUBAGENT_ROWS} more
+        </Text>
+      )}
+    </Box>
+  )
+}
+
+// What the thinking card is drawn from: the current turn, the recent turns
+// and the one picked of them, the earlier updates opened, the session's
+// facts (its count of prompts), the time, and the body's rows and columns.
+type ThinkingView = {
+  turnNow: Thinking | null
+  recent: readonly RecentTurn[]
+  picked: string | null
+  opened: readonly string[]
+  known: Facts | null
+  at: number
+  rows: number
+  columns: number
+}
+
+// The thinking card: the turn shown (the current one, or one picked with ⌃
+// and ⌄ from the recent turns), its newest update or its recap in full with
+// what Claude decided (★), takes as true unchecked (?) and does next (→),
+// then its earlier updates, newest first, one line each, opened by a press.
+const thinkingCardOf = ($: EngineInterface, ui: DesktopUi, view: ThinkingView) => {
+  const { Box, Button, Svg, Text } = ui
+  const { turn: shown, isPast } = shownTurnOf(view.turnNow, view.picked, view.recent)
+  const index = shown === null ? -1 : view.recent.findIndex(one => one.turnId === shown.turnId)
+  const older = index > 0 ? view.recent[index - 1] : undefined
+  const newer = index >= 0 ? view.recent[index + 1] : undefined
+  const ordinal =
+    view.known?.turns !== undefined && view.known.turns > 0 && index >= 0
+      ? view.known.turns - (view.recent.length - 1 - index)
+      : undefined
+  const go = (one: RecentTurn | undefined) =>
+    one === undefined ? Promise.resolve() : pickTurn($, one.turnId === view.turnNow?.turnId ? null : one.turnId)
+
+  const title = shown === null ? 'Thinking' : isPast ? `Turn at ${formatTime(shown.startedAt)}` : 'Thinking'
+  const took =
+    shown === null
+      ? null
+      : isPast
+        ? shown.durationMs === undefined
+          ? null
+          : formatDuration(shown.durationMs)
+        : formatDuration(Math.max(0, shown.durationMs ?? view.at - shown.startedAt))
+  const detail = [ordinal === undefined || ordinal < 1 ? null : `Turn ${ordinal}`, took]
+    .filter((part): part is string => part !== null)
+    .join(' · ')
+  const standing =
+    shown === null
+      ? null
+      : shown.durationMs !== undefined
+        ? shown.isAborted === true
+          ? 'Interrupted'
+          : 'Done'
+        : shown.paused !== undefined
+          ? waitingFor(shown.paused.subagents)
+          : null
+  const status = isPast ? (shown?.entries.length === 0 ? 'No updates on this turn.' : null) : statusOf(view.turnNow)
+  const entries = shown?.entries ?? []
+  const newest = entries.at(-1)
+  // The earlier updates newest first, each with its place in the turn, the
+  // first 0: its Button's key, which an update added after it leaves alone.
+  const earlier = entries
+    .slice(0, -1)
+    .map((entry, place) => ({ entry, place }))
+    .reverse()
+
+  // A decision, an assumption, the next step: its icon, then its words.
+  const mark = (icon: IconName, ink: string, text: string, color?: string) => (
+    <Box flexDirection="row" alignItems="flex-start" gap={1}>
+      <Svg source={iconSvg(icon, ink, 14)} alt={icon === 'star' ? 'Decided' : icon === 'question' ? 'To check' : 'Next'} width={14} height={14} />
+      <Box flexDirection="column" flexShrink={1} minWidth={0}>
+        <Text {...(color === undefined ? { dimColor: true } : { color })}>{text}</Text>
+      </Box>
+    </Box>
+  )
+  const marksOf = (entry: ThinkingEntry) => [
+    ...entry.decisions.map(text => mark('star', INK.mine, text, 'claude')),
+    ...entry.assumptions.map(text => mark('question', INK.sky, text, 'suggestion')),
+    ...(entry.next === undefined ? [] : [mark('arrow', INK.grey, entry.next)]),
+  ]
+  const isPinned = view.rows >= MIN_PINNED_ROWS
+
+  return (
+    <Box
+      flexDirection="column"
+      gap="sm"
+      paddingX={1}
+      paddingY="sm"
+      backgroundColor={DESK.card}
+      {...(isPinned ? { flexGrow: 1, flexShrink: 1, overflow: 'hidden' as const } : {})}
+    >
+      <Box flexDirection="row" alignItems="center" gap={1}>
+        <Svg source={iconSvg('compass', INK.mine, 18)} alt="Thinking" width={18} height={18} />
+        <Text weight="semibold">{title}</Text>
+        {detail !== '' && (
+          <Text size="caption" dimColor tabular>
+            {detail}
+          </Text>
+        )}
+        {standing !== null && (
+          <Text size="caption" weight="medium" dimColor backgroundColor={DESK.raised}>
+            {` ${standing} `}
+          </Text>
+        )}
+        {shown?.isSummarizing === true && (
+          <Text size="caption" dimColor>
+            summarizing…
+          </Text>
+        )}
+        <Box flexGrow={1} />
+        {index >= 0 && view.recent.length > 1 && (
+          <Text size="caption" dimColor tabular>
+            {`${index + 1} of ${view.recent.length}`}
+          </Text>
+        )}
+        <Button key="turn-older" plain dimColor={older === undefined} label="⌃" onPress={() => go(older).catch(() => {})} />
+        <Button key="turn-newer" plain dimColor={newer === undefined} label="⌄" onPress={() => go(newer).catch(() => {})} />
+      </Box>
+      {status !== null && (
+        <Text size="caption" dimColor>
+          {status}
+        </Text>
+      )}
+      {shown !== null && newest !== undefined && (
+        <Box flexDirection="column" gap="xs">
+          <Text>
+            <Text weight="semibold">{newest.isRecap === true ? 'Recap.' : `${stampOf(shown, newest)} ·`}</Text> {newest.gist}
+          </Text>
+          {marksOf(newest)}
+        </Box>
+      )}
+      {shown !== null && earlier.length > 0 && (
+        <Box flexDirection="column">
+          <Text size="caption" weight="medium" dimColor>
+            Earlier this turn
+          </Text>
+          {earlier.slice(0, MAX_EARLIER).map(({ entry, place }) => {
+            const key = `${shown.turnId}:${entry.at}`
+            const isOpen = view.opened.includes(key)
+
+            return (
+              <Box flexDirection="column">
+                {isOpen ? (
+                  <Button key={`update-${place}`} plain label={`▾ ${stampOf(shown, entry)}`} onPress={() => toggleUpdate($, key).catch(() => {})} />
+                ) : (
+                  <Button key={`update-${place}`} plain dimColor onPress={() => toggleUpdate($, key).catch(() => {})}>
+                    {`▸ ${stampOf(shown, entry)}  `}
+                    <Text wrap="truncate">{entry.gist}</Text>
+                  </Button>
+                )}
+                {isOpen && (
+                  <Box flexDirection="column" gap="xs" paddingLeft={2}>
+                    <Text>{entry.gist}</Text>
+                    {marksOf(entry)}
+                  </Box>
+                )}
+              </Box>
+            )
+          })}
+          {earlier.length > MAX_EARLIER && (
+            <Text size="caption" dimColor>
+              and {earlier.length - MAX_EARLIER} earlier
+            </Text>
+          )}
+        </Box>
+      )}
+    </Box>
+  )
+}
+
 export const register: Register = (on, options) => {
   // A change in `/config` reloads the mod, and this runs again with it.
   useSettings(options)
@@ -3375,8 +4083,11 @@ export const register: Register = (on, options) => {
         // show, whichever turn was picked before.
         await openRecord($, e.turnId, startedAt, fill)
         await update($, pickedTurn, () => null)
-        // The subagents the prompt before saw end go; those at work stay.
+        // The subagents the prompt before saw end go; those at work stay. The
+        // earlier updates opened were the turn before's.
         await forgetEnded($)
+
+        if ((await read($, openUpdates)).length > 0) await update($, openUpdates, () => [])
       }
 
       if (isOn) {
@@ -3693,6 +4404,7 @@ export const register: Register = (on, options) => {
       figuresTimer = null
       await update($, recentTurns, () => [])
       await update($, pickedTurn, () => null)
+      await update($, openUpdates, () => [])
       await update($, isSaving, () => false)
       await showStatus($).catch(() => {})
       await toNewest($)
@@ -3765,7 +4477,8 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Button, Text } = $.ui.resolve(e)
+    const ui = $.ui.resolve(e)
+    const { Box, Button, Text } = ui
     // Drawn, the pane says all the status line would: an unplaced pane is
     // drawn first once the terminal widens to place it, and the line goes.
     void hideStatus($).catch(() => {})
@@ -3809,6 +4522,13 @@ export const register: Register = (on, options) => {
           )}
         </Box>
       )
+    }
+
+    // On the desktop under WIDE_FROM columns, the design's narrow layout. The
+    // terminal draws no Svg (its table has one that draws nothing), and keeps
+    // the rows of text below.
+    if (e.surface !== 'terminal' && 'Svg' in ui && e.props.bodyColumns < WIDE_FROM) {
+      return drawNarrowDesktop($, ui as DesktopUi, e.props.bodyColumns, e.props.scroll.bodyRows)
     }
 
     // Each read subscribes the drawing to its value; they go all at once.

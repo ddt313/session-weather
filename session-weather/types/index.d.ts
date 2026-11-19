@@ -200,6 +200,9 @@ declare module 'claude-code' {
       // Where the updates' window stands, the newest at 0: the line on top
       // (lines scrolled past), and how many rows of it are above the window.
       summaryPlace: { line: number; row: number }
+      // The earlier updates the desktop pane shows opened, each as
+      // `<turnId>:<when it was written>`; the next prompt starts it over.
+      openUpdates: string[]
       // Whether each Haiku request of the summary, and its reply, goes to the
       // debug log; the person turns it on and off.
       isDebugOn: boolean
