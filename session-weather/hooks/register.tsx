@@ -3786,7 +3786,7 @@ type ThinkingView = {
 // The thinking card: the turn's updates as the terminal lists them, newest
 // first, each its gist then what Claude decided (★), takes as true
 // unchecked (?) and does next (→), a rule between two. Where the body is
-// tall enough to pin it, they scroll in the card, ⌃ and ⌄ moving them about
+// tall enough to pin it, they scroll in the card, ▲ and ▼ moving them about
 // half the window a press, within the turn shown.
 const thinkingCardOf = ($: EngineInterface, ui: DesktopUi, view: ThinkingView) => {
   const { Box, Button, Svg, Text } = ui
@@ -3853,10 +3853,10 @@ const thinkingCardOf = ($: EngineInterface, ui: DesktopUi, view: ThinkingView) =
         )}
         <Box flexGrow={1} />
         {canScroll && (
-          <Button key="newer" plain dimColor label="⌃" onPress={() => moveUpdates($, -step, width, view.isWide).catch(() => {})} />
+          <Button key="newer" plain dimColor label="▲" onPress={() => moveUpdates($, -step, width, view.isWide).catch(() => {})} />
         )}
         {canScroll && (
-          <Button key="older" plain dimColor label="⌄" onPress={() => moveUpdates($, step, width, view.isWide).catch(() => {})} />
+          <Button key="older" plain dimColor label="▼" onPress={() => moveUpdates($, step, width, view.isWide).catch(() => {})} />
         )}
       </Box>
       {status !== null && (

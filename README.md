@@ -80,7 +80,7 @@ section tells. Under 90 columns, from the top:
   between two; each gist led by its time (or `Recap.`) in a heavier face,
   and what Claude decided, takes as true unchecked and does next each by
   its icon (a star, a question mark, an arrow), in orange, blue and dim.
-  ⌃ and ⌄ scroll them about half the window a press, within the turn; they
+  ▲ and ▼ scroll them about half the window a press, within the turn; they
   never go to another turn.
 - Under it, what the summary cost and its switch.
 
@@ -101,7 +101,7 @@ From 90 columns, with the summary on:
     calls; with **☐ Persist** above. Press a turn to show its updates on
     the right, marked ▸; the next prompt shows its own again.
 - On the right: the subagents, with all their tokens on the card's top line,
-  and the thinking summary, showing the turn picked, ⌃ and ⌄ scrolling it.
+  and the thinking summary, showing the turn picked, ▲ and ▼ scrolling it.
 - With the summary off, the cards stand in one column.
 
 Colors follow the theme where text takes them; the fills, the bars and the

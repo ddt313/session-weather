@@ -4537,10 +4537,10 @@ test("on the desktop under WIDE_FROM columns the thinking card lists the turn's 
   ])
   expect(alts).toEqual(expect.arrayContaining(['Thinking', 'Decided', 'To check', 'Next']))
   // Pinned in a body of 30 rows: the arrows to scroll it.
-  expect(labels).toEqual(['⌃', '⌄', 'Turn summary off'])
+  expect(labels).toEqual(['▲', '▼', 'Turn summary off'])
 })
 
-test("on the desktop ⌃ and ⌄ scroll the turn's updates about half the window a press, never to another turn", async ($, on) => {
+test("on the desktop ▲ and ▼ scroll the turn's updates about half the window a press, never to another turn", async ($, on) => {
   const { replies, steps, clock } = engine(on)
   await threeUpdates($, replies, steps, clock)
   const card = async () => {
@@ -4554,10 +4554,10 @@ test("on the desktop ⌃ and ⌄ scroll the turn's updates about half the window
   await pressDesk($, 'older')
   expect(await card()).toEqual({
     lines: ['Chỉ sửa file A'],
-    labels: ['⌃', '⌄', '↑ 3 newer updates', 'Turn summary off'],
+    labels: ['▲', '▼', '↑ 3 newer updates', 'Turn summary off'],
   })
 
-  // ⌃ goes back up; so does the newer updates' button, at once.
+  // ▲ goes back up; so does the newer updates' button, at once.
   await pressDesk($, 'newer')
   expect((await card()).lines[0]).toBe('31s · Ba.')
   await pressDesk($, 'older')
@@ -4639,7 +4639,7 @@ test('on the desktop from WIDE_FROM columns: the sky, the cost across the top; t
   expect(labels).toEqual(['☐ Persist', `▸ ${clockOf(NOW)}  2s`, 'Turn summary off'])
 })
 
-test('on the desktop from WIDE_FROM columns a recent turn pressed shows beside them, and ⌃ ⌄ scroll the turn shown', async ($, on) => {
+test('on the desktop from WIDE_FROM columns a recent turn pressed shows beside them, and ▲ ▼ scroll the turn shown', async ($, on) => {
   const { replies, steps, clock } = engine(on)
   await threeUpdates($, replies, steps, clock)
   await $.turn.complete(turnDone({ durationMs: 31_000 }) as never)
@@ -4688,15 +4688,15 @@ test('on the desktop from WIDE_FROM columns a recent turn pressed shows beside t
       '1s ·',
       'Chỉ sửa file A',
     ],
-    labels: ['☐ Persist', `${second}  2s`, `▸ ${first}  31s`, '⌃', '⌄', 'Turn summary off'],
+    labels: ['☐ Persist', `${second}  2s`, `▸ ${first}  31s`, '▲', '▼', 'Turn summary off'],
   })
 
-  // ⌄ moves twelve rows, past the last of the seven: the four gists above.
+  // ▼ moves twelve rows, past the last of the seven: the four gists above.
   await pressDesk($, 'older', WIDE_FROM)
   expect(await card()).toEqual({
     title: `Turn at ${first}`,
     lines: ['Chỉ sửa file A'],
-    labels: ['☐ Persist', `${second}  2s`, `▸ ${first}  31s`, '⌃', '⌄', '↑ 4 newer updates', 'Turn summary off'],
+    labels: ['☐ Persist', `${second}  2s`, `▸ ${first}  31s`, '▲', '▼', '↑ 4 newer updates', 'Turn summary off'],
   })
   await pressDesk($, 'newer', WIDE_FROM)
   expect((await card()).lines[0]).toBe('Recap. Claude đang sửa lỗi.')
