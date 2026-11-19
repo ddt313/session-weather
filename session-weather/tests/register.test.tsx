@@ -4489,16 +4489,21 @@ test("on the desktop each subagent's row says its state, task and time, its mode
   ])
 })
 
-test('on the desktop the thinking card shows the newest update whole, the earlier ones a line each, opened and closed by a press', async ($, on) => {
-  const { replies, steps, clock } = engine(on)
+// A turn of three updates, written at 1s, 16s and 31s: each a gist and one
+// more line, a decision, the next step, an assumption.
+const threeUpdates = async (
+  $: Parameters<typeof runStep>[0] & { session: { start: (e: never) => Promise<unknown> }; turn: { start: (e: never) => Promise<unknown> } },
+  replies: unknown[],
+  steps: unknown[][],
+  clock: { advance: (ms: number) => Promise<void> },
+) => {
   replies.push(
     answer('GIST: Một.\nDECISION: Chỉ sửa file A'),
     answer('GIST: Hai.\nNEXT: Chạy test'),
     answer('GIST: Ba.\nASSUMPTION: Test đã xanh'),
   )
-
-  await $.session.start(start)
-  await $.turn.start({ text: 'fix it', turnId: 't1' })
+  await $.session.start(start as never)
+  await $.turn.start({ text: 'fix it', turnId: 't1' } as never)
   await runStep($, steps, 't1', [thought(0, 'First note.'), stop])
   await clock.advance(SECOND)
 
@@ -4506,61 +4511,66 @@ test('on the desktop the thinking card shows the newest update whole, the earlie
     await runStep($, steps, 't1', [thought(0, text), stop])
     await clock.advance(15 * SECOND)
   }
+}
 
-  const thinkingCard = (texts: string[]) => texts.slice(texts.indexOf('Thinking'))
-  const shown = await desk($)
-  expect(thinkingCard(shown.texts)).toEqual([
+// The rule between two updates in the card of a desktop pane 60 columns
+// wide: across the card's text, a cell in from each side.
+const DESK_RULE = '─'.repeat(60 - 2 - 1)
+
+test("on the desktop under WIDE_FROM columns the thinking card lists the turn's updates as the terminal does, newest first, a rule between two", async ($, on) => {
+  const { replies, steps, clock } = engine(on)
+  await threeUpdates($, replies, steps, clock)
+
+  const { texts, labels, alts } = await desk($)
+  expect(texts.slice(texts.indexOf('Thinking'))).toEqual([
     'Thinking',
     '31s',
     '31s · Ba.',
-    '31s ·',
-    'Test đã xanh',
-    'Earlier this turn',
-    'Hai.',
-    'Một.',
+    '? Test đã xanh',
+    DESK_RULE,
+    '16s · Hai.',
+    '→ Chạy test',
+    DESK_RULE,
+    '1s · Một.',
+    '★ Chỉ sửa file A',
     'Summary $0.006 · Haiku 5.5',
   ])
-  expect(shown.labels).toEqual(['⌃', '⌄', '▸ 16s  Hai.', '▸ 1s  Một.', 'Turn summary off'])
-  expect(shown.alts).toEqual(expect.arrayContaining(['Thinking', 'To check']))
-
-  // Opened: its gist whole, and what comes next.
-  await pressDesk($, 'update-1')
-  const opened = await desk($)
-  expect(thinkingCard(opened.texts).slice(5, 9)).toEqual(['Earlier this turn', 'Hai.', 'Chạy test', 'Một.'])
-  expect(opened.labels).toContain('▾ 16s')
-
-  // Closed again.
-  await pressDesk($, 'update-1')
-  expect((await desk($)).labels).toContain('▸ 16s  Hai.')
+  expect(alts).toContain('Thinking')
+  // Pinned in a body of 30 rows: the arrows to scroll it.
+  expect(labels).toEqual(['⌃', '⌄', 'Turn summary off'])
 })
 
-test('on the desktop ⌃ and ⌄ step through the recent turns, and say where the turn shown stands among them', async ($, on) => {
+test("on the desktop ⌃ and ⌄ scroll the turn's updates about half the window a press, never to another turn", async ($, on) => {
   const { replies, steps, clock } = engine(on)
-  replies.push(answer('GIST: Một.'), answer('GIST: Hai.'))
+  await threeUpdates($, replies, steps, clock)
+  const card = async () => {
+    const { texts, labels } = await desk($)
 
-  await $.session.start(start)
-  await oneTurn($, steps, clock, 't1', 'fix it')
-  await clock.advance(MINUTE)
-  await oneTurn($, steps, clock, 't2', 'and this')
-
-  // The card from its title down to its footer, which it leaves out.
-  const thinkingCard = async () => {
-    const { texts } = await desk($)
-    const top = texts.findIndex(text => text === 'Thinking' || text.startsWith('Turn at '))
-
-    return texts.slice(top, -1)
+    return { lines: texts.slice(texts.indexOf('Thinking') + 2, -1), labels }
   }
 
-  // The current turn, the newest of two.
-  expect(await thinkingCard()).toEqual(['Thinking', '2s', ' Done ', '2 of 2', '1s · Hai.', '1s ·'])
+  // Six rows of lines, a press five of them: the last line on top, the three
+  // updates' gists above the window.
+  await pressDesk($, 'older')
+  expect(await card()).toEqual({
+    lines: ['★ Chỉ sửa file A'],
+    labels: ['⌃', '⌄', '↑ 3 newer updates', 'Turn summary off'],
+  })
 
-  // ⌃: the one before, said by when it began.
-  await pressDesk($, 'turn-older')
-  expect(await thinkingCard()).toEqual([`Turn at ${clockOf(NOW)}`, '2s', ' Done ', '1 of 2', '1s · Một.', '1s ·'])
+  // ⌃ goes back up; so does the newer updates' button, at once.
+  await pressDesk($, 'newer')
+  expect((await card()).lines[0]).toBe('31s · Ba.')
+  await pressDesk($, 'older')
+  await pressDesk($, 'newest')
+  expect((await card()).lines[0]).toBe('31s · Ba.')
 
-  // ⌃ again: there is none older. ⌄: back to the current turn.
-  await pressDesk($, 'turn-older')
-  expect((await thinkingCard())[3]).toBe('1 of 2')
-  await pressDesk($, 'turn-newer')
-  expect(await thinkingCard()).toEqual(['Thinking', '2s', ' Done ', '2 of 2', '1s · Hai.', '1s ·'])
+  // A second turn: the card shows it alone, nothing of the turn before; one
+  // row of lines has nothing to scroll, and no arrows.
+  await $.turn.complete(turnDone({ durationMs: 31_000 }) as never)
+  await clock.settle()
+  await oneTurn($, steps, clock, 't2', 'and this')
+  const second = await card()
+  expect(second.lines.at(-1)).toBe('1s · Claude đang sửa lỗi.')
+  expect(second.lines.some(line => line.includes('Ba.'))).toBe(false)
+  expect(second.labels).toEqual(['Turn summary off'])
 })

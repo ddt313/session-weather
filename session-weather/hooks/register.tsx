@@ -56,7 +56,6 @@ const isSaving = atom({ plugin: 'session-weather', key: 'isSaving' } as const, f
 const isSummaryOn = atom({ plugin: 'session-weather', key: 'isSummaryOn' } as const, true)
 const summaryCost = atom({ plugin: 'session-weather', key: 'summaryCost' } as const, 0)
 const summaryPlace = atom({ plugin: 'session-weather', key: 'summaryPlace' } as const, { line: 0, row: 0 })
-const openUpdates = atom({ plugin: 'session-weather', key: 'openUpdates' } as const, [])
 const isDebugOn = atom({ plugin: 'session-weather', key: 'isDebugOn' } as const, false)
 
 const COMMAND = 'session-weather'
@@ -888,6 +887,45 @@ const toNewest = async ($: EngineInterface) => {
   const place = await read($, summaryPlace)
 
   if (place.line !== 0 || place.row !== 0) await update($, summaryPlace, () => ({ line: 0, row: 0 }))
+}
+
+// The updates' window over `turn`, its lines measured `width` characters a
+// row, standing at `place`: the lines showing, the first from the row on top
+// and, where the window is pinned, a body's `rows` of them at most (else
+// all), kept together by update, each opening with its gist; how many
+// updates' gists are scrolled past, above the window; and whether there is
+// anything to scroll. The terminal's pane and the desktop's card draw it.
+const windowOf = (
+  turn: Thinking | null,
+  width: number,
+  place: { line: number; row: number },
+  isPinned: boolean,
+  rows: number,
+) => {
+  const { lines, ...laid } = layUpdates(turn, width, place)
+  const top = isPinned ? laid.top : 0
+  const topLine = laid.rows[top]?.line ?? 0
+  const topChar = laid.rows[top]?.start ?? 0
+  const newer = laid.starts.filter((first, at) => lines[at]?.kind === 'gist' && first < top).length
+  const shown: UpdateLine[][] = []
+  let budget = isPinned ? rows : Number.POSITIVE_INFINITY
+
+  for (let at = topLine; at < lines.length && budget > 0; at += 1) {
+    const one = lines[at]
+
+    if (one === undefined) break
+
+    const text = at === topLine && topChar > 0 ? `… ${shownText(one).slice(topChar)}` : shownText(one)
+    const group = shown.at(-1)
+    const item = { kind: one.kind, text }
+
+    if (group === undefined || one.kind === 'gist') shown.push([item])
+    else group.push(item)
+
+    budget -= (laid.starts[at + 1] ?? laid.rows.length) - (laid.starts[at] ?? 0)
+  }
+
+  return { shown, newer, canScroll: isPinned && laid.rows.length > 1 }
 }
 
 // Claude Haiku 5.5 in US dollars per million tokens, for prompts of 100K
@@ -3367,15 +3405,6 @@ const figureMeta = (figure: SubagentFigures | undefined, isWorking: boolean) =>
 // What a subagent's requests read and wrote, its own subagents' included.
 const tokensOf = (figure: SubagentFigures | undefined) => (figure === undefined ? 0 : figure.tokens + (figure.nested ?? 0))
 
-// The earlier updates a turn shows at most, the rest said in one line.
-const MAX_EARLIER = 20
-// The earlier updates kept open at most.
-const MAX_OPEN = 50
-
-// The person opens an earlier update, or closes it again.
-const toggleUpdate = ($: EngineInterface, key: string) =>
-  update($, openUpdates, list => (list.includes(key) ? list.filter(one => one !== key) : [...list, key].slice(-MAX_OPEN)))
-
 // The cells a subagent's lines under its own stand in by: its tile's width
 // and the gap beside it.
 const ROW_INDENT = 5
@@ -3405,16 +3434,10 @@ const drawNarrowDesktop = async ($: EngineInterface, ui: DesktopUi, columns: num
       read($, compactions),
       read($, isSummaryOn),
     ])
-  const [turnNow, recent, picked, opened, summarySpent, isDebugging] = isOn
-    ? await Promise.all([
-        read($, thinking),
-        read($, recentTurns),
-        read($, pickedTurn),
-        read($, openUpdates),
-        read($, summaryCost),
-        read($, isDebugOn),
-      ])
-    : ([null, [] as RecentTurn[], null, [] as string[], 0, false] as const)
+  // The summary reads nothing while it is off: its updates redraw nothing.
+  const [turnNow, place, summarySpent, isDebugging] = isOn
+    ? await Promise.all([read($, thinking), read($, summaryPlace), read($, summaryCost), read($, isDebugOn)])
+    : ([null, { line: 0, row: 0 }, 0, false] as const)
   // Its subagents' rows say how long each has run, to the minute.
   isRoomyDrawn = listed.length > 0
   isWideDrawn = false
@@ -3563,7 +3586,21 @@ const drawNarrowDesktop = async ($: EngineInterface, ui: DesktopUi, columns: num
   )
 
   const subagentsCard = listed.length > 0 && subagentsCardOf(ui, listed, figured, at, columns)
-  const thinkingCard = isOn && thinkingCardOf($, ui, { turnNow, recent, picked, opened, known, at, rows, columns })
+  // Under WIDE_FROM columns the card shows the current turn, as the
+  // terminal's one column does; its text stands a cell in from each side.
+  const thinkingCard =
+    isOn &&
+    thinkingCardOf($, ui, {
+      turnNow,
+      shown: turnNow,
+      isPast: false,
+      place,
+      at,
+      rows,
+      cardColumns: columns - 2,
+      isWide: false,
+      overhead: PANE_OVERHEAD,
+    })
 
   // The summary's footer: what it cost, and its switch.
   const footer = (
@@ -3703,38 +3740,40 @@ const subagentsCardOf = (
   )
 }
 
-// What the thinking card is drawn from: the current turn, the recent turns
-// and the one picked of them, the earlier updates opened, the session's
-// facts (its count of prompts), the time, and the body's rows and columns.
+// What the thinking card is drawn from: the current turn (for what its
+// status line says), the turn the card shows (the current one, or beside the
+// weather one picked from the recent turns) and whether it is a past one,
+// where the updates' window stands, the time, the body's rows, the columns
+// the card's text has, whether it stands beside the weather, and the rows
+// above and below the window, about.
 type ThinkingView = {
   turnNow: Thinking | null
-  recent: readonly RecentTurn[]
-  picked: string | null
-  opened: readonly string[]
-  known: Facts | null
+  shown: Thinking | null
+  isPast: boolean
+  place: { line: number; row: number }
   at: number
   rows: number
-  columns: number
+  cardColumns: number
+  isWide: boolean
+  overhead: number
 }
 
-// The thinking card: the turn shown (the current one, or one picked with ⌃
-// and ⌄ from the recent turns), its newest update or its recap in full with
-// what Claude decided (★), takes as true unchecked (?) and does next (→),
-// then its earlier updates, newest first, one line each, opened by a press.
+// The thinking card: the turn's updates as the terminal lists them, newest
+// first, each its gist then what Claude decided (★), takes as true
+// unchecked (?) and does next (→), a rule between two. Where the body is
+// tall enough to pin it, they scroll in the card, ⌃ and ⌄ moving them about
+// half the window a press, within the turn shown.
 const thinkingCardOf = ($: EngineInterface, ui: DesktopUi, view: ThinkingView) => {
   const { Box, Button, Svg, Text } = ui
-  const { turn: shown, isPast } = shownTurnOf(view.turnNow, view.picked, view.recent)
-  const index = shown === null ? -1 : view.recent.findIndex(one => one.turnId === shown.turnId)
-  const older = index > 0 ? view.recent[index - 1] : undefined
-  const newer = index >= 0 ? view.recent[index + 1] : undefined
-  const ordinal =
-    view.known?.turns !== undefined && view.known.turns > 0 && index >= 0
-      ? view.known.turns - (view.recent.length - 1 - index)
-      : undefined
-  const go = (one: RecentTurn | undefined) =>
-    one === undefined ? Promise.resolve() : pickTurn($, one.turnId === view.turnNow?.turnId ? null : one.turnId)
+  const { shown, isPast } = view
+  const isPinned = view.rows >= MIN_PINNED_ROWS
+  // The lines measured at the card's width, the measure the arrows step
+  // through.
+  const width = widthOf(view.cardColumns, 'desktop')
+  const { shown: groups, newer, canScroll } = windowOf(shown, width, view.place, isPinned, view.rows)
+  const step = pageStep(view.rows, view.overhead)
 
-  const title = shown === null ? 'Thinking' : isPast ? `Turn at ${formatTime(shown.startedAt)}` : 'Thinking'
+  const title = shown !== null && isPast ? `Turn at ${formatTime(shown.startedAt)}` : 'Thinking'
   const took =
     shown === null
       ? null
@@ -3743,9 +3782,6 @@ const thinkingCardOf = ($: EngineInterface, ui: DesktopUi, view: ThinkingView) =
           ? null
           : formatDuration(shown.durationMs)
         : formatDuration(Math.max(0, shown.durationMs ?? view.at - shown.startedAt))
-  const detail = [ordinal === undefined || ordinal < 1 ? null : `Turn ${ordinal}`, took]
-    .filter((part): part is string => part !== null)
-    .join(' · ')
   const standing =
     shown === null
       ? null
@@ -3757,35 +3793,16 @@ const thinkingCardOf = ($: EngineInterface, ui: DesktopUi, view: ThinkingView) =
           ? waitingFor(shown.paused.subagents)
           : null
   const status = isPast ? (shown?.entries.length === 0 ? 'No updates on this turn.' : null) : statusOf(view.turnNow)
-  const entries = shown?.entries ?? []
-  const newest = entries.at(-1)
-  // The earlier updates newest first, each with its place in the turn, the
-  // first 0: its Button's key, which an update added after it leaves alone.
-  const earlier = entries
-    .slice(0, -1)
-    .map((entry, place) => ({ entry, place }))
-    .reverse()
-
-  // A decision, an assumption, the next step: its icon, then its words.
-  const mark = (icon: IconName, ink: string, text: string, color?: string) => (
-    <Box flexDirection="row" alignItems="flex-start" gap={1}>
-      <Svg source={iconSvg(icon, ink, 14)} alt={icon === 'star' ? 'Decided' : icon === 'question' ? 'To check' : 'Next'} width={14} height={14} />
-      <Box flexDirection="column" flexShrink={1} minWidth={0}>
-        <Text {...(color === undefined ? { dimColor: true } : { color })}>{text}</Text>
-      </Box>
-    </Box>
+  const rule = (
+    <Text dimColor mono wrap="truncate">
+      {'─'.repeat(Math.max(1, view.cardColumns - 1))}
+    </Text>
   )
-  const marksOf = (entry: ThinkingEntry) => [
-    ...entry.decisions.map(text => mark('star', INK.mine, text, 'claude')),
-    ...entry.assumptions.map(text => mark('question', INK.sky, text, 'suggestion')),
-    ...(entry.next === undefined ? [] : [mark('arrow', INK.grey, entry.next)]),
-  ]
-  const isPinned = view.rows >= MIN_PINNED_ROWS
 
   return (
     <Box
       flexDirection="column"
-      gap="sm"
+      gap="xs"
       paddingX={1}
       paddingY="sm"
       backgroundColor={DESK.card}
@@ -3794,9 +3811,9 @@ const thinkingCardOf = ($: EngineInterface, ui: DesktopUi, view: ThinkingView) =
       <Box flexDirection="row" alignItems="center" gap={1}>
         <Svg source={iconSvg('compass', INK.mine, 18)} alt="Thinking" width={18} height={18} />
         <Text weight="semibold">{title}</Text>
-        {detail !== '' && (
+        {took !== null && (
           <Text size="caption" dimColor tabular>
-            {detail}
+            {took}
           </Text>
         )}
         {standing !== null && (
@@ -3810,60 +3827,43 @@ const thinkingCardOf = ($: EngineInterface, ui: DesktopUi, view: ThinkingView) =
           </Text>
         )}
         <Box flexGrow={1} />
-        {index >= 0 && view.recent.length > 1 && (
-          <Text size="caption" dimColor tabular>
-            {`${index + 1} of ${view.recent.length}`}
-          </Text>
+        {canScroll && (
+          <Button key="newer" plain dimColor label="⌃" onPress={() => moveUpdates($, -step, width, view.isWide).catch(() => {})} />
         )}
-        <Button key="turn-older" plain dimColor={older === undefined} label="⌃" onPress={() => go(older).catch(() => {})} />
-        <Button key="turn-newer" plain dimColor={newer === undefined} label="⌄" onPress={() => go(newer).catch(() => {})} />
+        {canScroll && (
+          <Button key="older" plain dimColor label="⌄" onPress={() => moveUpdates($, step, width, view.isWide).catch(() => {})} />
+        )}
       </Box>
       {status !== null && (
         <Text size="caption" dimColor>
           {status}
         </Text>
       )}
-      {shown !== null && newest !== undefined && (
-        <Box flexDirection="column" gap="xs">
-          <Text>
-            <Text weight="semibold">{newest.isRecap === true ? 'Recap.' : `${stampOf(shown, newest)} ·`}</Text> {newest.gist}
-          </Text>
-          {marksOf(newest)}
-        </Box>
+      {newer > 0 && (
+        <Button
+          key="newest"
+          plain
+          dimColor
+          label={`↑ ${plural(newer, 'newer update')}`}
+          onPress={() => toNewest($).catch(() => {})}
+        />
       )}
-      {shown !== null && earlier.length > 0 && (
+      {groups.length > 0 && (
         <Box flexDirection="column">
-          <Text size="caption" weight="medium" dimColor>
-            Earlier this turn
-          </Text>
-          {earlier.slice(0, MAX_EARLIER).map(({ entry, place }) => {
-            const key = `${shown.turnId}:${entry.at}`
-            const isOpen = view.opened.includes(key)
-
-            return (
-              <Box flexDirection="column">
-                {isOpen ? (
-                  <Button key={`update-${place}`} plain label={`▾ ${stampOf(shown, entry)}`} onPress={() => toggleUpdate($, key).catch(() => {})} />
+          {groups.flatMap((group, at) => [
+            ...(at === 0 ? [] : [rule]),
+            <Box flexDirection="column">
+              {group.map(item =>
+                item.kind === 'decision' ? (
+                  <Text color="warning">{item.text}</Text>
+                ) : item.kind === 'assumption' ? (
+                  <Text color="suggestion">{item.text}</Text>
                 ) : (
-                  <Button key={`update-${place}`} plain dimColor onPress={() => toggleUpdate($, key).catch(() => {})}>
-                    {`▸ ${stampOf(shown, entry)}  `}
-                    <Text wrap="truncate">{entry.gist}</Text>
-                  </Button>
-                )}
-                {isOpen && (
-                  <Box flexDirection="column" gap="xs" paddingLeft={2}>
-                    <Text>{entry.gist}</Text>
-                    {marksOf(entry)}
-                  </Box>
-                )}
-              </Box>
-            )
-          })}
-          {earlier.length > MAX_EARLIER && (
-            <Text size="caption" dimColor>
-              and {earlier.length - MAX_EARLIER} earlier
-            </Text>
-          )}
+                  <Text>{item.text}</Text>
+                ),
+              )}
+            </Box>,
+          ])}
         </Box>
       )}
     </Box>
@@ -4083,11 +4083,8 @@ export const register: Register = (on, options) => {
         // show, whichever turn was picked before.
         await openRecord($, e.turnId, startedAt, fill)
         await update($, pickedTurn, () => null)
-        // The subagents the prompt before saw end go; those at work stay. The
-        // earlier updates opened were the turn before's.
+        // The subagents the prompt before saw end go; those at work stay.
         await forgetEnded($)
-
-        if ((await read($, openUpdates)).length > 0) await update($, openUpdates, () => [])
       }
 
       if (isOn) {
@@ -4404,7 +4401,6 @@ export const register: Register = (on, options) => {
       figuresTimer = null
       await update($, recentTurns, () => [])
       await update($, pickedTurn, () => null)
-      await update($, openUpdates, () => [])
       await update($, isSaving, () => false)
       await showStatus($).catch(() => {})
       await toNewest($)
@@ -4682,35 +4678,11 @@ export const register: Register = (on, options) => {
     // The lines measured in rows at the summary's width, the measure the
     // arrows then step through.
     const width = widthOf(summaryColumns, e.surface)
-    const { lines, ...laid } = layUpdates(turnShown, width, place)
-    const top = isPinned ? laid.top : 0
-    const topLine = laid.rows[top]?.line ?? 0
-    const topChar = laid.rows[top]?.start ?? 0
-    // Updates whose first row is scrolled past, above the window.
-    const newer = laid.starts.filter((first, at) => lines[at]?.kind === 'gist' && first < top).length
-
-    // The lines showing, the first from the row on top, a body's height of
-    // rows at most; each one Text the surface wraps at its full width. Kept
-    // together by update (each opens with its gist), with a rule between
+    // The lines showing, each one Text the surface wraps at its full width,
+    // kept together by update (each opens with its gist), with a rule between
     // two: it stands where a Box's `gap` spaced them (an empty Box of one row
     // drew nothing on the desktop), and the steps count neither.
-    const shown: UpdateLine[][] = []
-    let budget = isPinned ? rows : Number.POSITIVE_INFINITY
-
-    for (let at = topLine; at < lines.length && budget > 0; at += 1) {
-      const one = lines[at]
-
-      if (one === undefined) break
-
-      const text = at === topLine && topChar > 0 ? `… ${shownText(one).slice(topChar)}` : shownText(one)
-      const group = shown.at(-1)
-      const item = { kind: one.kind, text }
-
-      if (group === undefined || one.kind === 'gist') shown.push([item])
-      else group.push(item)
-
-      budget -= (laid.starts[at + 1] ?? laid.rows.length) - (laid.starts[at] ?? 0)
-    }
+    const { shown, newer, canScroll } = windowOf(turnShown, width, place, isPinned, rows)
 
     // The rule between two updates: a dim row of box drawing across the
     // summary, in the monospaced face whose cells the body is measured in,
@@ -4761,7 +4733,6 @@ export const register: Register = (on, options) => {
     // the pane again only when the press ends; its wheel scrolls the pane
     // itself, which, pinned, has nothing to scroll; and its keys do not
     // reach the pane.
-    const canScroll = isPinned && laid.rows.length > 1
     const step = pageStep(rows, isWide ? WIDE_OVERHEAD : PANE_OVERHEAD)
 
     // The recent turns' header, and beside it the person's switch for
