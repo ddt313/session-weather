@@ -4715,6 +4715,38 @@ test('on the desktop from WIDE_FROM columns a recent turn pressed shows beside t
   expect((await card()).title).toBe('Thinking')
 })
 
+test("on the desktop from WIDE_FROM columns the shown turn's fill lies under its row, which stands as tall as the others", async ($, on) => {
+  const { replies, steps, clock } = engine(on)
+  await threeUpdates($, replies, steps, clock)
+  await $.turn.complete(turnDone({ durationMs: 31_000 }) as never)
+  await clock.settle()
+  await clock.advance(MINUTE)
+  replies.push(answer('GIST: Bốn.'))
+  await oneTurn($, steps, clock, 't2', 'and this')
+
+  const ui = await mount($, 'desktop', WIDE_FROM)
+  const boxes = (await ui.findAll({ type: 'Box' })) as unknown as Found[]
+  const svgs = (await ui.findAll({ type: 'Svg' })) as unknown as Found[]
+  await ui.unmount()
+
+  // One fill, the shown turn's, placed over its row's whole box and rounded
+  // by a border of no color; the rows themselves take no border, which would
+  // make one taller than the rest.
+  const placed = boxes.filter(one => one.props.position === 'absolute')
+  expect(placed.map(one => [one.props.top, one.props.bottom, one.props.left, one.props.right])).toEqual([[0, 0, 0, 0]])
+  expect(placed[0]?.props).toMatchObject({ borderStyle: 'round', borderColor: 'rgba(0, 0, 0, 0)' })
+  const cardFill = boxes.find(one => one.props.borderStyle === 'round')?.props.backgroundColor
+  expect(typeof placed[0]?.props.backgroundColor).toBe('string')
+  expect(placed[0]?.props.backgroundColor).not.toBe(cardFill)
+  expect(boxes.filter(one => one.props.position === 'relative' && one.props.borderStyle !== undefined)).toEqual([])
+
+  // Each row's bar stands in a drawing the design's 32 pixels high, the
+  // bar in its middle, which holds every row to that height.
+  const bars = svgs.filter(one => String(one.props.alt).startsWith('Added ') || one.props.alt === 'Context added not known')
+  expect(bars.map(one => one.props.height)).toEqual([32, 32])
+  expect(bars.map(one => /<rect y="13" [^>]*height="6"/.test(String(one.props.source)))).toEqual([true, true])
+})
+
 test('on the desktop from WIDE_FROM columns with the summary off, the cards stand in one column', async ($, on) => {
   engine(on, { stored: { isSummaryOff: true }, rateLimits: limits(25) })
 

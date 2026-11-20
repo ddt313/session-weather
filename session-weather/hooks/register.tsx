@@ -3364,11 +3364,13 @@ const HATCH = 'hatch'
 
 // A bar `thick` pixels tall for a slot `cells` wide: its runs over a faint
 // track, rounded at both ends, and, where `mark` is given (0 to 1), a mark
-// standing across it. Drawn BAR_STRETCH wider than the cells and squeezed
-// into the slot, so it is drawn at the height it gives with the source.
-const barSvg = (stretches: readonly Stretch[], cells: number, mark?: number, thick = 6) => {
+// standing across it; in the middle of a drawing `tall` pixels high where
+// that is more, which holds a row it stands in to that height. Drawn
+// BAR_STRETCH wider than the cells and squeezed into the slot, so it is
+// drawn at the height it gives with the source.
+const barSvg = (stretches: readonly Stretch[], cells: number, mark?: number, thick = 6, tall = 0) => {
   const width = Math.max(40, Math.round(cells * CELL_PX * BAR_STRETCH))
-  const height = mark === undefined ? thick : thick + 6
+  const height = Math.max(tall, mark === undefined ? thick : thick + 6)
   const top = (height - thick) / 2
   const runs = stretches
     .filter(one => one.to > one.from)
@@ -3378,7 +3380,7 @@ const barSvg = (stretches: readonly Stretch[], cells: number, mark?: number, thi
     )
     .join('')
   const marked =
-    mark === undefined ? '' : `<rect x="${(clamp01(mark) * width - 1).toFixed(1)}" y="0" width="2" height="${height}" fill="${INK.others}"/>`
+    mark === undefined ? '' : `<rect x="${(clamp01(mark) * width - 1).toFixed(1)}" y="${top - 3}" width="2" height="${thick + 6}" fill="${INK.others}"/>`
 
   return {
     height,
@@ -4022,6 +4024,10 @@ const TIME_CELLS = 7
 const TOOK_CELLS = 9
 const TOOLS_CELLS = 5
 
+// The height of a row of the recent turns, the design's 32 pixels: the
+// row's bar stands in a drawing that tall, which holds the row to it.
+const TURN_ROW_PX = 32
+
 // The tokens a recent turn added to the context, where both ends are known.
 const grownOf = (one: RecentTurn) =>
   one.fromTokens === undefined || one.toTokens === undefined ? null : one.toTokens - one.fromTokens
@@ -4256,8 +4262,9 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
 
   // The recent turns, newest first, as a table: when each began and how long
   // it ran (pressed beside the summary to show its updates, the one shown
-  // marked ▸), what it added to the context over a bar beside the others',
-  // and its tool calls; and the person's switch for persisting them.
+  // marked ▸ on a fill), what it added to the context over a bar beside the
+  // others', and its tool calls; and the person's switch for persisting them.
+  // The rows stand TURN_ROW_PX apart, with no gap between them.
   const turnsShown = recent.slice(-maxRecent()).reverse()
   const mostGrown = Math.max(1, ...turnsShown.map(one => grownOf(one) ?? 0))
   const turnsCard = turnsShown.length > 0 && (
@@ -4281,7 +4288,7 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
           onPress={() => setSaving($, !isSaved).catch(() => {})}
         />
       </Box>
-      <Box flexDirection="row" gap={1}>
+      <Box flexDirection="row" gap={1} paddingRight={1}>
         <Box width={TIME_CELLS + 1 + TOOK_CELLS}>
           <Text size="caption" dimColor>
             Time · Duration
@@ -4298,56 +4305,69 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
           </Text>
         </Box>
       </Box>
-      {turnsShown.map((one, index) => {
-        const isShown = isOn && one.turnId === view.turn?.turnId
-        const time = formatTime(one.startedAt)
-        const took =
-          one.durationMs !== undefined
-            ? formatDuration(one.durationMs)
-            : index === 0 && one.isAborted !== true
-              ? one.isWaiting === true
-                ? 'waiting'
-                : 'running'
-              : '—'
-        const ran = `${took}${one.isAborted === true ? ' · interrupted' : ''}`
-        const added = grownOf(one)
-        const growth = barSvg([{ from: 0, to: added === null ? 0 : clamp01(added / mostGrown), ink: isShown ? INK.mine : INK.grey }], 12)
+      <Box flexDirection="column">
+        {turnsShown.map((one, index) => {
+          const isShown = isOn && one.turnId === view.turn?.turnId
+          const time = formatTime(one.startedAt)
+          const took =
+            one.durationMs !== undefined
+              ? formatDuration(one.durationMs)
+              : index === 0 && one.isAborted !== true
+                ? one.isWaiting === true
+                  ? 'waiting'
+                  : 'running'
+                : '—'
+          const ran = `${took}${one.isAborted === true ? ' · interrupted' : ''}`
+          const added = grownOf(one)
+          const growth = barSvg(
+            [{ from: 0, to: added === null ? 0 : clamp01(added / mostGrown), ink: isShown ? INK.mine : INK.grey }],
+            12,
+            undefined,
+            6,
+            TURN_ROW_PX,
+          )
 
-        return (
-          <Box flexDirection="row" alignItems="center" gap={1} {...(isShown ? cardLook(DESK.raised) : {})}>
-            <Box width={TIME_CELLS + 1 + TOOK_CELLS}>
-              {isOn ? (
-                <Button
-                  key={`turn-${one.turnId}`}
-                  plain
-                  dimColor={!isShown}
-                  onPress={() => pickTurn($, one.turnId === turnNow?.turnId ? null : one.turnId).catch(() => {})}
-                >
-                  {`${isShown ? '▸ ' : ''}${time}  `}
-                  <Text>{ran}</Text>
-                </Button>
-              ) : (
-                <Text dimColor wrap="truncate">
-                  {`${time}  ${ran}`}
-                </Text>
-              )}
-            </Box>
-            <Box flexDirection="row" alignItems="center" gap={1} flexGrow={1} flexShrink={1} minWidth={0}>
-              <Box flexGrow={1} flexShrink={1} minWidth={0}>
-                <Svg source={growth.source} alt={added === null ? 'Context added not known' : `Added ${formatTokens(Math.abs(added))}`} height={growth.height} />
+          // The shown turn's fill lies under its row, placed over the row's
+          // whole box: the round border that rounds it takes room inside the
+          // Box it is on, which on the row itself made the row taller. The
+          // row's parts are placed too, so they are painted over the fill.
+          return (
+            <Box position="relative" flexDirection="row" alignItems="center" gap={1} paddingRight={1}>
+              {isShown && <Box position="absolute" top={0} bottom={0} left={0} right={0} {...cardLook(DESK.raised)} />}
+              <Box position="relative" width={TIME_CELLS + 1 + TOOK_CELLS}>
+                {isOn ? (
+                  <Button
+                    key={`turn-${one.turnId}`}
+                    plain
+                    dimColor={!isShown}
+                    onPress={() => pickTurn($, one.turnId === turnNow?.turnId ? null : one.turnId).catch(() => {})}
+                  >
+                    {`${isShown ? '▸ ' : ''}${time}  `}
+                    <Text>{ran}</Text>
+                  </Button>
+                ) : (
+                  <Text dimColor wrap="truncate">
+                    {`${time}  ${ran}`}
+                  </Text>
+                )}
               </Box>
-              <Text size="caption" dimColor={!isShown} tabular>
-                {added === null ? '—' : added < 0 ? `-${formatTokens(-added)}` : `+${formatTokens(added)}`}
-              </Text>
+              <Box position="relative" flexDirection="row" alignItems="center" gap={1} flexGrow={1} flexShrink={1} minWidth={0}>
+                <Box flexGrow={1} flexShrink={1} minWidth={0}>
+                  <Svg source={growth.source} alt={added === null ? 'Context added not known' : `Added ${formatTokens(Math.abs(added))}`} height={growth.height} />
+                </Box>
+                <Text size="caption" dimColor={!isShown} tabular>
+                  {added === null ? '—' : added < 0 ? `-${formatTokens(-added)}` : `+${formatTokens(added)}`}
+                </Text>
+              </Box>
+              <Box position="relative" width={TOOLS_CELLS} justifyContent="flex-end">
+                <Text size="caption" dimColor={!isShown} tabular>
+                  {`${one.tools}`}
+                </Text>
+              </Box>
             </Box>
-            <Box width={TOOLS_CELLS} justifyContent="flex-end">
-              <Text size="caption" dimColor={!isShown} tabular>
-                {`${one.tools}`}
-              </Text>
-            </Box>
-          </Box>
-        )
-      })}
+          )
+        })}
+      </Box>
     </Box>
   )
 
