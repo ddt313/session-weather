@@ -1414,6 +1414,10 @@ test('a new prompt starts the updates over', async ($, on) => {
 
   await $.turn.start({ text: 'and now this', turnId: 't2' })
   expect(await thoughts($)).toEqual(['🧭 Thinking · 0s', 'No thinking notes yet.', 'Summary cost $0.002 - Haiku 5.5'])
+
+  // Ended with no thinking the mod saw: the line says where it comes from.
+  await $.turn.complete(turnDone({ turnId: 't2' }) as never)
+  expect(await thoughts($)).toContain('No thinking notes this turn: they come only with the Thinking or Verbose transcript view.')
 })
 
 test('one update and nothing after it needs no recap; a note it missed gets one', async ($, on) => {
@@ -1485,7 +1489,9 @@ test("a subagent's thinking stays out, and its turn neither resets the main one 
   await $.tool.call({ tool: 'Bash', command: 'pwd' })
   await clock.advance(SECOND)
   expect(asks).toEqual([])
-  expect(await thoughts($)).toContain('No thinking notes yet.')
+  // The main loop called tools and thought nothing the mod saw: the line says
+  // where its thinking comes from.
+  expect(await thoughts($)).toContain('No thinking notes yet: they come only with the Thinking or Verbose transcript view.')
 
   await $.turn.complete(turnDone() as never)
   await $.session.measure(measure(90_000, 45))
@@ -4929,7 +4935,7 @@ test('on the desktop from WIDE_FROM columns: the sky, the cost across the top; t
     'No tools called in this turn',
   ])
   // The left column's three cards fold too, each by its switch first.
-  expect(labels).toEqual(['▾', '▾', '▾', '☐ Persist', `▸ ${clockOf(NOW)}  2s`, ...FOLDS, 'Turn summary off'])
+  expect(labels).toEqual(['▾', '▾', '▾', `▸ ${clockOf(NOW)}  2s`, '☐ Persist', ...FOLDS, 'Turn summary off'])
 })
 
 test('on the desktop from WIDE_FROM columns a recent turn pressed shows beside them, and ▲ ▼ scroll the turn shown', async ($, on) => {
@@ -4955,7 +4961,7 @@ test('on the desktop from WIDE_FROM columns a recent turn pressed shows beside t
   expect(await card()).toEqual({
     title: 'Thinking',
     lines: ['1s · Bốn.', '1s ·'],
-    labels: [...LEFT_FOLDS, '☐ Persist', `▸ ${second}  2s`, `${first}  31s`, ...FOLDS, 'Turn summary off'],
+    labels: [...LEFT_FOLDS, `▸ ${second}  2s`, `${first}  31s`, '☐ Persist', ...FOLDS, 'Turn summary off'],
   })
 
   // The one before, pressed: its updates, its recap on top, a drawn rule
@@ -4976,7 +4982,7 @@ test('on the desktop from WIDE_FROM columns a recent turn pressed shows beside t
       '1s ·',
       'Chỉ sửa file A',
     ],
-    labels: [...LEFT_FOLDS, '☐ Persist', `${second}  2s`, `▸ ${first}  31s`, ...FOLDS, '▲', '▼', 'Turn summary off'],
+    labels: [...LEFT_FOLDS, `${second}  2s`, `▸ ${first}  31s`, '☐ Persist', ...FOLDS, '▲', '▼', 'Turn summary off'],
   })
 
   // ▼ moves twelve rows, past the last of the seven: the four gists above.
@@ -4984,7 +4990,7 @@ test('on the desktop from WIDE_FROM columns a recent turn pressed shows beside t
   expect(await card()).toEqual({
     title: `Turn at ${first}`,
     lines: ['Chỉ sửa file A'],
-    labels: [...LEFT_FOLDS, '☐ Persist', `${second}  2s`, `▸ ${first}  31s`, ...FOLDS, '▲', '▼', '↑ 4 newer updates', 'Turn summary off'],
+    labels: [...LEFT_FOLDS, `${second}  2s`, `▸ ${first}  31s`, '☐ Persist', ...FOLDS, '▲', '▼', '↑ 4 newer updates', 'Turn summary off'],
   })
   await pressDesk($, 'newer', WIDE_FROM)
   expect((await card()).lines[0]).toBe('Recap. Claude đang sửa lỗi.')

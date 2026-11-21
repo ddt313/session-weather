@@ -3403,8 +3403,16 @@ const statusOf = (turn: Thinking | null) => {
 
   if (turn.entries.length > 0) return turn.failure === undefined ? null : `Update failed: ${turn.failure}`
 
+  // No notes though the turn has called tools, written or ended: most
+  // likely the transcript view keeps Claude's thinking from the mod, so the
+  // line says where it comes from. A turn just begun may think yet.
   if (turn.notes.length === 0) {
-    return turn.durationMs === undefined ? 'No thinking notes yet.' : 'No thinking notes this turn.'
+    const isUnderWay = turn.durationMs === undefined
+    const hasActed = turn.actions.length > 0 || turn.said.length > 0 || !isUnderWay
+
+    if (!hasActed) return 'No thinking notes yet.'
+
+    return `${isUnderWay ? 'No thinking notes yet' : 'No thinking notes this turn'}: they come only with the Thinking or Verbose transcript view.`
   }
 
   if (turn.failure !== undefined) return `Summary failed: ${turn.failure}`
@@ -4086,7 +4094,7 @@ const drawNarrowDesktop = async ($: EngineInterface, ui: DesktopUi, columns: num
     taken:
       turnsShownCount === 0
         ? 0
-        : CARD_GAP_ROWS + CARD_TOP_ROWS + (turnsFolded ? 0 : 1 + (turnsShownCount * TURN_ROW_PX) / LINE_PX),
+        : CARD_GAP_ROWS + CARD_TOP_ROWS + (turnsFolded ? 0 : 2 + (turnsShownCount * TURN_ROW_PX) / LINE_PX),
   })
   const subagentsCard = subagentsCardOf(
     $,
@@ -4588,7 +4596,8 @@ const wideTurnRowsOf = (fit: { room: number; isContextFolded: boolean; fills: nu
   const turnRows = TURN_ROW_PX / LINE_PX
   const contextHigh = fit.isContextFolded ? CARD_TOP_ROWS : CARD_TOP_ROWS + 3 + fit.fills
   const limitsHigh = fit.windows === 0 ? 0 : fit.isLimitsFolded ? CARD_TOP_ROWS : CARD_TOP_ROWS + 3 * fit.windows + 1
-  const left = fit.room - contextHigh - limitsHigh - 2 * CARD_GAP_ROWS - CARD_TOP_ROWS - 1
+  // Less the table's header over the rows and the Persist line under them.
+  const left = fit.room - contextHigh - limitsHigh - 2 * CARD_GAP_ROWS - CARD_TOP_ROWS - 2
 
   return Math.max(3, Math.floor(left / turnRows))
 }
@@ -4628,6 +4637,20 @@ const turnsCardOf = (
   const canScroll = !turnsFolded && turnsShown.length > rows
   const first = Math.max(0, Math.min(card.top, turnsShown.length - rows))
   const visible = turnsShown.slice(first, first + rows)
+  // The switch for keeping the turns past a restart: on the top line folded;
+  // open, under the table, where the top line's arrows and their place in
+  // the list leave it no room, the table giving way above it.
+  const persist = (
+    <Box flexShrink={0}>
+      <Button
+        key={SAVE_TOGGLE}
+        plain
+        dimColor={!isSaved}
+        label={isSaved ? '☑ Persist' : '☐ Persist'}
+        onPress={() => setSaving($, !isSaved).catch(() => {})}
+      />
+    </Box>
+  )
 
   return turnsShown.length > 0 && (
     <Box
@@ -4658,13 +4681,7 @@ const turnsCardOf = (
         )}
         {canScroll && <Button key="turns-up" plain dimColor label="▲" onPress={() => moveTurns($, -1, rows).catch(() => {})} />}
         {canScroll && <Button key="turns-down" plain dimColor label="▼" onPress={() => moveTurns($, 1, rows).catch(() => {})} />}
-        <Button
-          key={SAVE_TOGGLE}
-          plain
-          dimColor={!isSaved}
-          label={isSaved ? '☑ Persist' : '☐ Persist'}
-          onPress={() => setSaving($, !isSaved).catch(() => {})}
-        />
+        {turnsFolded && persist}
       </Box>
       {/* The header over the columns, the subagents and the tool calls by
           the icons their cards on the right carry. */}
@@ -4689,7 +4706,7 @@ const turnsCardOf = (
       </Box>
       )}
       {!turnsFolded && (
-      <Box flexDirection="column">
+      <Box flexDirection="column" flexShrink={1} minHeight={0} overflow="hidden">
         {visible.map((one, at) => {
           const isShown = isOn && one.turnId === shownId
           const time = formatTime(one.startedAt)
@@ -4767,9 +4784,11 @@ const turnsCardOf = (
         })}
       </Box>
       )}
+      {!turnsFolded && persist}
     </Box>
   )
 }
+
 // The summary's footer on the desktop: what it cost, and its switch.
 const footerOf = ($: EngineInterface, ui: DesktopUi, isOn: boolean, spent: number, isDebugging: boolean) => {
   const { Box, Button, Text } = ui
