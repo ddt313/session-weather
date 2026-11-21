@@ -14,7 +14,7 @@
 // Kept in the module's own memory: a reload costs a request's figures.
 
 // A call of the main loop, as its turn's row keeps it.
-export type Called = { at: number; text: string }
+type Called = { at: number; text: string }
 
 // A request's growth shared evenly among its calls when it made this many
 // at most: past them a large read and a short command would get the same

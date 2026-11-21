@@ -476,7 +476,7 @@ export const toolIconOf = (action: string): IconName => {
 // What kind of work a call was, by its tool, for the Tools card's bar: each
 // kind keeps its ink from turn to turn. A call is kept as its tool and what
 // it was aimed at (`actionOf`), so the tool is the text before the colon.
-export const TOOL_KINDS = [
+const TOOL_KINDS = [
   { name: 'Files', ink: '#F47920', tools: /^(?:Read|Edit|Write|MultiEdit|NotebookEdit|NotebookRead|Grep|Glob|LS|LSP)$/ },
   { name: 'Shell', ink: '#00AEEF', tools: /^(?:Bash|PowerShell|BashOutput|KillShell|Monitor)$/ },
   { name: 'Web', ink: '#7FD7F7', tools: /^(?:WebFetch|WebSearch)$/ },
@@ -484,7 +484,7 @@ export const TOOL_KINDS = [
   { name: 'Agents', ink: '#F5B731', tools: /^(?:Agent|Task|SendMessage|Workflow)$/ },
   { name: 'Skills', ink: '#B9A3F0', tools: /^(?:Skill|ToolSearch)$/ },
 ] as const
-export const OTHER_KIND = { name: 'Other', ink: INK.grey } as const
+const OTHER_KIND = { name: 'Other', ink: INK.grey } as const
 
 export const kindOf = (action: string) => {
   const tool = action.split(':')[0] ?? ''

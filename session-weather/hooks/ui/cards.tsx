@@ -81,7 +81,7 @@ async function moveTools ($: EngineInterface, by: number, rows: number) {
 // those of the main loop added to the context (`~` where a share, or a call
 // with no figure, is in it). The bar stands by what they added once any has
 // a figure, else by how many.
-export const kindsOf = (calls: readonly TurnCall[]) => {
+const kindsOf = (calls: readonly TurnCall[]) => {
   const kinds = new Map<string, { name: string; ink: string; count: number; tokens: number; isRough: boolean }>()
 
   for (const call of calls) {

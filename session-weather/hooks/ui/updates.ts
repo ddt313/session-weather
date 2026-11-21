@@ -122,7 +122,7 @@ const layUpdates = (turn: Thinking | null, width: number, place: { line: number;
 // A window of known height, as the desktop's thinking card has: the `rows`
 // it holds, and what it spends besides the lines' own rows, a rule between
 // two updates and a gap under each line.
-export type WindowFit = { rows: number; ruleRows: number; lineGap: number }
+type WindowFit = { rows: number; ruleRows: number; lineGap: number }
 
 // The rows a line takes in a window that fits `fit`: its own, its gap, and
 // the rule over it where it opens an update below another.

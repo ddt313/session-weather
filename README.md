@@ -25,35 +25,39 @@ next prompt's thinking comes through.
 The pane lays itself out by its width, and changes over as you drag it wider
 or narrower.
 
-![The Session Weather pane on the desktop under 90 columns: the sky and the session's cost, a tile each for the context and the two limits, a warning, the last turn, the subagents, the tools and the recent turns folded to their top line, and the thinking summary of a turn picked from the list, all in cards](session-weather/screenshot.png)
+![The Session Weather pane on the desktop under 90 columns: the sky and the session's cost, a tile each for the context and the two limits, a warning, the last turn, the subagents folded with three at work, the tools open with their bar of kinds and three calls, the recent turns folded, and the thinking summary of the current turn with its cost and switch on its last line, all in cards](session-weather/screenshot.png)
 
-Under 90 columns on the desktop, here with a turn of three subagents picked
-from the recent turns: the sky, the session's line and its cost across the
-top; a tile each for the context, the 5-hour limit and the weekly one; the
-warning that the week is on pace to run out; the last turn; the subagents,
-the tools and the recent turns, each folded to its top line and its gist
-(`3 finished`, `27 calls`, `15 turns`); and the thinking summary of the turn
-picked, its recap on top, taking the height they leave (see **On the
-desktop**). The terminal draws no images and keeps rows of text at that
-width: the weather on top (the sky, the context's fill and where
-auto-compact runs, the last turn, the 5-hour and weekly limits with this
-session's part of each in yellow, the session's cost), then Haiku's updates
-on Claude's thinking, newest first, each with its gist, a decision (★), what
-Claude takes as true unchecked (?) and its next step (→).
+Under 90 columns on the desktop, in a turn with three subagents at work:
+the sky, the session's line and its cost across the top; a tile each for
+the context, the 5-hour limit and the weekly one; the warning that the week
+is on pace to run out; the last turn; the subagents folded to their top
+line and its gist (`3 at work`); the tools open, `45 calls`, the bar of
+their kinds over its legend (`Files 31 · ~+4.9k`, `Shell 5 · ~+1k`,
+`Agents 4`, …) and the newest three, one with what it added to the context
+(`+1.2k`); the recent turns folded (`30 turns`); and the thinking summary of
+the current turn, taking the height they leave, what it cost and its switch
+on its last line (see **On the desktop**). The terminal draws no images and
+keeps rows of text at that width: the weather on top (the sky, the context's
+fill and where auto-compact runs, the last turn, the 5-hour and weekly
+limits with this session's part of each in yellow, the session's cost), then
+Haiku's updates on Claude's thinking, newest first, each with its gist, a
+decision (★), what Claude takes as true unchecked (?) and its next step (→).
 
-![The Session Weather pane on the desktop from 90 columns: the context, the limits and the recent turns as cards on the left, the subagents, the tools and the thinking summary of the turn picked on the right, the warning and the cost across the top](session-weather/screenshot-wide.png)
+![The Session Weather pane on the desktop from 90 columns: the context, the limits and the recent turns as cards on the left, the subagents at work, the tools with their bar of kinds and the thinking summary on the right, the warning and the cost across the top](session-weather/screenshot-wide.png)
 
-From 90 columns, here with the same turn picked: the sky, the session's
-line, the warning and the cost across the top; on the left, what fills the
-context, the limits (each with the pace it is on, `~47% at reset` or
-`>100% at reset`) and the recent turns, thirteen of fifteen with ▲ and ▼ to
-scroll the rest, the turn picked marked ▸ with its three subagents and 27
-tool calls, and the box that persists them under the table; on the right,
-the turn's subagents, two of three with all their tokens on the card's top
-line, its tool calls newest first, each with the subagent that made it, its
-thinking summary, and under it what the summary cost and its switch. Each
-card folds by ▾ on its top line. The terminal puts the weather in a column of its own on the left
-and the summary beside it (see **Layout** and **Wide layout**).
+From 90 columns, in the same turn: the sky, the session's line, the warning
+and the cost across the top; on the left, what fills the context, the
+limits (each with the pace it is on, `~22% at reset` or `>100% at reset`)
+and the recent turns, ten of thirty with ▲ and ▼ to scroll the rest, the
+current one marked ▸ with its four subagents and 40 tool calls, and the box
+that persists them under the table; on the right, the subagents, two of
+three at work with all their tokens on the card's top line, each with its
+model, effort and context, what it is at and its tokens; the tool calls,
+the bar of their kinds over its legend, then the newest first, each with the
+subagent that made it; and the thinking summary, what it cost and its
+switch on its last line. Each card folds by ▾ on its top line. The
+terminal puts the weather in a column of its own on the left and the
+summary beside it (see **Layout** and **Wide layout**).
 
 **Layout**
 
