@@ -227,6 +227,13 @@ declare module 'claude-code' {
       // The first of the tool calls the desktop's Tools card shows, newest
       // first, the top at 0; its ▲ and ▼ move it.
       toolTop: number
+      // The desktop's cards the person folded to their top line, by name
+      // (`subagents`, `tools`, `thinking`); kept in the store, so they stay
+      // folded in the next session too.
+      foldedCards: string[]
+      // The first of the recent turns the desktop's card shows, newest
+      // first, the top at 0; its ▲ and ▼ move it.
+      turnTop: number
       // Whether each Haiku request of the summary, and its reply, goes to the
       // debug log; the person turns it on and off.
       isDebugOn: boolean

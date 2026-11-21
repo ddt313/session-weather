@@ -32,8 +32,8 @@
     "recentTurns": {
       "type": "number",
       "title": "Recent turns kept",
-      "description": "How many of your latest turns the wide pane lists, and a persisted session's file keeps, the oldest let go past it. From 1 to 30; a value outside that is held to it.",
-      "default": 10
+      "description": "How many of your latest turns the pane lists, ▲ and ▼ scrolling them, and a persisted session's file keeps, the oldest let go past it. From 1 to 30; a value outside that is held to it.",
+      "default": 30
     }
   }
 }

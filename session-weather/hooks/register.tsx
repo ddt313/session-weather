@@ -61,6 +61,8 @@ const summaryCost = atom({ plugin: 'session-weather', key: 'summaryCost' } as co
 const summaryPlace = atom({ plugin: 'session-weather', key: 'summaryPlace' } as const, { line: 0, row: 0 })
 const subagentTop = atom({ plugin: 'session-weather', key: 'subagentTop' } as const, 0)
 const toolTop = atom({ plugin: 'session-weather', key: 'toolTop' } as const, 0)
+const foldedCards = atom({ plugin: 'session-weather', key: 'foldedCards' } as const, [])
+const turnTop = atom({ plugin: 'session-weather', key: 'turnTop' } as const, 0)
 const isDebugOn = atom({ plugin: 'session-weather', key: 'isDebugOn' } as const, false)
 
 const COMMAND = 'session-weather'
@@ -99,10 +101,11 @@ const GAP_SECONDS = { fallback: 15, min: 5, max: 120 }
 const COMPACT_SOON = { fallback: 90, min: 76, max: 100 }
 // 0 keeps every file; ten years is as good as forever.
 const CLEANUP_DAYS = { fallback: 30, min: 0, max: 3650 }
-// Each turn keeps up to its newest 100 updates, in `$.state` and in a
-// persisted session's file, which the file API holds under 4 MiB: thirty
-// turns of long updates stay well within it.
-const RECENT_TURNS = { fallback: 10, min: 1, max: 30 }
+// Each turn keeps up to its newest 100 updates, 30 subagents and 100 tool
+// calls, in `$.state` and in a persisted session's file, which the file API
+// holds under 4 MiB: thirty turns of them all, some 70 KB a turn, stay
+// within it. The list scrolls, so it keeps all thirty unless set lower.
+const RECENT_TURNS = { fallback: 30, min: 1, max: 30 }
 
 // The language named, on one trimmed line; the default where none is.
 const languageOf = (value: unknown) => {
@@ -683,6 +686,13 @@ const STORED_SUMMARY_OFF = 'isSummaryOff'
 // Set while the person keeps the summary's debug log on, in later sessions
 // too.
 const STORED_DEBUG_ON = 'isDebugOn'
+// The desktop's cards the person folded, in later sessions too; and the
+// cards that fold, by the names it keeps.
+const STORED_FOLDED = 'foldedCards'
+// `narrowTurns` is the other way about: under WIDE_FROM columns the recent
+// turns stand folded unless the person opened them, which it marks.
+const FOLDING = ['context', 'limits', 'turns', 'subagents', 'tools', 'thinking', 'narrowTurns'] as const
+type Folding = (typeof FOLDING)[number]
 // The address of the Button that turns it off and on.
 const TOGGLE = 'summary-toggle'
 // The address of the Button that saves the session's recent turns.
@@ -2695,10 +2705,11 @@ const settleFigures = ($: EngineInterface, agentId: string, usage: TurnUsage | u
   }).then(() => recordSubagents($).catch(() => {}))
 
 // Whether the pane was last drawn with room for the subagents' rows, and
-// with the summary beside the weather, where a turn may be picked from the
-// list; the module's own, set as it draws.
+// with the summary on and the recent turns to pick one from (on the
+// desktop, and from WIDE_FROM columns in the terminal); the module's own,
+// set as it draws.
 let isRoomyDrawn = false
-let isWideDrawn = false
+let isPickingDrawn = false
 
 // Each minute, as no ticker runs while the summary is off: the subagents
 // shown listed again, and, drawn, the times of those at work moved on a
@@ -3114,7 +3125,7 @@ const summarize = async ($: EngineInterface, signal: AbortSignal, isDue: boolean
   // The new update goes on top of the turn shown: someone scrolled down
   // keeps the lines they were reading where they were. Beside the weather
   // a turn picked from the list may be shown instead, its lines unmoved.
-  const picked = isWideDrawn ? await read($, pickedTurn) : null
+  const picked = isPickingDrawn ? await read($, pickedTurn) : null
 
   if (told !== null && after?.turnId === turn.turnId && (picked === null || picked === turn.turnId)) {
     const added = partsOf(told).length
@@ -3180,22 +3191,37 @@ const setSummary = async ($: EngineInterface, isOn: boolean) => {
   $.clock.after(0, () => void askSummary($, true).catch(() => {}))
 }
 
+// A card folded to its top line, or opened again, by the person's press: in
+// the store too, the names in FOLDING's order.
+const foldCard = async ($: EngineInterface, name: Folding) => {
+  const was = await read($, foldedCards)
+  const folded = FOLDING.filter(one => (one === name ? !was.includes(one) : was.includes(one)))
+
+  await update($, foldedCards, () => folded)
+  await $.store.set(STORED_FOLDED, folded)
+}
+
 // What the store keeps for the pane: the person's choices (the summary off,
 // the debug log on) and the last limits read. `$.state` holds them while the
 // session runs, but a /clear wipes it and starts no session.start: each
 // main-loop turn's start reads them again, as does the end of a /clear, so a
 // summary the person turned off stays off. Resolves whether it is on.
 const restore = async ($: EngineInterface) => {
-  const [isOff, isDebugging, wasOn, wasDebugging, shown] = await Promise.all([
+  const [isOff, isDebugging, wasOn, wasDebugging, shown, folded, wasFolded] = await Promise.all([
     $.store.get(STORED_SUMMARY_OFF).then(value => value === true),
     $.store.get(STORED_DEBUG_ON).then(value => value === true),
     read($, isSummaryOn),
     read($, isDebugOn),
     read($, limits),
+    $.store.get(STORED_FOLDED).then(value =>
+      Array.isArray(value) ? FOLDING.filter(name => (value as unknown[]).includes(name)) : [],
+    ),
+    read($, foldedCards),
   ])
 
   if (wasOn === isOff) await update($, isSummaryOn, () => !isOff)
   if (wasDebugging !== isDebugging) await update($, isDebugOn, () => isDebugging)
+  if (folded.join() !== wasFolded.join()) await update($, foldedCards, () => folded)
 
   if (shown.length === 0) {
     const known = await storedLimits($)
@@ -3564,6 +3590,97 @@ const chipSvg = (words: string, isMine = false) => {
   }
 }
 
+// How a card that folds stands: folded to its top line, or open, and then
+// whether it takes the height left in a pinned pane (the lowest card open).
+type CardFold = { isFolded: boolean; grows: boolean }
+
+const OPEN: CardFold = { isFolded: false, grows: false }
+
+// A card's switch on its top line, first: ▾ while open, ▸ folded.
+const foldButtonOf = ($: EngineInterface, ui: DesktopUi, name: Folding, isFolded: boolean) => {
+  const { Button } = ui
+
+  return (
+    <Button
+      key={`fold-${name}`}
+      plain
+      dimColor
+      label={isFolded ? '▸' : '▾'}
+      onPress={() => foldCard($, name).catch(() => {})}
+    />
+  )
+}
+
+// The body rows, about, that the desktop's parts stand in, a row a line of
+// body text: a card's top line with its padding (a folded card's whole), a
+// subagent's row, a tool call's, the footer and the gaps between cards.
+const CARD_TOP_ROWS = 2
+const SUBAGENT_ROW_ROWS = 3.5
+const TOOL_ROW_ROWS = 1.1
+const FOOTER_ROWS = 2
+const CARD_GAP_ROWS = 0.5
+// What stands above the cards: under WIDE_FROM columns the sky, the tiles
+// and the last turn (a warning adds two); from them the header across the
+// top.
+const NARROW_HEAD_ROWS = 10
+const WIDE_HEAD_ROWS = 3
+
+// How the folding cards stand, and how many rows the subagents' and the
+// tools' show: in a pinned pane (`room` the rows the cards and the footer
+// have) the lowest card open takes the height the others leave, the
+// thinking card's own way, the other two as many rows as fit, never fewer
+// than they show at rest.
+const foldPlanOf = (plan: {
+  folded: readonly string[]
+  isOn: boolean
+  room: number | null
+  subagents: { count: number; rows: number }
+  tools: { count: number; rows: number }
+  // Rows other cards take in the column, not counted here.
+  taken?: number
+}) => {
+  const isFolded = (name: Folding) => plan.folded.includes(name)
+  const grower =
+    plan.room === null
+      ? null
+      : plan.isOn && !isFolded('thinking')
+        ? 'thinking'
+        : !isFolded('tools')
+          ? 'tools'
+          : !isFolded('subagents')
+            ? 'subagents'
+            : null
+  const subagentsHigh = isFolded('subagents')
+    ? CARD_TOP_ROWS
+    : CARD_TOP_ROWS + Math.max(1, Math.min(plan.subagents.rows, plan.subagents.count) * SUBAGENT_ROW_ROWS)
+  // What the grower has: the room less the footer, the gaps, the thinking
+  // card folded where it shows, and the other card above it, and its own
+  // top line.
+  const left =
+    (plan.room ?? 0) -
+    (plan.taken ?? 0) -
+    FOOTER_ROWS -
+    3 * CARD_GAP_ROWS -
+    (plan.isOn ? CARD_TOP_ROWS : 0) -
+    (grower === 'tools' ? subagentsHigh : CARD_TOP_ROWS) -
+    CARD_TOP_ROWS
+
+  return {
+    subagents: {
+      fold: { isFolded: isFolded('subagents'), grows: grower === 'subagents' },
+      rows: grower === 'subagents' ? Math.max(plan.subagents.rows, Math.floor(left / SUBAGENT_ROW_ROWS)) : plan.subagents.rows,
+    },
+    tools: {
+      fold: { isFolded: isFolded('tools'), grows: grower === 'tools' },
+      rows: grower === 'tools' ? Math.max(plan.tools.rows, Math.floor(left / TOOL_ROW_ROWS)) : plan.tools.rows,
+    },
+    isThinkingFolded: isFolded('thinking'),
+  }
+}
+
+// What a card that grows takes on: the height left, cut at the bottom.
+const GROWS = { flexGrow: 1, flexShrink: 1, minHeight: 0, overflow: 'hidden' as const }
+
 // The chip as a card's top line places it, its words in its alt.
 const chipOf = (ui: DesktopUi, words: string, isMine = false) => {
   const { Box, Svg } = ui
@@ -3769,7 +3886,8 @@ const drawNarrowDesktop = async ($: EngineInterface, ui: DesktopUi, columns: num
     : ([null, { line: 0, row: 0 }, 0, false] as const)
   // Its subagents' rows say how long each has run, to the minute.
   isRoomyDrawn = listed.length > 0
-  isWideDrawn = false
+  // The recent turns stand here too: with the summary on, one may be picked.
+  isPickingDrawn = isOn
 
   const windows = shownWindowsOf(readings, parts, at)
   const tokens = now?.tokens
@@ -3901,32 +4019,89 @@ const drawNarrowDesktop = async ($: EngineInterface, ui: DesktopUi, columns: num
     </Box>
   )
 
+  // A body tall enough pins the cards and lets the lowest card open take
+  // what is left, cut at the bottom; a shorter one scrolls whole, as the
+  // engine does.
+  const isPinned = isOn && rows >= MIN_PINNED_ROWS
+
   // Room is short under WIDE_FROM columns: one subagent at once, and the
-  // current turn's tool calls three at once.
-  const [subagentAt, toolAt, recent] = await Promise.all([read($, subagentTop), read($, toolTop), read($, recentTurns)])
-  const subagentsCard = subagentsCardOf($, ui, listed, figured, at, columns, subagentAt, false, 0, NARROW_SUBAGENT_ROWS)
-  const toolsCard = toolsCardOf($, ui, recent.at(-1), toolAt, NARROW_TOOL_ROWS)
-  // Under WIDE_FROM columns the card shows the current turn, as the
-  // terminal's one column does; its text stands a cell in from each side.
+  // current turn's tool calls three at once, unless the card takes what the
+  // others leave.
+  const [subagentAt, toolAt, turnAt, recent, folded, picked, isSaved] = await Promise.all([
+    read($, subagentTop),
+    read($, toolTop),
+    read($, turnTop),
+    read($, recentTurns),
+    read($, foldedCards),
+    isOn ? read($, pickedTurn) : null,
+    read($, isSaving),
+  ])
+
+  // The recent turns, folded here unless the person opened them: pressed
+  // while the summary runs, a turn shows in the cards under the weather, as
+  // from WIDE_FROM columns.
+  const view = isOn ? shownTurnOf(turnNow, picked, recent) : { turn: turnNow, isPast: false }
+  const pastRow = view.isPast ? recent.find(one => one.turnId === view.turn?.turnId) : undefined
+  const cardOf = pastRow === undefined ? { listed, figured, more: 0 } : subagentsOfRecord(pastRow, listed, figured)
+  const callsRow = pastRow ?? recent.at(-1)
+  const turnsFolded = !folded.includes('narrowTurns')
+  const turnsShownCount = Math.min(recent.length, maxRecent(), NARROW_TURN_ROWS)
+  const turnsCard = turnsCardOf($, ui, {
+    recent,
+    isOn,
+    shownId: isOn ? view.turn?.turnId : undefined,
+    currentId: turnNow?.turnId,
+    isSaved,
+    foldName: 'narrowTurns',
+    fold: { isFolded: turnsFolded, grows: false },
+    rows: NARROW_TURN_ROWS,
+    top: turnAt,
+  })
+
+  const plan = foldPlanOf({
+    folded,
+    isOn,
+    room: isPinned ? rows - NARROW_HEAD_ROWS - (alert !== null ? 2 : 0) : null,
+    subagents: { count: cardOf.listed.length, rows: NARROW_SUBAGENT_ROWS },
+    tools: { count: callsRow?.calls?.length ?? 0, rows: NARROW_TOOL_ROWS },
+    // The recent turns stand between the tools and the summary.
+    taken:
+      turnsShownCount === 0
+        ? 0
+        : CARD_GAP_ROWS + CARD_TOP_ROWS + (turnsFolded ? 0 : 1 + (turnsShownCount * TURN_ROW_PX) / LINE_PX),
+  })
+  const subagentsCard = subagentsCardOf(
+    $,
+    ui,
+    cardOf.listed,
+    cardOf.figured,
+    at,
+    columns,
+    subagentAt,
+    false,
+    cardOf.more,
+    plan.subagents.rows,
+    plan.subagents.fold,
+  )
+  const toolsCard = toolsCardOf($, ui, callsRow, toolAt, plan.tools.rows, plan.tools.fold)
+  // The turn shown, the current one unless one was picked; its text stands a
+  // cell in from each side. Its arrows step through the turn shown.
   const thinkingCard =
     isOn &&
     thinkingCardOf($, ui, {
       turnNow,
-      shown: turnNow,
-      isPast: false,
+      shown: view.turn,
+      isPast: view.isPast,
       place,
       at,
       rows,
       cardColumns: columns - 2,
-      isWide: false,
+      isWide: true,
       overhead: PANE_OVERHEAD,
+      isFolded: plan.isThinkingFolded,
     })
 
   const footer = footerOf($, ui, isOn, summarySpent, isDebugging)
-
-  // A body tall enough pins the cards and lets the summary take what is
-  // left, cut at the bottom; a shorter one scrolls whole, as the engine does.
-  const isPinned = isOn && rows >= MIN_PINNED_ROWS
 
   return (
     <Box flexDirection="column" gap="sm" {...(isPinned ? { height: rows } : {})}>
@@ -3936,6 +4111,7 @@ const drawNarrowDesktop = async ($: EngineInterface, ui: DesktopUi, columns: num
       {lastTurnChip}
       {subagentsCard}
       {toolsCard}
+      {turnsCard}
       {thinkingCard}
       {footer}
     </Box>
@@ -3966,10 +4142,10 @@ const moveSubagents = async ($: EngineInterface, by: number, rows: number) => {
   if (to !== top) await update($, subagentTop, () => to)
 }
 
-// The row of the turn picked from the recent turns, where the wide layout
-// shows one; undefined for the newest.
+// The row of the turn picked from the recent turns, where the pane shows
+// one; undefined for the newest.
 const pickedRecordOf = async ($: EngineInterface) => {
-  if (!isWideDrawn) return undefined
+  if (!isPickingDrawn) return undefined
 
   const [picked, recent] = await Promise.all([read($, pickedTurn), read($, recentTurns)])
 
@@ -3997,20 +4173,29 @@ const moveTools = async ($: EngineInterface, by: number, rows: number) => {
 // row for each of `rows`, newest first from `top`, ▲ and ▼ scrolling the
 // rest: the tool's icon, the tool and what it was aimed at, the subagent
 // that made it where one did, and its time into the turn. Drawn for a turn
-// that made none too, which it says.
-const toolsCardOf = ($: EngineInterface, ui: DesktopUi, row: RecentTurn | undefined, top: number, rows = DESK_TOOL_ROWS) => {
+// that made none too, which it says. Folded, its top line alone, with how
+// many calls; growing, it takes the height left, `rows` sized to it.
+const toolsCardOf = (
+  $: EngineInterface,
+  ui: DesktopUi,
+  row: RecentTurn | undefined,
+  top: number,
+  rows = DESK_TOOL_ROWS,
+  fold: CardFold = OPEN,
+) => {
   const { Box, Button, Svg, Text } = ui
   const calls = row?.calls ?? []
   const made = row?.tools ?? 0
-  const canScroll = calls.length > rows
+  const canScroll = !fold.isFolded && calls.length > rows
   const first = Math.max(0, Math.min(top, calls.length - rows))
-  const shown = [...calls].reverse().slice(first, first + rows)
+  const shown = fold.isFolded ? [] : [...calls].reverse().slice(first, first + rows)
   const more = row?.moreCalls ?? 0
   const labelOf = (agentId: string) => row?.subagents?.find(one => one.id === agentId)?.label ?? 'Subagent'
 
   return (
-    <Box flexDirection="column" gap="xs" paddingX={1} paddingY="sm" {...cardLook(DESK.card)}>
+    <Box flexDirection="column" gap="xs" paddingX={1} paddingY="sm" {...cardLook(DESK.card)} {...(fold.grows ? GROWS : {})}>
       <Box flexDirection="row" alignItems="center" gap={1}>
+        {foldButtonOf($, ui, 'tools', fold.isFolded)}
         <Svg source={iconSvg('tool', INK.mine, 18)} alt="Tools" width={18} height={18} />
         <Text weight="semibold">Tools</Text>
         {made > 0 && chipOf(ui, plural(made, 'call'))}
@@ -4025,7 +4210,7 @@ const toolsCardOf = ($: EngineInterface, ui: DesktopUi, row: RecentTurn | undefi
         {canScroll && <Button key="tools-up" plain dimColor label="▲" onPress={() => moveTools($, -1, rows).catch(() => {})} />}
         {canScroll && <Button key="tools-down" plain dimColor label="▼" onPress={() => moveTools($, 1, rows).catch(() => {})} />}
       </Box>
-      {made === 0 && (
+      {made === 0 && !fold.isFolded && (
         <Text size="caption" dimColor>
           No tools called in this turn
         </Text>
@@ -4052,7 +4237,7 @@ const toolsCardOf = ($: EngineInterface, ui: DesktopUi, row: RecentTurn | undefi
           )}
         </Box>
       ))}
-      {more > 0 && (!canScroll || first + shown.length >= calls.length) && (
+      {more > 0 && !fold.isFolded && (!canScroll || first + shown.length >= calls.length) && (
         <Text size="caption" dimColor>
           {`and ${more} earlier not kept`}
         </Text>
@@ -4078,19 +4263,21 @@ const subagentsCardOf = (
   showTotal = false,
   more = 0,
   rows = DESK_SUBAGENT_ROWS,
+  fold: CardFold = OPEN,
 ) => {
   const { Box, Button, Svg, Text } = ui
   const working = workingOf(listed)
   const finished = listed.length - working
   const total = listed.reduce((sum, one) => sum + tokensOf(figured.find(figure => figure.id === one.id)), 0)
   const barCells = Math.max(10, columns - ROW_INDENT - 18)
-  const canScroll = listed.length > rows
+  const canScroll = !fold.isFolded && listed.length > rows
   const first = Math.max(0, Math.min(top, listed.length - rows))
-  const shown = subagentOrder(listed).slice(first, first + rows)
+  const shown = fold.isFolded ? [] : subagentOrder(listed).slice(first, first + rows)
 
   return (
-    <Box flexDirection="column" gap="xs" paddingX={1} paddingY="sm" {...cardLook(DESK.card)}>
+    <Box flexDirection="column" gap="xs" paddingX={1} paddingY="sm" {...cardLook(DESK.card)} {...(fold.grows ? GROWS : {})}>
       <Box flexDirection="row" alignItems="center" gap={1}>
+        {foldButtonOf($, ui, 'subagents', fold.isFolded)}
         <Svg source={iconSvg('fork', INK.mine, 18)} alt="Subagents" width={18} height={18} />
         <Text weight="semibold">Subagents</Text>
         {working > 0 && chipOf(ui, `${working} at work`, true)}
@@ -4118,7 +4305,7 @@ const subagentsCardOf = (
           <Button key="subagents-down" plain dimColor label="▼" onPress={() => moveSubagents($, 1, rows).catch(() => {})} />
         )}
       </Box>
-      {listed.length === 0 && (
+      {listed.length === 0 && !fold.isFolded && (
         <Text size="caption" dimColor>
           No subagents ran in this turn
         </Text>
@@ -4186,7 +4373,7 @@ const subagentsCardOf = (
             </Box>
           )
         })}
-      {more > 0 && (
+      {more > 0 && !fold.isFolded && (
         <Text size="caption" dimColor>
           {`and ${more} more not kept`}
         </Text>
@@ -4211,6 +4398,8 @@ type ThinkingView = {
   cardColumns: number
   isWide: boolean
   overhead: number
+  // Folded to its top line by the person.
+  isFolded?: boolean
 }
 
 // The thinking card: the turn's updates as the terminal lists them, newest
@@ -4221,11 +4410,16 @@ type ThinkingView = {
 const thinkingCardOf = ($: EngineInterface, ui: DesktopUi, view: ThinkingView) => {
   const { Box, Button, Svg, Text } = ui
   const { shown, isPast } = view
-  const isPinned = view.rows >= MIN_PINNED_ROWS
+  const isFolded = view.isFolded === true
+  // Folded, it stands its top line high, and the card under it takes none
+  // of the height: there is none.
+  const isPinned = view.rows >= MIN_PINNED_ROWS && !isFolded
   // The lines measured at the card's width, the measure the arrows step
   // through.
   const width = widthOf(view.cardColumns, 'desktop')
-  const { shown: groups, newer, canScroll } = windowOf(shown, width, view.place, isPinned, view.rows)
+  const laid = windowOf(shown, width, view.place, isPinned, view.rows)
+  const { shown: groups, newer } = isFolded ? { shown: [], newer: 0 } : laid
+  const canScroll = !isFolded && laid.canScroll
   const step = pageStep(view.rows, view.overhead)
 
   const title = shown !== null && isPast ? `Turn at ${formatTime(shown.startedAt)}` : 'Thinking'
@@ -4247,7 +4441,7 @@ const thinkingCardOf = ($: EngineInterface, ui: DesktopUi, view: ThinkingView) =
         : shown.paused !== undefined
           ? waitingFor(shown.paused.subagents)
           : null
-  const status = isPast ? (shown?.entries.length === 0 ? 'No updates on this turn.' : null) : statusOf(view.turnNow)
+  const status = isFolded ? null : isPast ? (shown?.entries.length === 0 ? 'No updates on this turn.' : null) : statusOf(view.turnNow)
   // The rule between two updates: a hairline drawn across the card's whole
   // width, standing a line high as the updates' lines do. A row of ─ in the
   // app's font came out a little wider than the card and was cut with "…".
@@ -4267,6 +4461,7 @@ const thinkingCardOf = ($: EngineInterface, ui: DesktopUi, view: ThinkingView) =
       {...(isPinned ? { flexGrow: 1, flexShrink: 1, overflow: 'hidden' as const } : {})}
     >
       <Box flexDirection="row" alignItems="center" gap={1}>
+        {foldButtonOf($, ui, 'thinking', isFolded)}
         <Svg source={iconSvg('compass', INK.mine, 18)} alt="Thinking" width={18} height={18} />
         <Text weight="semibold">{title}</Text>
         {took !== null && (
@@ -4349,6 +4544,216 @@ const thinkingCardOf = ($: EngineInterface, ui: DesktopUi, view: ThinkingView) =
   )
 }
 
+// The recent turns the narrow layout's card shows at once, open; ▲ and ▼
+// scroll the rest. From WIDE_FROM columns it shows as many as fit. The
+// terminal, which has no arrows for them, lists the newest ten.
+const NARROW_TURN_ROWS = 5
+const TERMINAL_TURN_ROWS = 10
+
+// Moves the recent turns' window `by` turns (negative toward the newest),
+// the card showing `rows` at once.
+const moveTurns = async ($: EngineInterface, by: number, rows: number) => {
+  const [recent, top] = await Promise.all([read($, recentTurns), read($, turnTop)])
+  const last = Math.max(0, Math.min(recent.length, maxRecent()) - rows)
+  const to = Math.max(0, Math.min(last, Math.min(top, last) + by))
+
+  if (to !== top) await update($, turnTop, () => to)
+}
+
+// The rows a recent turn's row stands in, and the turns a pinned wide
+// layout's card shows: the height its column has, less the context's card
+// and the limits' over it (each folded or open, the context with a row a
+// part of what fills it, the limits three a window and their legend), the
+// gaps, its top line and the table's header, at TURN_ROW_PX a turn; never
+// fewer than three.
+const wideTurnRowsOf = (fit: { room: number; isContextFolded: boolean; fills: number; isLimitsFolded: boolean; windows: number }) => {
+  const turnRows = TURN_ROW_PX / LINE_PX
+  const contextHigh = fit.isContextFolded ? CARD_TOP_ROWS : CARD_TOP_ROWS + 3 + fit.fills
+  const limitsHigh = fit.windows === 0 ? 0 : fit.isLimitsFolded ? CARD_TOP_ROWS : CARD_TOP_ROWS + 3 * fit.windows + 1
+  const left = fit.room - contextHigh - limitsHigh - 2 * CARD_GAP_ROWS - CARD_TOP_ROWS - 1
+
+  return Math.max(3, Math.floor(left / turnRows))
+}
+
+// The recent turns, newest first, as a table: when each began and how long
+// it ran (pressed while the summary runs to show it, the one shown marked ▸
+// on a fill), what it added to the context over a bar beside the others',
+// how many subagents it started, and its tool calls; and the person's switch
+// for persisting them. The rows stand TURN_ROW_PX apart, with no gap between
+// them. Folded, its top line alone, how many turns it keeps and the switch;
+// growing, it takes the height the cards above it leave, cut at the bottom.
+// Both of the desktop's layouts draw it, each folding it by a name of its own.
+// It shows `rows` turns at once from `top` (all where `rows` is null), ▲ and
+// ▼ on its top line scrolling the rest a turn a press.
+const turnsCardOf = (
+  $: EngineInterface,
+  ui: DesktopUi,
+  card: {
+    recent: readonly RecentTurn[]
+    isOn: boolean
+    shownId: string | undefined
+    currentId: string | undefined
+    isSaved: boolean
+    foldName: Folding
+    fold: CardFold
+    rows: number | null
+    top: number
+  },
+) => {
+  const { Box, Button, Svg, Text } = ui
+  const { recent, isOn, shownId, currentId, isSaved, foldName, fold } = card
+  const turnsShown = recent.slice(-maxRecent()).reverse()
+  // The bars beside one another across the whole list, scrolled or not.
+  const mostGrown = Math.max(1, ...turnsShown.map(one => grownOf(one) ?? 0))
+  const turnsFolded = fold.isFolded
+  const rows = card.rows ?? turnsShown.length
+  const canScroll = !turnsFolded && turnsShown.length > rows
+  const first = Math.max(0, Math.min(card.top, turnsShown.length - rows))
+  const visible = turnsShown.slice(first, first + rows)
+
+  return turnsShown.length > 0 && (
+    <Box
+      flexDirection="column"
+      gap="xs"
+      paddingX={1}
+      paddingY="sm"
+      {...cardLook(DESK.card)}
+      {...(fold.grows ? GROWS : {})}
+    >
+      <Box flexDirection="row" alignItems="center" gap={1}>
+        {foldButtonOf($, ui, foldName, turnsFolded)}
+        <Text size="caption" weight="medium" dimColor>
+          Recent turns
+        </Text>
+        {turnsFolded && (
+          <Text size="caption" dimColor tabular>
+            {plural(turnsShown.length, 'turn')}
+          </Text>
+        )}
+        <Box flexGrow={1} />
+        {canScroll && (
+          <Box flexShrink={0}>
+            <Text size="caption" dimColor tabular>
+              {visible.length === 1
+                ? `${first + 1} of ${turnsShown.length}`
+                : `${first + 1}–${first + visible.length} of ${turnsShown.length}`}
+            </Text>
+          </Box>
+        )}
+        {canScroll && <Button key="turns-up" plain dimColor label="▲" onPress={() => moveTurns($, -1, rows).catch(() => {})} />}
+        {canScroll && <Button key="turns-down" plain dimColor label="▼" onPress={() => moveTurns($, 1, rows).catch(() => {})} />}
+        <Button
+          key={SAVE_TOGGLE}
+          plain
+          dimColor={!isSaved}
+          label={isSaved ? '☑ Persist' : '☐ Persist'}
+          onPress={() => setSaving($, !isSaved).catch(() => {})}
+        />
+      </Box>
+      {/* The header over the columns, the subagents and the tool calls by
+          the icons their cards on the right carry. */}
+      {!turnsFolded && (
+      <Box flexDirection="row" alignItems="center" gap={1} paddingRight={1}>
+        <Box width={TIME_CELLS + 1 + TOOK_CELLS} flexShrink={0}>
+          <Text size="caption" dimColor wrap="truncate">
+            Time · Duration
+          </Text>
+        </Box>
+        <Box flexGrow={1} flexShrink={1} minWidth={0}>
+          <Text size="caption" dimColor wrap="truncate">
+            Context added
+          </Text>
+        </Box>
+        <Box width={AGENTS_CELLS} flexShrink={0} justifyContent="flex-end">
+          <Svg source={iconSvg('fork', INK.grey, 14)} alt="Agents" width={14} height={14} />
+        </Box>
+        <Box width={TOOLS_CELLS} flexShrink={0} justifyContent="flex-end">
+          <Svg source={iconSvg('tool', INK.grey, 14)} alt="Tools" width={14} height={14} />
+        </Box>
+      </Box>
+      )}
+      {!turnsFolded && (
+      <Box flexDirection="column">
+        {visible.map((one, at) => {
+          const isShown = isOn && one.turnId === shownId
+          const time = formatTime(one.startedAt)
+          // Its place in the whole list: the newest alone may still run.
+          const index = first + at
+          const took =
+            one.durationMs !== undefined
+              ? formatDuration(one.durationMs)
+              : index === 0 && one.isAborted !== true
+                ? one.isWaiting === true
+                  ? 'waiting'
+                  : 'running'
+                : '—'
+          const ran = `${took}${one.isAborted === true ? ' · interrupted' : ''}`
+          const added = grownOf(one)
+          // The subagents it started, those past the ones kept with them;
+          // none leaves the cell blank, so the turns that ran some stand out.
+          const started = (one.subagents?.length ?? 0) + (one.moreSubagents ?? 0)
+          const growth = barSvg(
+            [{ from: 0, to: added === null ? 0 : clamp01(added / mostGrown), ink: isShown ? INK.mine : INK.grey }],
+            12,
+            undefined,
+            6,
+            TURN_ROW_PX,
+          )
+
+          // The shown turn's fill lies under its row, placed over the row's
+          // whole box: the round border that rounds it takes room inside the
+          // Box it is on, which on the row itself made the row taller. The
+          // row's parts are placed too, so they are painted over the fill.
+          return (
+            <Box position="relative" flexDirection="row" alignItems="center" gap={1} paddingRight={1}>
+              {isShown && <Box position="absolute" top={0} bottom={0} left={0} right={0} {...cardLook(DESK.raised)} />}
+              <Box position="relative" width={TIME_CELLS + 1 + TOOK_CELLS} flexShrink={0}>
+                {isOn ? (
+                  <Button
+                    key={`turn-${one.turnId}`}
+                    plain
+                    dimColor={!isShown}
+                    onPress={() => pickTurn($, one.turnId === currentId ? null : one.turnId).catch(() => {})}
+                  >
+                    {`${isShown ? '▸ ' : ''}${time}  `}
+                    <Text>{ran}</Text>
+                  </Button>
+                ) : (
+                  <Text dimColor wrap="truncate">
+                    {`${time}  ${ran}`}
+                  </Text>
+                )}
+              </Box>
+              <Box position="relative" flexDirection="row" alignItems="center" gap={1} flexGrow={1} flexShrink={1} minWidth={0}>
+                <Box flexGrow={1} flexShrink={1} minWidth={0}>
+                  <Svg source={growth.source} alt={added === null ? 'Context added not known' : `Added ${formatTokens(Math.abs(added))}`} height={growth.height} />
+                </Box>
+                <Box width={ADDED_CELLS} flexShrink={0} justifyContent="flex-end">
+                  <Text size="caption" dimColor={!isShown} tabular>
+                    {added === null ? '—' : added < 0 ? `-${formatTokens(-added)}` : `+${formatTokens(added)}`}
+                  </Text>
+                </Box>
+              </Box>
+              <Box position="relative" width={AGENTS_CELLS} flexShrink={0} justifyContent="flex-end">
+                {started > 0 && (
+                  <Text size="caption" dimColor={!isShown} tabular>
+                    {`${started}`}
+                  </Text>
+                )}
+              </Box>
+              <Box position="relative" width={TOOLS_CELLS} flexShrink={0} justifyContent="flex-end">
+                <Text size="caption" dimColor={!isShown} tabular>
+                  {`${one.tools}`}
+                </Text>
+              </Box>
+            </Box>
+          )
+        })}
+      </Box>
+      )}
+    </Box>
+  )
+}
 // The summary's footer on the desktop: what it cost, and its switch.
 const footerOf = ($: EngineInterface, ui: DesktopUi, isOn: boolean, spent: number, isDebugging: boolean) => {
   const { Box, Button, Text } = ui
@@ -4433,7 +4838,7 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
     ? await Promise.all([read($, thinking), read($, pickedTurn), read($, summaryPlace), read($, summaryCost), read($, isDebugOn)])
     : ([null, null, { line: 0, row: 0 }, 0, false] as const)
   isRoomyDrawn = true
-  isWideDrawn = isOn
+  isPickingDrawn = isOn
 
   const windows = shownWindowsOf(readings, parts, at)
   const tokens = now?.tokens
@@ -4505,12 +4910,34 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
   const contextBar = barSvg(fillRuns, barCells, compactMark, 10)
   const { grown, rest: lastParts } = lastTurnPartsOf(added, turn)
 
-  const contextCard = (
+  // The cards the person folded to their top line: the left column's each
+  // keeps its gist there.
+  const folded = await read($, foldedCards)
+  const isFolded = (name: Folding) => folded.includes(name)
+  const contextGist =
+    tokens !== undefined && percent !== undefined && now !== null ? `${percent}% · ${formatTokens(tokens)} / ${formatTokens(now.window)}` : null
+
+  const contextCard = isFolded('context') ? (
+    <Box flexDirection="row" alignItems="center" gap={1} paddingX={1} paddingY="sm" {...cardLook(DESK.card)}>
+      {foldButtonOf($, ui, 'context', true)}
+      <Text size="caption" weight="medium" dimColor>
+        Context
+      </Text>
+      <Box flexGrow={1} />
+      {contextGist !== null && (
+        <Text size="caption" dimColor tabular wrap="truncate">
+          {contextGist}
+        </Text>
+      )}
+    </Box>
+  ) : (
     <Box flexDirection="column" gap="xs" paddingX={1} paddingY="sm" {...cardLook(DESK.card)}>
-      <Box flexDirection="row" justifyContent="space-between" gap={1}>
+      <Box flexDirection="row" alignItems="center" gap={1}>
+        {foldButtonOf($, ui, 'context', false)}
         <Text size="caption" weight="medium" dimColor>
           Context
         </Text>
+        <Box flexGrow={1} />
         {compactLine !== null && (
           <Text size="caption" dimColor wrap="truncate">
             {`${compactLine.charAt(0).toUpperCase()}${compactLine.slice(1)}`}
@@ -4571,11 +4998,28 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
 
   // The limits: each window's share used over a bar of this session's part
   // and its pace, when it resets and where the pace would take it.
-  const limitsCard = windows.length > 0 && (
+  const limitsGist = windows.map(window => `${WINDOW_TITLES[window.kind] ?? window.name} ${window.used}%`).join(' · ')
+  const limitsCard =
+    windows.length > 0 &&
+    (isFolded('limits') ? (
+      <Box flexDirection="row" alignItems="center" gap={1} paddingX={1} paddingY="sm" {...cardLook(DESK.card)}>
+        {foldButtonOf($, ui, 'limits', true)}
+        <Text size="caption" weight="medium" dimColor>
+          Usage limits
+        </Text>
+        <Box flexGrow={1} />
+        <Text size="caption" dimColor tabular wrap="truncate">
+          {limitsGist}
+        </Text>
+      </Box>
+    ) : (
     <Box flexDirection="column" gap="sm" paddingX={1} paddingY="sm" {...cardLook(DESK.card)}>
-      <Text size="caption" weight="medium" dimColor>
-        Usage limits
-      </Text>
+      <Box flexDirection="row" alignItems="center" gap={1}>
+        {foldButtonOf($, ui, 'limits', false)}
+        <Text size="caption" weight="medium" dimColor>
+          Usage limits
+        </Text>
+      </Box>
       {windows.map(window => {
         const title = WINDOW_TITLES[window.kind] ?? window.name
         const pace = paceOf(window.percent, window.elapsed)
@@ -4627,138 +5071,50 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
         ))}
       </Box>
     </Box>
-  )
+    ))
 
-  // The recent turns, newest first, as a table: when each began and how long
-  // it ran (pressed beside the summary to show its updates, the one shown
-  // marked ▸ on a fill), what it added to the context over a bar beside the
-  // others', and its tool calls; and the person's switch for persisting them.
-  // The rows stand TURN_ROW_PX apart, with no gap between them.
-  const turnsShown = recent.slice(-maxRecent()).reverse()
-  const mostGrown = Math.max(1, ...turnsShown.map(one => grownOf(one) ?? 0))
-  const turnsCard = turnsShown.length > 0 && (
-    <Box
-      flexDirection="column"
-      gap="xs"
-      paddingX={1}
-      paddingY="sm"
-      {...cardLook(DESK.card)}
-      {...(isOn && rows >= MIN_PINNED_ROWS ? { flexGrow: 1, flexShrink: 1, overflow: 'hidden' as const } : {})}
-    >
-      <Box flexDirection="row" justifyContent="space-between" alignItems="center">
-        <Text size="caption" weight="medium" dimColor>
-          Recent turns
-        </Text>
-        <Button
-          key={SAVE_TOGGLE}
-          plain
-          dimColor={!isSaved}
-          label={isSaved ? '☑ Persist' : '☐ Persist'}
-          onPress={() => setSaving($, !isSaved).catch(() => {})}
-        />
-      </Box>
-      {/* The header over the columns, the subagents and the tool calls by
-          the icons their cards on the right carry. */}
-      <Box flexDirection="row" alignItems="center" gap={1} paddingRight={1}>
-        <Box width={TIME_CELLS + 1 + TOOK_CELLS} flexShrink={0}>
-          <Text size="caption" dimColor wrap="truncate">
-            Time · Duration
-          </Text>
-        </Box>
-        <Box flexGrow={1} flexShrink={1} minWidth={0}>
-          <Text size="caption" dimColor wrap="truncate">
-            Context added
-          </Text>
-        </Box>
-        <Box width={AGENTS_CELLS} flexShrink={0} justifyContent="flex-end">
-          <Svg source={iconSvg('fork', INK.grey, 14)} alt="Agents" width={14} height={14} />
-        </Box>
-        <Box width={TOOLS_CELLS} flexShrink={0} justifyContent="flex-end">
-          <Svg source={iconSvg('tool', INK.grey, 14)} alt="Tools" width={14} height={14} />
-        </Box>
-      </Box>
-      <Box flexDirection="column">
-        {turnsShown.map((one, index) => {
-          const isShown = isOn && one.turnId === view.turn?.turnId
-          const time = formatTime(one.startedAt)
-          const took =
-            one.durationMs !== undefined
-              ? formatDuration(one.durationMs)
-              : index === 0 && one.isAborted !== true
-                ? one.isWaiting === true
-                  ? 'waiting'
-                  : 'running'
-                : '—'
-          const ran = `${took}${one.isAborted === true ? ' · interrupted' : ''}`
-          const added = grownOf(one)
-          // The subagents it started, those past the ones kept with them;
-          // none leaves the cell blank, so the turns that ran some stand out.
-          const started = (one.subagents?.length ?? 0) + (one.moreSubagents ?? 0)
-          const growth = barSvg(
-            [{ from: 0, to: added === null ? 0 : clamp01(added / mostGrown), ink: isShown ? INK.mine : INK.grey }],
-            12,
-            undefined,
-            6,
-            TURN_ROW_PX,
-          )
-
-          // The shown turn's fill lies under its row, placed over the row's
-          // whole box: the round border that rounds it takes room inside the
-          // Box it is on, which on the row itself made the row taller. The
-          // row's parts are placed too, so they are painted over the fill.
-          return (
-            <Box position="relative" flexDirection="row" alignItems="center" gap={1} paddingRight={1}>
-              {isShown && <Box position="absolute" top={0} bottom={0} left={0} right={0} {...cardLook(DESK.raised)} />}
-              <Box position="relative" width={TIME_CELLS + 1 + TOOK_CELLS} flexShrink={0}>
-                {isOn ? (
-                  <Button
-                    key={`turn-${one.turnId}`}
-                    plain
-                    dimColor={!isShown}
-                    onPress={() => pickTurn($, one.turnId === turnNow?.turnId ? null : one.turnId).catch(() => {})}
-                  >
-                    {`${isShown ? '▸ ' : ''}${time}  `}
-                    <Text>{ran}</Text>
-                  </Button>
-                ) : (
-                  <Text dimColor wrap="truncate">
-                    {`${time}  ${ran}`}
-                  </Text>
-                )}
-              </Box>
-              <Box position="relative" flexDirection="row" alignItems="center" gap={1} flexGrow={1} flexShrink={1} minWidth={0}>
-                <Box flexGrow={1} flexShrink={1} minWidth={0}>
-                  <Svg source={growth.source} alt={added === null ? 'Context added not known' : `Added ${formatTokens(Math.abs(added))}`} height={growth.height} />
-                </Box>
-                <Box width={ADDED_CELLS} flexShrink={0} justifyContent="flex-end">
-                  <Text size="caption" dimColor={!isShown} tabular>
-                    {added === null ? '—' : added < 0 ? `-${formatTokens(-added)}` : `+${formatTokens(added)}`}
-                  </Text>
-                </Box>
-              </Box>
-              <Box position="relative" width={AGENTS_CELLS} flexShrink={0} justifyContent="flex-end">
-                {started > 0 && (
-                  <Text size="caption" dimColor={!isShown} tabular>
-                    {`${started}`}
-                  </Text>
-                )}
-              </Box>
-              <Box position="relative" width={TOOLS_CELLS} flexShrink={0} justifyContent="flex-end">
-                <Text size="caption" dimColor={!isShown} tabular>
-                  {`${one.tools}`}
-                </Text>
-              </Box>
-            </Box>
-          )
-        })}
-      </Box>
-    </Box>
-  )
+  // The recent turns: in a pinned pane they take the height the cards above
+  // them leave, unless folded.
+  const turnsCard = turnsCardOf($, ui, {
+    recent,
+    isOn,
+    shownId: isOn ? view.turn?.turnId : undefined,
+    currentId: turnNow?.turnId,
+    isSaved,
+    foldName: 'turns',
+    fold: { isFolded: isFolded('turns'), grows: isOn && rows >= MIN_PINNED_ROWS && !isFolded('turns') },
+    // Pinned, as many as fit, ▲ and ▼ scrolling the rest; else all of them,
+    // the pane scrolling whole.
+    rows:
+      isOn && rows >= MIN_PINNED_ROWS
+        ? wideTurnRowsOf({
+            room: rows - WIDE_HEAD_ROWS,
+            isContextFolded: isFolded('context'),
+            fills: filled?.length ?? 0,
+            isLimitsFolded: isFolded('limits'),
+            windows: windows.length,
+          })
+        : null,
+    top: await read($, turnTop),
+  })
 
   // A turn picked from the list shows the subagents it started; the current
   // one, those listed now.
   const pastRow = view.isPast ? recent.find(one => one.turnId === view.turn?.turnId) : undefined
   const cardOf = pastRow === undefined ? { listed, figured, more: 0 } : subagentsOfRecord(pastRow, listed, figured)
+  const callsRow = pastRow ?? recent.at(-1)
+  // A body tall enough pins both columns to it, each cut at the bottom: the
+  // oldest turns go first on the left; on the right the lowest card open
+  // takes what is left, the summary's oldest lines cut, or the oldest calls
+  // or subagents.
+  const isPinned = isOn && rows >= MIN_PINNED_ROWS
+  const plan = foldPlanOf({
+    folded,
+    isOn,
+    room: isPinned ? rows - WIDE_HEAD_ROWS : null,
+    subagents: { count: cardOf.listed.length, rows: DESK_SUBAGENT_ROWS },
+    tools: { count: callsRow?.calls?.length ?? 0, rows: DESK_TOOL_ROWS },
+  })
   const subagentsCard = subagentsCardOf(
     $,
     ui,
@@ -4769,9 +5125,11 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
     await read($, subagentTop),
     true,
     cardOf.more,
+    plan.subagents.rows,
+    plan.subagents.fold,
   )
   // Under them the tool calls of the same turn.
-  const toolsCard = toolsCardOf($, ui, pastRow ?? recent.at(-1), await read($, toolTop))
+  const toolsCard = toolsCardOf($, ui, callsRow, await read($, toolTop), plan.tools.rows, plan.tools.fold)
   const footer = footerOf($, ui, isOn, summarySpent, isDebugging)
 
   // With the summary off there is nothing to stand beside: one column.
@@ -4789,10 +5147,6 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
     )
   }
 
-  // A body tall enough pins both columns to it, each cut at the bottom: the
-  // oldest turns go first on the left, the oldest lines of the summary on
-  // the right, where the arrows scroll them.
-  const isPinned = rows >= MIN_PINNED_ROWS
   const thinkingCard = thinkingCardOf($, ui, {
     turnNow,
     shown: view.turn,
@@ -4803,6 +5157,7 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
     cardColumns: rightCells - 2,
     isWide: true,
     overhead: WIDE_OVERHEAD,
+    isFolded: plan.isThinkingFolded,
   })
 
   return (
@@ -5046,6 +5401,8 @@ export const register: Register = (on, options) => {
         // The desktop's cards list them again from the top.
         await update($, subagentTop, () => 0)
         await update($, toolTop, () => 0)
+        // The recent turns from the newest, the new prompt's on top.
+        await update($, turnTop, () => 0)
       }
 
       if (isOn) {
@@ -5368,6 +5725,7 @@ export const register: Register = (on, options) => {
       await update($, pickedTurn, () => null)
       await update($, subagentTop, () => 0)
       await update($, toolTop, () => 0)
+      await update($, turnTop, () => 0)
       await update($, isSaving, () => false)
       await showStatus($).catch(() => {})
       await toNewest($)
@@ -5531,7 +5889,7 @@ export const register: Register = (on, options) => {
         ])
       : ([null, null, null, [] as SubagentFigures[], [] as RecentTurn[], null, false] as const)
     isRoomyDrawn = isRoomy
-    isWideDrawn = isWide
+    isPickingDrawn = isWide
     // The characters a row of the weather holds, what it adds cut to them
     // rather than wrapped: its column's beside the summary, else the body's.
     const weatherChars = isWide ? WEATHER_CHARS : widthOf(e.props.bodyColumns, e.surface)
@@ -5839,7 +6197,7 @@ export const register: Register = (on, options) => {
         {recent.length > 0 && (
           <Box flexDirection="column">
             {recentHeader}
-            {recent.slice(-maxRecent()).reverse().map((one, index) => {
+            {recent.slice(-Math.min(maxRecent(), TERMINAL_TURN_ROWS)).reverse().map((one, index) => {
               // Newest first, so that a column too short for them all cuts
               // the oldest. Beside the summary each is pressed to show its
               // updates there, the one shown marked ▸; with the summary off

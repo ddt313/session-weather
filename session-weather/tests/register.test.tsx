@@ -2329,7 +2329,7 @@ test('a recent turn pressed shows its updates beside the weather; a new prompt s
   expect((await turnRows($, 'terminal'))[0]).toBe(`▸ ${second} · running · 0 tools`)
 })
 
-test("a hand-back goes on in its turn's row; the list keeps the last ten turns, and a /clear empties it", async ($, on) => {
+test("a hand-back goes on in its turn's row; the list keeps the last thirty turns, the terminal showing ten, and a /clear empties it", async ($, on) => {
   const { agents, clock } = engine(on)
   on('session.end', ($$, e) => ({ sessionId: e.sessionId }))
 
@@ -2351,20 +2351,55 @@ test("a hand-back goes on in its turn's row; the list keeps the last ten turns, 
   await clock.settle()
   expect(await turnRows($, 'terminal')).toEqual([`▸ ${clockOf(NOW)} · 30s · 0 tools`])
 
-  // Ten more prompts: the first turn goes from the list.
-  for (let at = 1; at <= 10; at += 1) {
+  // Thirty more prompts: the first turn goes from the list, which keeps
+  // thirty; the terminal lists the newest ten of them.
+  for (let at = 1; at <= 30; at += 1) {
     await $.turn.start({ text: `prompt ${at}`, turnId: `u${at}` })
     await $.turn.complete(turnDone({ turnId: `u${at}`, durationMs: 1_000 }) as never)
   }
 
   const rows = await turnRows($, 'terminal')
   expect(rows.length).toBe(10)
-  expect(rows.some(row => row.includes('30s'))).toBe(false)
+  const { texts } = await desk($)
+  expect(texts).toContain('30 turns')
+  expect(texts.some(text => text.includes('30s'))).toBe(false)
 
   // A /clear starts another conversation: its turns are listed from there.
   await endSession($, 'clear')
   expect(await turnRows($, 'terminal')).toEqual([])
   expect((await pane($, 'terminal', WIDE_FROM)).includes('Recent turns')).toBe(false)
+})
+
+test('on the desktop the recent turns scroll: as many as fit from WIDE_FROM columns, five under them, ▲ and ▼ a turn a press', async ($, on) => {
+  const { clock } = engine(on)
+
+  await $.session.start(start)
+  for (let at = 1; at <= 30; at += 1) {
+    await $.turn.start({ text: `prompt ${at}`, turnId: `u${at}` })
+    await $.turn.complete(turnDone({ turnId: `u${at}`, durationMs: 1_000 }) as never)
+    await clock.advance(MINUTE)
+  }
+
+  // Where the rows stand among the thirty, on the card's top line.
+  const placeOf = async (columns?: number) => (await desk($, columns)).texts.find(text => / of 30$/.test(text))
+
+  // From WIDE_FROM columns, in a pinned body: the newest that fit, from the
+  // top; ▼ to the oldest and no further, ▲ back up.
+  const top = await placeOf(WIDE_FROM)
+  expect(top).toMatch(/^1–\d+ of 30$/)
+  const fit = Number(top?.split('–')[1]?.split(' ')[0])
+  expect(fit).toBeGreaterThan(3)
+  expect(fit).toBeLessThan(30)
+  for (let n = 0; n < 40; n += 1) await pressDesk($, 'turns-down', WIDE_FROM)
+  expect(await placeOf(WIDE_FROM)).toBe(`${31 - fit}–30 of 30`)
+  await pressDesk($, 'turns-up', WIDE_FROM)
+  expect(await placeOf(WIDE_FROM)).toBe(`${30 - fit}–29 of 30`)
+
+  // Under them, opened: five at once.
+  await pressDesk($, 'fold-narrowTurns')
+  expect(await placeOf()).toMatch(/^\d+–\d+ of 30$/)
+  await $.turn.start({ text: 'next', turnId: 'u31' })
+  expect(await placeOf()).toBe('1–5 of 30')
 })
 
 test('how many turns the list keeps is a setting', { options: { recentTurns: 3 } }, async ($, on) => {
@@ -4402,6 +4437,17 @@ const desk = async ($: Test$, columns = 60) => {
   return { texts, alts: svgs.map(one => one.alt), svgs, labels }
 }
 
+// The switches that fold the subagents', the tools' and the thinking card,
+// first on each card's top line, all open.
+const FOLDS = ['▾', '▾', '▾']
+// Under WIDE_FROM columns, with a turn kept: the subagents' and the tools'
+// switches, the recent turns' folded with the switch to persist them, then
+// the thinking card's.
+const NARROW_FOLDS = ['▾', '▾', '▸', '☐ Persist', '▾']
+// From WIDE_FROM columns, the context's and the recent turns' switches, on
+// the left (a session with no limits read has no limits card).
+const LEFT_FOLDS = ['▾', '▾']
+
 // The person pressing a Button of the desktop pane, `columns` wide (under
 // WIDE_FROM unless given).
 const pressDesk = async ($: Test$, key: string, columns = 60) => {
@@ -4576,6 +4622,117 @@ test('on the desktop the subagents card shows one row at once under WIDE_FROM co
   expect((await card()).labels).toEqual(['▲', '▼'])
 })
 
+test('on the desktop a card folds to its top line and opens again, kept in the store; the lowest card open takes the height left', async ($, on) => {
+  const { clock, store } = engine(on)
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  for (let n = 1; n <= 30; n += 1) {
+    await clock.advance(1_000)
+    await $.tool.call({ tool: 'Read', file_path: `/work/f${n}.ts` } as never)
+  }
+
+  // In the pane's body of 30 rows, all open: the thinking card takes the
+  // height, the tools show their three under WIDE_FROM columns, five from
+  // them.
+  const tools = async (columns?: number) => (await desk($, columns)).texts.filter(text => text.startsWith('Read: ')).length
+  expect(await tools()).toBe(3)
+  expect(await tools(WIDE_FROM)).toBe(5)
+
+  // The thinking card folded: its top line alone, ▸ on it, kept in the
+  // store; the tools take what it left, more rows.
+  await pressDesk($, 'fold-thinking')
+  expect(store.get('foldedCards')).toEqual(['thinking'])
+  const folded = await desk($)
+  // The subagents', the tools', the recent turns' (folded here unless
+  // opened) and the thinking card's switches.
+  expect(folded.labels.filter(label => label === '▾' || label === '▸')).toEqual(['▾', '▾', '▸', '▸'])
+  expect(folded.texts.slice(folded.texts.indexOf('Thinking') + 1).every(text => !text.includes(' · ') || text.startsWith('Summary'))).toBe(true)
+  expect(await tools()).toBeGreaterThan(5)
+  expect(await tools(WIDE_FROM)).toBeGreaterThan(8)
+
+  // The tools folded too: their top line and its count alone; the subagents'
+  // card, the lowest open, takes the height.
+  await pressDesk($, 'fold-tools')
+  expect(store.get('foldedCards')).toEqual(['tools', 'thinking'])
+  expect(await tools()).toBe(0)
+  expect((await desk($)).alts).toContain('30 calls')
+
+  // Opened again, each as it was.
+  await pressDesk($, 'fold-tools')
+  await pressDesk($, 'fold-thinking')
+  expect(store.get('foldedCards')).toEqual([])
+  expect(await tools()).toBe(3)
+})
+
+test('from WIDE_FROM columns the context, the limits and the recent turns fold to their top line, each with its gist', async ($, on) => {
+  const { clock, steps, store } = engine(on, { rateLimits: limits(25), breakdown: BREAKDOWN })
+
+  await $.session.start(start)
+  await clock.settle()
+  await oneTurn($, steps, clock, 't1', 'fix it')
+  await $.session.measure(measure(90_000, 45))
+
+  await pressDesk($, 'fold-context', WIDE_FROM)
+  await pressDesk($, 'fold-limits', WIDE_FROM)
+  await pressDesk($, 'fold-turns', WIDE_FROM)
+  expect(store.get('foldedCards')).toEqual(['context', 'limits', 'turns'])
+
+  // Each card its top line: the context's fill, each window's share, the
+  // turns kept and the switch to persist them; nothing under them.
+  const { texts, labels } = await desk($, WIDE_FROM)
+  const left = texts.slice(texts.indexOf('Context'), texts.indexOf('Subagents'))
+  expect(left).toEqual(['Context', '45% · 90k / 200k', 'Usage limits', '5-hour 3% · Week 25%', 'Recent turns', '1 turn'])
+  expect(labels.slice(0, 4)).toEqual(['▸', '▸', '▸', '☐ Persist'])
+
+  // Opened again: the whole of each.
+  await pressDesk($, 'fold-turns', WIDE_FROM)
+  expect((await desk($, WIDE_FROM)).texts).toContain('Context added')
+})
+
+test('under WIDE_FROM columns the recent turns stand folded until opened, and a turn pressed shows in the cards', async ($, on) => {
+  const { replies, steps, clock, store } = engine(on)
+  await threeUpdates($, replies, steps, clock)
+  await $.tool.call({ tool: 'Read', file_path: '/work/first.ts' } as never)
+  await $.turn.complete(turnDone({ durationMs: 31_000 }) as never)
+  await clock.settle()
+  await clock.advance(MINUTE)
+  replies.push(answer('GIST: Bốn.'))
+  await oneTurn($, steps, clock, 't2', 'and this')
+  const [first, second] = [clockOf(NOW), clockOf(NOW + 31 * SECOND + MINUTE)]
+
+  // Folded: its top line, how many turns, the switch to persist them; no
+  // table, under the tools and over the summary.
+  const shut = await desk($)
+  expect(shut.texts.slice(shut.texts.indexOf('Recent turns'), shut.texts.indexOf('Recent turns') + 2)).toEqual(['Recent turns', '2 turns'])
+  expect(shut.texts.lastIndexOf('Tools')).toBeLessThan(shut.texts.indexOf('Recent turns'))
+  expect(shut.texts.indexOf('Recent turns')).toBeLessThan(shut.texts.indexOf('Thinking'))
+  expect(shut.texts).not.toContain('Context added')
+
+  // Opened, kept in the store; the wide layout's own is not touched.
+  await pressDesk($, 'fold-narrowTurns')
+  expect(store.get('foldedCards')).toEqual(['narrowTurns'])
+  const open = await desk($)
+  expect(open.labels).toEqual(expect.arrayContaining([`▸ ${second}  2s`, `${first}  31s`]))
+  expect((await desk($, WIDE_FROM)).texts).toContain('Context added')
+
+  // The turn before, pressed: the summary, the tools shown are its own.
+  await pressDesk($, 'turn-t1')
+  const past = await desk($)
+  expect(past.texts).toContain(`Turn at ${first}`)
+  expect(past.texts).toContain('Read: first.ts')
+  expect(past.labels).toContain(`▸ ${first}  31s`)
+})
+
+test('the cards the person folded stay folded when a session starts', async ($, on) => {
+  engine(on, { stored: { foldedCards: ['subagents', 'bogus'] } })
+
+  await $.session.start(start)
+  const { labels, texts } = await desk($)
+  expect(labels.slice(0, 2)).toEqual(['▸', '▾'])
+  expect(texts).not.toContain('No subagents ran in this turn')
+})
+
 test('on the desktop under WIDE_FROM columns the Tools card lists the current turn\'s calls three at once', async ($, on) => {
   const { clock } = engine(on)
 
@@ -4589,7 +4746,7 @@ test('on the desktop under WIDE_FROM columns the Tools card lists the current tu
   const card = async () => {
     const { texts } = await desk($)
 
-    return texts.slice(texts.lastIndexOf('Tools'), texts.findIndex(text => text === 'Thinking' || text.startsWith('Turn at ')))
+    return texts.slice(texts.lastIndexOf('Tools'), texts.indexOf('Recent turns'))
   }
 
   // Under the subagents' card, newest first, three of the four.
@@ -4653,7 +4810,7 @@ test("on the desktop under WIDE_FROM columns the thinking card lists the turn's 
   // The rules between them are drawn lines, one between each two.
   expect(alts.filter(alt => alt === 'Between updates').length).toBe(2)
   // Pinned in a body of 30 rows: the arrows to scroll it.
-  expect(labels).toEqual(['▲', '▼', 'Turn summary off'])
+  expect(labels).toEqual([...NARROW_FOLDS, '▲', '▼', 'Turn summary off'])
 })
 
 test("on the desktop ▲ and ▼ scroll the turn's updates about half the window a press, never to another turn", async ($, on) => {
@@ -4670,7 +4827,7 @@ test("on the desktop ▲ and ▼ scroll the turn's updates about half the window
   await pressDesk($, 'older')
   expect(await card()).toEqual({
     lines: ['Chỉ sửa file A'],
-    labels: ['▲', '▼', '↑ 3 newer updates', 'Turn summary off'],
+    labels: [...NARROW_FOLDS, '▲', '▼', '↑ 3 newer updates', 'Turn summary off'],
   })
 
   // ▲ goes back up; so does the newer updates' button, at once.
@@ -4688,7 +4845,7 @@ test("on the desktop ▲ and ▼ scroll the turn's updates about half the window
   const second = await card()
   expect(second.lines).toContain('1s · Claude đang sửa lỗi.')
   expect(second.lines.some(line => line.includes('Ba.'))).toBe(false)
-  expect(second.labels).toEqual(['Turn summary off'])
+  expect(second.labels).toEqual([...NARROW_FOLDS, 'Turn summary off'])
 })
 
 test('on the desktop from WIDE_FROM columns: the sky, the cost across the top; the context, the limits and the recent turns on the left', async ($, on) => {
@@ -4769,7 +4926,8 @@ test('on the desktop from WIDE_FROM columns: the sky, the cost across the top; t
     'Tools',
     'No tools called in this turn',
   ])
-  expect(labels).toEqual(['☐ Persist', `▸ ${clockOf(NOW)}  2s`, 'Turn summary off'])
+  // The left column's three cards fold too, each by its switch first.
+  expect(labels).toEqual(['▾', '▾', '▾', '☐ Persist', `▸ ${clockOf(NOW)}  2s`, ...FOLDS, 'Turn summary off'])
 })
 
 test('on the desktop from WIDE_FROM columns a recent turn pressed shows beside them, and ▲ ▼ scroll the turn shown', async ($, on) => {
@@ -4795,7 +4953,7 @@ test('on the desktop from WIDE_FROM columns a recent turn pressed shows beside t
   expect(await card()).toEqual({
     title: 'Thinking',
     lines: ['1s · Bốn.', '1s ·'],
-    labels: ['☐ Persist', `▸ ${second}  2s`, `${first}  31s`, 'Turn summary off'],
+    labels: [...LEFT_FOLDS, '☐ Persist', `▸ ${second}  2s`, `${first}  31s`, ...FOLDS, 'Turn summary off'],
   })
 
   // The one before, pressed: its updates, its recap on top, a drawn rule
@@ -4816,7 +4974,7 @@ test('on the desktop from WIDE_FROM columns a recent turn pressed shows beside t
       '1s ·',
       'Chỉ sửa file A',
     ],
-    labels: ['☐ Persist', `${second}  2s`, `▸ ${first}  31s`, '▲', '▼', 'Turn summary off'],
+    labels: [...LEFT_FOLDS, '☐ Persist', `${second}  2s`, `▸ ${first}  31s`, ...FOLDS, '▲', '▼', 'Turn summary off'],
   })
 
   // ▼ moves twelve rows, past the last of the seven: the four gists above.
@@ -4824,7 +4982,7 @@ test('on the desktop from WIDE_FROM columns a recent turn pressed shows beside t
   expect(await card()).toEqual({
     title: `Turn at ${first}`,
     lines: ['Chỉ sửa file A'],
-    labels: ['☐ Persist', `${second}  2s`, `▸ ${first}  31s`, '▲', '▼', '↑ 4 newer updates', 'Turn summary off'],
+    labels: [...LEFT_FOLDS, '☐ Persist', `${second}  2s`, `▸ ${first}  31s`, ...FOLDS, '▲', '▼', '↑ 4 newer updates', 'Turn summary off'],
   })
   await pressDesk($, 'newer', WIDE_FROM)
   expect((await card()).lines[0]).toBe('Recap. Claude đang sửa lỗi.')
@@ -5004,5 +5162,6 @@ test('on the desktop from WIDE_FROM columns with the summary off, the cards stan
   expect(texts.indexOf('Context')).toBeLessThan(texts.indexOf('Usage limits'))
   expect(texts).not.toContain('Thinking')
   expect(texts.at(-1)).toBe('Thinking summary is off')
-  expect(labels).toEqual(['Turn summary on'])
+  // The switches of the context, the limits, the subagents and the tools.
+  expect(labels).toEqual(['▾', '▾', '▾', '▾', 'Turn summary on'])
 })

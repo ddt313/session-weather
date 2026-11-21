@@ -93,8 +93,14 @@ top:
   tool call with an icon for its kind; and, once it has tokens, those beside
   a bar of its share of all the subagents' tokens. A row at work stands on a
   fill of its own.
-- The tools, as a card under it: the current turn's tool calls as the wide
+- The tools, as a card under it: the shown turn's tool calls as the wide
   layout lists them (see the tools card below), three at a time here.
+- The recent turns, folded here to their top line (`Recent turns 30 turns`
+  and **☐ Persist**) until you open them with ▸: then the wide layout's
+  table (see below), five turns at a time, ▲ and ▼ scrolling the rest. Press a turn, with the summary on, and the subagents,
+  the tools and the thinking summary show it, as from 90 columns; the next
+  prompt shows its own again. Opened or folded here, it stays so, apart from
+  the wide layout's.
 - The thinking summary, as a card: the current turn's updates as the
   terminal lists them (see **Thinking summary**), newest first, a rule
   between two; each gist led by its time into the turn (or `Recap.`) in a
@@ -123,9 +129,11 @@ From 90 columns, with the summary on:
     it added to the context as a bar beside the others' with its tokens
     after it, how many subagents it started (blank for none), and its tool
     calls, these two headed by the icons of their cards on the right; with
-    **☐ Persist** above. Press a turn to
-    show its updates on the right, marked ▸; the next prompt shows its own
-    again.
+    **☐ Persist** above. In a pane 24 rows tall or more it shows as many
+    turns as fit, ▲ and ▼ on its top line scrolling the rest a turn a press
+    beside where the rows stand (`1–12 of 30`); your next prompt brings the
+    newest back to the top. Press a turn to show its updates on the right,
+    marked ▸; the next prompt shows its own again.
 - On the right: the subagents, with all their tokens on the card's top line;
   the tools; the thinking summary, showing the turn picked, ▲ and ▼ scrolling
   it, and under it what the summary cost and its switch. A turn picked from
@@ -144,6 +152,16 @@ From 90 columns, with the summary on:
   limits, the subagents, the tools, the recent turns): the thinking card is
   gone, the turns are figures alone, and the footer reads `Thinking summary is off`
   beside **Turn summary on**.
+
+The subagents', the tools' and the thinking card each fold to their top
+line, and from 90 columns so do the context's, the limits' and the recent
+turns': ▾ first on it folds the card, keeping its gist there (`26 calls`,
+`45% · 90k / 200k`, `5-hour 3% · Week 25%`, `30 turns`), and ▸ opens it
+again. What you fold stays folded, in the next session too. In a pane 24
+rows tall or more, the lowest card open in a column takes the height the
+others leave: fold the thinking card and the tools card lists as many calls
+as fit, fold that too and the subagents' card lists as many subagents; fold
+the context or the limits and the recent turns list more turns.
 
 Colors follow the theme where text takes them; the fills, the bars and the
 icons are tones that read on a light theme and a dark one alike. The cards
@@ -245,7 +263,8 @@ Each row is cut to the column, never wrapped.
     a plugin's or the engine's own; listed again as one starts or ends, each
     minute, and every ten seconds while a turn runs or waits with the summary
     on.
-- The recent turns, newest first: your last ten prompts' turns (a setting),
+- The recent turns, newest first: your last ten prompts' turns (the newest
+  ten of those kept, thirty unless set lower; the desktop scrolls them all),
   a subagent's hand-back going on with the prompt it answers. When each began,
   how long it ran (or that it runs, or waits on its subagents), the tokens it
   added to the context, its tool calls (its subagents' included), and
@@ -424,9 +443,11 @@ the same place; set there, a value is used by the sessions started after it.
 - **Delete the mod's old files after (days)** (`cleanupDays`, default 30):
   the days after which a file of the mod's that nothing has written since is
   deleted (see **Old files**), from 0 to 3650; 0 keeps every file.
-- **Recent turns kept** (`recentTurns`, default 10): how many of your latest
-  turns the wide pane lists, and a persisted session's file keeps, from 1 to
-  30; the oldest go past it. Each keeps up to its newest 100 updates.
+- **Recent turns kept** (`recentTurns`, default 30): how many of your latest
+  turns the desktop's card lists, ▲ and ▼ scrolling them (the terminal the
+  newest ten), and a persisted session's file keeps, from 1 to 30; the
+  oldest go past it. Each keeps up to its newest 100 updates, 30 subagents
+  and 100 tool calls.
 
 A number outside its range is held to the range, never refused: as you set
 it in `/config`, where the row then shows the value in use, and as the mod
