@@ -680,10 +680,11 @@ export const resume = async (
   await $.turn.start({ text, turnId } as never)
 }
 
-// The desktop pane under WIDE_FROM columns, `columns` wide: each Text's
-// words, each Svg's alt and markup, and each Button's words, in order.
-export const desk = async ($: Test$, columns = 60) => {
-  const ui = await mount($, 'desktop', columns)
+// The desktop pane under WIDE_FROM columns, `columns` wide (`bodyRows` tall
+// where given, else the fixture's 30): each Text's words, each Svg's alt
+// and markup, and each Button's words, in order.
+export const desk = async ($: Test$, columns = 60, bodyRows?: number) => {
+  const ui = await mount($, 'desktop', columns, bodyRows === undefined ? {} : { scroll: { offset: 0, bodyRows } })
   const texts = (await ui.findAll({ type: 'Text' })).map(one => one.text)
   const svgs = ((await ui.findAll({ type: 'Svg' })) as unknown as Found[]).map(one => ({
     alt: String(one.props.alt),
@@ -696,9 +697,9 @@ export const desk = async ($: Test$, columns = 60) => {
 }
 
 // The person pressing a Button of the desktop pane, `columns` wide (under
-// WIDE_FROM unless given).
-export const pressDesk = async ($: Test$, key: string, columns = 60) => {
-  const ui = await mount($, 'desktop', columns)
+// WIDE_FROM unless given), `bodyRows` tall where given.
+export const pressDesk = async ($: Test$, key: string, columns = 60, bodyRows?: number) => {
+  const ui = await mount($, 'desktop', columns, bodyRows === undefined ? {} : { scroll: { offset: 0, bodyRows } })
   await $.ui.press({ plugin: 'session-weather', key } as never)
   await ui.unmount()
 }

@@ -379,6 +379,7 @@ export async function drawWideDesktop ($: EngineInterface, ui: DesktopUi, column
     isWide: true,
     overhead: WIDE_OVERHEAD,
     isFolded: plan.isThinkingFolded,
+    windowRows: plan.thinkingRows,
     spent: summarySpent,
     isDebugging,
   })

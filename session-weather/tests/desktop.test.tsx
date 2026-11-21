@@ -352,8 +352,9 @@ test("on the desktop under WIDE_FROM columns the thinking card lists the turn's 
   await threeUpdates($, replies, steps, clock)
 
   // Each gist a Text, its time a heavier one inside it; what follows each
-  // by its icon, in its color; a rule between two updates.
-  const { texts, labels, alts } = await desk($)
+  // by its icon, in its color; a rule between two updates. In a body tall
+  // enough for them all, nothing to scroll.
+  const { texts, labels, alts } = await desk($, 60, 60)
   expect(texts.slice(texts.indexOf('Thinking'))).toEqual([
     'Thinking',
     '31s',
@@ -371,8 +372,15 @@ test("on the desktop under WIDE_FROM columns the thinking card lists the turn's 
   expect(alts).toEqual(expect.arrayContaining(['Thinking', 'Decided', 'To check', 'Next']))
   // The rules between them are drawn lines, one between each two.
   expect(alts.filter(alt => alt === 'Between updates').length).toBe(2)
-  // Pinned in a body of 30 rows: the arrows to scroll it.
-  expect(labels).toEqual([...NARROW_FOLDS, '▲', '▼', 'Turn summary off'])
+  expect(labels).toEqual([...NARROW_FOLDS, 'Turn summary off'])
+
+  // In a body of 30 rows the card, under the other cards, holds the newest
+  // updates that fit, and the arrows scroll the rest.
+  const short = await desk($)
+  const lines = short.texts.slice(short.texts.indexOf('Thinking') + 2, -1)
+  expect(lines[0]).toBe('31s · Ba.')
+  expect(lines).not.toContain('Chỉ sửa file A')
+  expect(short.labels).toEqual([...NARROW_FOLDS, '▲', '▼', 'Turn summary off'])
 })
 
 test("on the desktop ▲ and ▼ scroll the turn's updates about half the window a press, never to another turn", async ($, on) => {
@@ -384,13 +392,17 @@ test("on the desktop ▲ and ▼ scroll the turn's updates about half the window
     return { lines: texts.slice(texts.indexOf('Thinking') + 2, -1), labels }
   }
 
-  // Six rows of lines, a press five of them: the last line on top, the three
-  // updates' gists above the window.
+  // ▼ goes down until the oldest line stands at the card's foot, the gists
+  // scrolled past counted above the window; a press past that moves
+  // nothing, nor leaves the card empty under its lines.
   await pressDesk($, 'older')
-  expect(await card()).toEqual({
-    lines: ['Chỉ sửa file A'],
-    labels: [...NARROW_FOLDS, '▲', '▼', '↑ 3 newer updates', 'Turn summary off'],
-  })
+  await pressDesk($, 'older')
+  const end = await card()
+  expect(end.lines.at(-1)).toBe('Chỉ sửa file A')
+  expect(end.lines[0]).not.toBe('31s · Ba.')
+  expect(end.labels.filter(label => label.startsWith('↑ '))).toHaveLength(1)
+  await pressDesk($, 'older')
+  expect(await card()).toEqual(end)
 
   // ▲ goes back up; so does the newer updates' button, at once.
   await pressDesk($, 'newer')
@@ -519,7 +531,7 @@ test('on the desktop from WIDE_FROM columns a recent turn pressed shows beside t
   })
 
   // The one before, pressed: its updates, its recap on top, a drawn rule
-  // between two (no text), and arrows to scroll them.
+  // between two (no text); they all fit, so nothing to scroll.
   await pressDesk($, 'turn-t1', WIDE_FROM)
   expect(await card()).toEqual({
     title: `Turn at ${first}`,
@@ -536,18 +548,26 @@ test('on the desktop from WIDE_FROM columns a recent turn pressed shows beside t
       '1s ·',
       'Chỉ sửa file A',
     ],
-    labels: [...LEFT_FOLDS, `${second}  2s`, `▸ ${first}  31s`, '☐ Persist', ...FOLDS, '▲', '▼', 'Turn summary off'],
+    labels: [...LEFT_FOLDS, `${second}  2s`, `▸ ${first}  31s`, '☐ Persist', ...FOLDS, 'Turn summary off'],
   })
 
-  // ▼ moves twelve rows, past the last of the seven: the four gists above.
-  await pressDesk($, 'older', WIDE_FROM)
-  expect(await card()).toEqual({
-    title: `Turn at ${first}`,
-    lines: ['Chỉ sửa file A'],
-    labels: [...LEFT_FOLDS, `${second}  2s`, `▸ ${first}  31s`, '☐ Persist', ...FOLDS, '▲', '▼', '↑ 4 newer updates', 'Turn summary off'],
-  })
-  await pressDesk($, 'newer', WIDE_FROM)
-  expect((await card()).lines[0]).toBe('Recap. Claude đang sửa lỗi.')
+  // In a body of 24 rows they do not: ▼ goes down until the oldest line
+  // stands at the card's foot, and no further; ▲ goes back up.
+  const short = async () => {
+    const { texts, labels } = await desk($, WIDE_FROM, 24)
+    const top = texts.findIndex(text => text === 'Thinking' || text.startsWith('Turn at '))
+
+    return { lines: texts.slice(top + 2, -1), labels }
+  }
+  expect((await short()).labels).toContain('▼')
+  for (let press = 0; press < 3; press += 1) await pressDesk($, 'older', WIDE_FROM, 24)
+  const end = await short()
+  expect(end.lines.at(-1)).toBe('Chỉ sửa file A')
+  expect(end.lines[0]).not.toBe('Recap. Claude đang sửa lỗi.')
+  await pressDesk($, 'older', WIDE_FROM, 24)
+  expect(await short()).toEqual(end)
+  for (let press = 0; press < 3; press += 1) await pressDesk($, 'newer', WIDE_FROM, 24)
+  expect((await short()).lines[0]).toBe('Recap. Claude đang sửa lỗi.')
 
   // The current turn pressed again: back to it.
   await pressDesk($, 'turn-t2', WIDE_FROM)

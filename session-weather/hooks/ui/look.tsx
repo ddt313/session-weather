@@ -221,6 +221,9 @@ const TOOL_ROW_ROWS = 1.1
 // The Tools card's bar of kinds and its legend, over the rows: a line each,
 // and a little more where the legend wraps.
 const TOOL_KINDS_ROWS = 2.5
+// The thinking card's last line, the summary's cost and its switch, under
+// its rule.
+const COST_ROWS = 2.5
 export const CARD_GAP_ROWS = 0.5
 // What stands above the cards: under WIDE_FROM columns the sky, the tiles
 // and the last turn (a warning adds two); from them the header across the
@@ -255,6 +258,11 @@ export const foldPlanOf = (plan: {
   const subagentsHigh = isFolded('subagents')
     ? CARD_TOP_ROWS
     : CARD_TOP_ROWS + Math.max(1, Math.min(plan.subagents.rows, plan.subagents.count) * SUBAGENT_ROW_ROWS)
+  const toolsHigh = isFolded('tools')
+    ? CARD_TOP_ROWS
+    : CARD_TOP_ROWS +
+      (plan.tools.count > 0 ? TOOL_KINDS_ROWS : 0) +
+      Math.max(1, Math.min(plan.tools.rows, plan.tools.count)) * TOOL_ROW_ROWS
   // What the grower has: the room less the gaps, the thinking card's top
   // line (folded, or with the summary off, it is no more), the other card
   // above it, and its own top line.
@@ -279,6 +287,13 @@ export const foldPlanOf = (plan: {
           : plan.tools.rows,
     },
     isThinkingFolded: isFolded('thinking'),
+    // The rows the thinking card's updates have where it takes the height
+    // left: the room less the gaps, the subagents' and the tools' cards as
+    // they stand, its top line and its last; null where it does not.
+    thinkingRows:
+      grower === 'thinking'
+        ? Math.max(3, (plan.room ?? 0) - (plan.taken ?? 0) - 2 * CARD_GAP_ROWS - subagentsHigh - toolsHigh - CARD_TOP_ROWS - COST_ROWS)
+        : null,
   }
 }
 

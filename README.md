@@ -119,9 +119,12 @@ top:
   between two; each gist led by its time into the turn (or `Recap.`) in a
   heavier face, and what Claude decided, takes as true unchecked and does
   next each by its icon (a star, a question mark, an arrow), in orange, blue
-  and dim. In a pane 24 rows tall or more, ▲ and ▼ scroll them about half the
-  window a press, within the turn; they never go to another turn. A shorter
-  pane shows the card whole and scrolls itself.
+  and dim. In a pane 24 rows tall or more the card takes the height the
+  cards above it leave and holds the newest updates that fit; ▲ and ▼ scroll
+  the rest about half the card a press, within the turn, ▼ stopping once the
+  oldest line stands at the card's foot. They never go to another turn, and
+  show only where the updates do not all fit. A shorter pane shows the card
+  whole and scrolls itself.
 - On its last line, under a rule, what the summary cost and its switch; folded,
   the switch stands on its top line. While the summary is off the card is its
   top line alone, `Off` on it and **Turn summary on**, where it stands on.

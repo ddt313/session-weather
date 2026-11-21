@@ -119,16 +119,57 @@ const layUpdates = (turn: Thinking | null, width: number, place: { line: number;
   return { lines, rows, starts, top }
 }
 
+// A window of known height, as the desktop's thinking card has: the `rows`
+// it holds, and what it spends besides the lines' own rows, a rule between
+// two updates and a gap under each line.
+export type WindowFit = { rows: number; ruleRows: number; lineGap: number }
+
+// The rows a line takes in a window that fits `fit`: its own, its gap, and
+// the rule over it where it opens an update below another.
+const costOf = (lines: readonly UpdateLine[], starts: readonly number[], rowCount: number, at: number, fit: WindowFit, isFirst: boolean) =>
+  (starts[at + 1] ?? rowCount) - (starts[at] ?? 0) + fit.lineGap + (lines[at]?.kind === 'gist' && !isFirst ? fit.ruleRows : 0)
+
+// The lowest row the window's top may stand at: where the last line shows
+// whole at the window's foot, the `↑ newer` line over the window counted;
+// 0 where every line fits.
+const lastTopOf = (lines: readonly UpdateLine[], starts: readonly number[], rowCount: number, fit: WindowFit) => {
+  const all = lines.reduce((sum, _, at) => sum + costOf(lines, starts, rowCount, at, fit, at === 0), 0)
+
+  if (all <= fit.rows) return 0
+
+  let room = fit.rows - 1
+
+  for (let at = lines.length - 1; at >= 0; at -= 1) {
+    const cost = costOf(lines, starts, rowCount, at, fit, false)
+
+    if (cost > room) {
+      // The window opens part-way into this line: as many of its last rows
+      // as fit, at least its last.
+      const lineRows = (starts[at + 1] ?? rowCount) - (starts[at] ?? 0)
+      const tail = Math.max(1, Math.floor(room - fit.lineGap))
+
+      return (starts[at] ?? 0) + Math.max(0, lineRows - tail)
+    }
+
+    room -= cost
+  }
+
+  return 0
+}
+
 // Moves the updates' window `by` rows (negative toward the newest), within
 // the shown turn's rows at the `width` the pane was drawn at: beside the
 // weather (`isWide`) the turn picked from the list. The place is kept as a
 // line and the rows into it, so an update added on top, or another width,
-// keeps the reader where they were.
-export async function moveUpdates ($: EngineInterface, by: number, width: number, isWide: boolean) {
+// keeps the reader where they were. A window of known height (`fit`) goes
+// down no further than shows the last line at its foot; else to the last
+// row.
+export async function moveUpdates ($: EngineInterface, by: number, width: number, isWide: boolean, fit?: WindowFit) {
   const current = await read($, thinking)
   const shown = isWide ? shownTurnOf(current, await read($, pickedTurn), await read($, recentTurns)).turn : current
-  const { rows, starts, top } = layUpdates(shown, width, await read($, summaryPlace))
-  const to = Math.max(0, Math.min(rows.length - 1, top + by))
+  const { lines, rows, starts, top } = layUpdates(shown, width, await read($, summaryPlace))
+  const last = fit === undefined ? rows.length - 1 : lastTopOf(lines, starts, rows.length, fit)
+  const to = Math.max(0, Math.min(last, Math.min(top, last) + by))
 
   // At either end (or with no rows) a held arrow keeps asking: nothing to
   // write, nothing to draw.
@@ -156,20 +197,25 @@ type ShownLine = { kind: UpdateLine['kind']; text: string; words: string; isCut:
 // all), kept together by update, each opening with its gist; how many
 // updates' gists are scrolled past, above the window; and whether there is
 // anything to scroll. The terminal's pane and the desktop's card draw it.
+// With a `fit`, the window holds its rows, rules and gaps counted, its top
+// no lower than shows the last line at its foot, and scrolls only where the
+// lines do not all fit.
 export const windowOf = (
   turn: Thinking | null,
   width: number,
   place: { line: number; row: number },
   isPinned: boolean,
   rows: number,
+  fit?: WindowFit,
 ) => {
   const { lines, ...laid } = layUpdates(turn, width, place)
-  const top = isPinned ? laid.top : 0
+  const last = fit === undefined ? laid.rows.length - 1 : lastTopOf(lines, laid.starts, laid.rows.length, fit)
+  const top = isPinned ? Math.min(laid.top, Math.max(0, last)) : 0
   const topLine = laid.rows[top]?.line ?? 0
   const topChar = laid.rows[top]?.start ?? 0
   const newer = laid.starts.filter((first, at) => lines[at]?.kind === 'gist' && first < top).length
   const shown: ShownLine[][] = []
-  let budget = isPinned ? rows : Number.POSITIVE_INFINITY
+  let budget = !isPinned ? Number.POSITIVE_INFINITY : fit === undefined ? rows : fit.rows - (newer > 0 ? 1 : 0)
 
   for (let at = topLine; at < lines.length && budget > 0; at += 1) {
     const one = lines[at]
@@ -184,10 +230,16 @@ export const windowOf = (
     if (group === undefined || one.kind === 'gist') shown.push([item])
     else group.push(item)
 
-    budget -= (laid.starts[at + 1] ?? laid.rows.length) - (laid.starts[at] ?? 0)
+    // A line shown from part-way takes only the rows from the top on.
+    const above = isCut ? top - (laid.starts[at] ?? 0) : 0
+
+    budget -=
+      fit === undefined
+        ? (laid.starts[at + 1] ?? laid.rows.length) - (laid.starts[at] ?? 0)
+        : costOf(lines, laid.starts, laid.rows.length, at, fit, at === topLine) - above
   }
 
-  return { shown, newer, canScroll: isPinned && laid.rows.length > 1 }
+  return { shown, newer, canScroll: isPinned && (fit === undefined ? laid.rows.length > 1 : last > 0) }
 }
 
 // "14:32 · 2m 14s · ▲ +9.7k · 18 tools": a recent turn's row. When it began,

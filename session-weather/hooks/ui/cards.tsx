@@ -376,7 +376,15 @@ type ThinkingView = {
   // card's last line.
   spent: number
   isDebugging: boolean
+  // The rows its updates have where it takes the height left in a pinned
+  // body (`foldPlanOf`); null where the plan does not know them.
+  windowRows?: number | null
 }
+
+// What the card spends besides its lines' own rows, in rows of text, about:
+// the gap under each line, and a rule between two updates with its gaps.
+const LINE_GAP = 0.25
+const RULE_ROWS = 1.5
 
 // The summary's switch, on the Thinking card: on its last line while it
 // runs, on its top line folded or off.
@@ -425,10 +433,20 @@ export function thinkingCardOf($: EngineInterface, ui: DesktopUi, view: Thinking
   // The lines measured at the card's width, the measure the arrows step
   // through.
   const width = widthOf(view.cardColumns, 'desktop')
-  const laid = windowOf(shown, width, view.place, isPinned, view.rows)
+  const status = isFolded ? null : isPast ? (shown?.entries.length === 0 ? 'No updates on this turn.' : null) : statusOf(view.turnNow)
+  // Where the plan knows the card's height, its window holds that, less the
+  // status line over it: a press moves about half of it, and ▼ goes no
+  // further than shows the oldest line at the card's foot. Else the body's
+  // height, less what stands around it, about.
+  const statusRows = status === null ? 0 : Math.ceil(status.length / width) + LINE_GAP
+  const fit =
+    isPinned && view.windowRows !== undefined && view.windowRows !== null
+      ? { rows: Math.max(3, view.windowRows - statusRows), ruleRows: RULE_ROWS, lineGap: LINE_GAP }
+      : undefined
+  const laid = windowOf(shown, width, view.place, isPinned, view.rows, fit)
   const { shown: groups, newer } = isFolded ? { shown: [], newer: 0 } : laid
   const canScroll = !isFolded && laid.canScroll
-  const step = pageStep(view.rows, view.overhead)
+  const step = fit === undefined ? pageStep(view.rows, view.overhead) : Math.max(3, Math.floor(fit.rows / 2))
 
   const title = shown !== null && isPast ? `Turn at ${formatTime(shown.startedAt)}` : 'Thinking'
   const took =
@@ -449,7 +467,6 @@ export function thinkingCardOf($: EngineInterface, ui: DesktopUi, view: Thinking
         : shown.paused !== undefined
           ? waitingFor(shown.paused.subagents)
           : null
-  const status = isFolded ? null : isPast ? (shown?.entries.length === 0 ? 'No updates on this turn.' : null) : statusOf(view.turnNow)
   // The rule between two updates: a hairline drawn across the card's whole
   // width, standing a line high as the updates' lines do. A row of ─ in the
   // app's font came out a little wider than the card and was cut with "…".
@@ -485,10 +502,10 @@ export function thinkingCardOf($: EngineInterface, ui: DesktopUi, view: Thinking
         )}
         <Box flexGrow={1} />
         {canScroll && (
-          <Button key="newer" plain dimColor label="▲" onPress={() => moveUpdates($, -step, width, view.isWide).catch(() => {})} />
+          <Button key="newer" plain dimColor label="▲" onPress={() => moveUpdates($, -step, width, view.isWide, fit).catch(() => {})} />
         )}
         {canScroll && (
-          <Button key="older" plain dimColor label="▼" onPress={() => moveUpdates($, step, width, view.isWide).catch(() => {})} />
+          <Button key="older" plain dimColor label="▼" onPress={() => moveUpdates($, step, width, view.isWide, fit).catch(() => {})} />
         )}
         {isFolded && summarySwitchOf($, ui, true)}
       </Box>

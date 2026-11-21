@@ -280,6 +280,7 @@ export async function drawNarrowDesktop ($: EngineInterface, ui: DesktopUi, colu
         isWide: true,
         overhead: PANE_OVERHEAD,
         isFolded: plan.isThinkingFolded,
+        windowRows: plan.thinkingRows,
         spent: summarySpent,
         isDebugging,
       })
