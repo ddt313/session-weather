@@ -3492,6 +3492,11 @@ const ICONS = {
   terminal: '<path d="M4 6l5 6-5 6M12 18h8"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
   tool: '<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3.5 17.5l3 3 5.8-5.8a4 4 0 0 0 5.4-5.4l-2.4 2.4-2.6-.6-.6-2.6z"/>',
+  // The left column's cards: what fills the context, stacked; a gauge for
+  // the limits; the clock turned back for the recent turns.
+  layers: '<path d="M12 3l9 5-9 5-9-5z"/><path d="M3 12.5l9 5 9-5"/><path d="M3 17l9 5 9-5"/>',
+  gauge: '<path d="M4 17a8 8 0 1 1 16 0"/><path d="M12 17l4-5"/><path d="M12 17h.01"/>',
+  history: '<path d="M3.5 12a8.5 8.5 0 1 0 2.5-6"/><path d="M3 3.5V8h4.5"/><path d="M12 8v4l3 2"/>',
 } as const
 
 type IconName = keyof typeof ICONS
@@ -3676,6 +3681,19 @@ const foldPlanOf = (plan: {
     },
     isThinkingFolded: isFolded('thinking'),
   }
+}
+
+// A card's title as the right column's cards stand theirs: its icon in
+// Claude's orange, then its name, heavier.
+const cardTitleOf = (ui: DesktopUi, icon: IconName, title: string) => {
+  const { Box, Svg, Text } = ui
+
+  return (
+    <Box flexDirection="row" alignItems="center" gap={1} flexShrink={0}>
+      <Svg source={iconSvg(icon, INK.mine, 18)} alt={title} width={18} height={18} />
+      <Text weight="semibold">{title}</Text>
+    </Box>
+  )
 }
 
 // What a card that grows takes on: the height left, cut at the bottom.
@@ -4622,9 +4640,7 @@ const turnsCardOf = (
     >
       <Box flexDirection="row" alignItems="center" gap={1}>
         {foldButtonOf($, ui, foldName, turnsFolded)}
-        <Text size="caption" weight="medium" dimColor>
-          Recent turns
-        </Text>
+        {cardTitleOf(ui, 'history', 'Recent turns')}
         {turnsFolded && (
           <Text size="caption" dimColor tabular>
             {plural(turnsShown.length, 'turn')}
@@ -4920,9 +4936,7 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
   const contextCard = isFolded('context') ? (
     <Box flexDirection="row" alignItems="center" gap={1} paddingX={1} paddingY="sm" {...cardLook(DESK.card)}>
       {foldButtonOf($, ui, 'context', true)}
-      <Text size="caption" weight="medium" dimColor>
-        Context
-      </Text>
+      {cardTitleOf(ui, 'layers', 'Context')}
       <Box flexGrow={1} />
       {contextGist !== null && (
         <Text size="caption" dimColor tabular wrap="truncate">
@@ -4934,9 +4948,7 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
     <Box flexDirection="column" gap="xs" paddingX={1} paddingY="sm" {...cardLook(DESK.card)}>
       <Box flexDirection="row" alignItems="center" gap={1}>
         {foldButtonOf($, ui, 'context', false)}
-        <Text size="caption" weight="medium" dimColor>
-          Context
-        </Text>
+        {cardTitleOf(ui, 'layers', 'Context')}
         <Box flexGrow={1} />
         {compactLine !== null && (
           <Text size="caption" dimColor wrap="truncate">
@@ -5004,9 +5016,7 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
     (isFolded('limits') ? (
       <Box flexDirection="row" alignItems="center" gap={1} paddingX={1} paddingY="sm" {...cardLook(DESK.card)}>
         {foldButtonOf($, ui, 'limits', true)}
-        <Text size="caption" weight="medium" dimColor>
-          Usage limits
-        </Text>
+        {cardTitleOf(ui, 'gauge', 'Usage limits')}
         <Box flexGrow={1} />
         <Text size="caption" dimColor tabular wrap="truncate">
           {limitsGist}
@@ -5016,9 +5026,7 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
     <Box flexDirection="column" gap="sm" paddingX={1} paddingY="sm" {...cardLook(DESK.card)}>
       <Box flexDirection="row" alignItems="center" gap={1}>
         {foldButtonOf($, ui, 'limits', false)}
-        <Text size="caption" weight="medium" dimColor>
-          Usage limits
-        </Text>
+        {cardTitleOf(ui, 'gauge', 'Usage limits')}
       </Box>
       {windows.map(window => {
         const title = WINDOW_TITLES[window.kind] ?? window.name

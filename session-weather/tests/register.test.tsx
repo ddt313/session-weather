@@ -4680,7 +4680,9 @@ test('from WIDE_FROM columns the context, the limits and the recent turns fold t
 
   // Each card its top line: the context's fill, each window's share, the
   // turns kept and the switch to persist them; nothing under them.
-  const { texts, labels } = await desk($, WIDE_FROM)
+  const { texts, labels, alts } = await desk($, WIDE_FROM)
+  // Each title led by its icon, as the right column's cards are.
+  expect(alts).toEqual(expect.arrayContaining(['Context', 'Usage limits', 'Recent turns', 'Subagents', 'Tools', 'Thinking']))
   const left = texts.slice(texts.indexOf('Context'), texts.indexOf('Subagents'))
   expect(left).toEqual(['Context', '45% · 90k / 200k', 'Usage limits', '5-hour 3% · Week 25%', 'Recent turns', '1 turn'])
   expect(labels.slice(0, 4)).toEqual(['▸', '▸', '▸', '☐ Persist'])
