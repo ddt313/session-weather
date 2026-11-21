@@ -205,11 +205,12 @@ export const register: Register = (on, options) => {
   // The pane closed: the status line takes its place. An unload is the mod
   // going, or reloading, which looks again as the session starts.
   on('ui.close', async ($, e, next) => {
-    if (e.id === PANE && e.origin.kind === 'person') {
-      await $.store.set(STORED_CLOSED, true)
-    }
-
+    // The pane goes first: nothing the mod keeps may hold it open.
     const done = await next(e)
+
+    if (e.id === PANE && e.origin.kind === 'person') {
+      await $.store.set(STORED_CLOSED, true).catch(() => {})
+    }
 
     if (e.id === PANE && e.origin.kind !== 'unload') {
       await showStatus($).catch(() => {})
