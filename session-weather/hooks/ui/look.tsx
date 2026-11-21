@@ -218,6 +218,9 @@ export function foldButtonOf($: EngineInterface, ui: DesktopUi, name: Folding, i
 export const CARD_TOP_ROWS = 2
 const SUBAGENT_ROW_ROWS = 3.5
 const TOOL_ROW_ROWS = 1.1
+// The Tools card's bar of kinds and its legend, over the rows: a line each,
+// and a little more where the legend wraps.
+const TOOL_KINDS_ROWS = 2.5
 const FOOTER_ROWS = 2
 export const CARD_GAP_ROWS = 0.5
 // What stands above the cards: under WIDE_FROM columns the sky, the tiles
@@ -273,7 +276,10 @@ export const foldPlanOf = (plan: {
     },
     tools: {
       fold: { isFolded: isFolded('tools'), grows: grower === 'tools' },
-      rows: grower === 'tools' ? Math.max(plan.tools.rows, Math.floor(left / TOOL_ROW_ROWS)) : plan.tools.rows,
+      rows:
+        grower === 'tools'
+          ? Math.max(plan.tools.rows, Math.floor((left - (plan.tools.count > 0 ? TOOL_KINDS_ROWS : 0)) / TOOL_ROW_ROWS))
+          : plan.tools.rows,
     },
     isThinkingFolded: isFolded('thinking'),
   }
@@ -341,6 +347,12 @@ export const barSvg = (stretches: readonly Stretch[], cells: number, mark?: numb
       `<g clip-path="url(#r)"><rect y="${top}" width="${width}" height="${thick}" fill="${INK.track}"/>${runs}</g>${marked}</svg>`,
   }
 }
+
+// A small swatch of `ink`, or of the hatch, for a legend.
+export const swatchSvg = (ink: string) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8" viewBox="0 0 12 8">` +
+  `<defs><pattern id="h" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="1.6" height="4" fill="${INK.hatch}"/></pattern></defs>` +
+  `<rect width="12" height="8" rx="2" fill="${ink === HATCH ? 'url(#h)' : ink}"/></svg>`
 
 // The sky's icon and its ink, by the forecast's label.
 export const SKIES: Readonly<Record<string, { icon: IconName; ink: string }>> = {
@@ -448,6 +460,29 @@ export const toolIconOf = (action: string): IconName => {
 
   return 'tool'
 }
+
+// What kind of work a call was, by its tool, for the Tools card's bar: each
+// kind keeps its ink from turn to turn. A call is kept as its tool and what
+// it was aimed at (`actionOf`), so the tool is the text before the colon.
+export const TOOL_KINDS = [
+  { name: 'Files', ink: '#F47920', tools: /^(?:Read|Edit|Write|MultiEdit|NotebookEdit|NotebookRead|Grep|Glob|LS|LSP)$/ },
+  { name: 'Shell', ink: '#00AEEF', tools: /^(?:Bash|PowerShell|BashOutput|KillShell|Monitor)$/ },
+  { name: 'Web', ink: '#7FD7F7', tools: /^(?:WebFetch|WebSearch)$/ },
+  { name: 'MCP', ink: '#FACAA7', tools: /^mcp__/ },
+  { name: 'Agents', ink: '#F5B731', tools: /^(?:Agent|Task|SendMessage|Workflow)$/ },
+  { name: 'Skills', ink: '#B9A3F0', tools: /^(?:Skill|ToolSearch)$/ },
+] as const
+export const OTHER_KIND = { name: 'Other', ink: INK.grey } as const
+
+export const kindOf = (action: string) => {
+  const tool = action.split(':')[0] ?? ''
+
+  return TOOL_KINDS.find(kind => kind.tools.test(tool)) ?? OTHER_KIND
+}
+
+// "ccd_turn: wrap_up" for an MCP server's tool, kept as
+// "mcp__ccd_turn__wrap_up": the server, then the tool.
+export const shownActionOf = (action: string) => action.replace(/^mcp__(.+?)__/, '$1: ')
 
 // "Opus 5.5 · high · ctx 38.2k": a desktop row's line under its task, the
 // model of the subagent's latest request, the effort it asked for and,

@@ -11,7 +11,7 @@ import type { Folding } from '../prefs'
 import { subagentsOfRecord } from '../turns'
 import { DESK_SUBAGENT_ROWS, DESK_TOOL_ROWS, footerOf, LEFT_CELLS, subagentsCardOf, thinkingCardOf, toolsCardOf, turnsCardOf, wideTurnRowsOf } from './cards'
 import { isPickingDrawn, isRoomyDrawn, setIsPickingDrawn, setIsRoomyDrawn } from './drawn'
-import { barSvg, cardLook, cardTitleOf, clamp01, DESK, foldButtonOf, foldPlanOf, HATCH, INK, lastTurnPartsOf, limitStretches, paceAlertOf, pillSvg, shownWindowsOf, SKIES, skyOf, tileSvg, WIDE_HEAD_ROWS, WINDOW_TITLES } from './look'
+import { barSvg, cardLook, cardTitleOf, clamp01, DESK, foldButtonOf, foldPlanOf, HATCH, INK, lastTurnPartsOf, limitStretches, paceAlertOf, pillSvg, shownWindowsOf, SKIES, skyOf, swatchSvg, tileSvg, WIDE_HEAD_ROWS, WINDOW_TITLES } from './look'
 import type { DesktopUi, Stretch } from './look'
 import { COLUMN_GAP, MIN_PINNED_ROWS, shownTurnOf, WIDE_OVERHEAD } from './updates'
 
@@ -45,12 +45,6 @@ const isDebugOn = atom({ plugin: 'session-weather', key: 'isDebugOn' } as const,
 const FILL_INKS = ['#F47920', '#00AEEF', '#7FD7F7', '#FACAA7'] as const
 
 const inkOfFill = (fill: Fill, index: number) => (fill.name === REST ? INK.grey : (FILL_INKS[index] ?? INK.grey))
-
-// A small swatch of `ink`, or of the hatch, for a legend.
-const swatchSvg = (ink: string) =>
-  `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8" viewBox="0 0 12 8">` +
-  `<defs><pattern id="h" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="1.6" height="4" fill="${INK.hatch}"/></pattern></defs>` +
-  `<rect width="12" height="8" rx="2" fill="${ink === HATCH ? 'url(#h)' : ink}"/></svg>`
 
 // The pane on the desktop from WIDE_FROM columns, as the design's wide
 // layout draws it: across the top the sky with the session's line, a

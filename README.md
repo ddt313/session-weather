@@ -157,8 +157,14 @@ From 90 columns, with the summary on:
 - The tools card lists the shown turn's tool calls, its subagents' with
   them, newest first, five at a time, ▲ and ▼ on its top line scrolling the
   rest, beside how many it made (`42 calls`) and where the rows stand (`1–5
-  of 42`). Each row: the tool's icon, the tool and what it was aimed at
-  (`Read: register.tsx`, a command by its description, never its text), the
+  of 42`). Under the top line a bar shows where the turn's work went: its
+  calls by kind, each kind in a color of its own (Files, Shell, Web, MCP,
+  Agents, Skills, Other, by the tool), largest first, by what they added to
+  the context once any call has a figure, else by how many. Its legend reads
+  how many each kind made and what they added (`Files 4 · +12k`, `~` where a
+  share or a call with no figure is in it). Each row: the tool's icon, the
+  tool and what it was aimed at (`Read: register.tsx`, a command by its
+  description, never its text; an MCP tool as `server: tool`), the
   subagent's task where one made it, its time into the turn, and about how
   much it added to the context (`+42k`). A turn keeps its newest 100 calls,
   the rest counted (`and 3 earlier not kept`); one that made none reads `No

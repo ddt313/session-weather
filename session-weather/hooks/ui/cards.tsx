@@ -3,7 +3,7 @@
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
-import type { RecentTurn, Subagent, SubagentFigures, Thinking } from '../../types'
+import type { RecentTurn, Subagent, SubagentFigures, Thinking, TurnCall } from '../../types'
 import { RECENT_TURNS_SHAPE } from '../atoms'
 import { waitingFor } from '../entries'
 import { formatDuration, formatGrowth, formatTime, formatTokens, plural, tokensOf } from '../format'
@@ -15,7 +15,7 @@ import { formatSummaryCost, HAIKU_NAME } from '../summary/prompt'
 import { setSummary, statusOf } from '../summary/run'
 import { AT_WORK, maxRecent, setSaving, subagentsOfRecord, workingOf } from '../turns'
 import { isPickingDrawn } from './drawn'
-import { barSvg, CARD_GAP_ROWS, CARD_TOP_ROWS, cardLook, cardTitleOf, chipOf, clamp01, DESK, figureMeta, foldButtonOf, GROWS, iconSvg, INK, LINE_PX, lineIconSvg, MARK_LOOKS, OPEN, ROW_INDENT, RULE_SVG, STATE_TILES, tileSvg, toolIconOf } from './look'
+import { barSvg, CARD_GAP_ROWS, CARD_TOP_ROWS, cardLook, cardTitleOf, chipOf, clamp01, DESK, figureMeta, foldButtonOf, GROWS, iconSvg, INK, LINE_PX, lineIconSvg, MARK_LOOKS, OPEN, kindOf, ROW_INDENT, RULE_SVG, shownActionOf, STATE_TILES, swatchSvg, tileSvg, toolIconOf } from './look'
 import type { CardFold, DesktopUi } from './look'
 import { MIN_PINNED_ROWS, moveUpdates, pageStep, pickTurn, toNewest, widthOf, windowOf } from './updates'
 
@@ -77,6 +77,61 @@ async function moveTools ($: EngineInterface, by: number, rows: number) {
   if (to !== top) await update($, toolTop, () => to)
 }
 
+// The shown turn's calls by kind, largest first: how many of each, and what
+// those of the main loop added to the context (`~` where a share, or a call
+// with no figure, is in it). The bar stands by what they added once any has
+// a figure, else by how many.
+export const kindsOf = (calls: readonly TurnCall[]) => {
+  const kinds = new Map<string, { name: string; ink: string; count: number; tokens: number; isRough: boolean }>()
+
+  for (const call of calls) {
+    const kind = kindOf(call.text)
+    const one = kinds.get(kind.name) ?? { name: kind.name, ink: kind.ink, count: 0, tokens: 0, isRough: false }
+    one.count += 1
+    one.tokens += call.tokens ?? 0
+    one.isRough ||= call.isShared === true || (call.tokens === undefined && call.agentId === undefined)
+    kinds.set(kind.name, one)
+  }
+
+  const all = [...kinds.values()]
+  const isByTokens = all.some(one => one.tokens > 0)
+  const sizeOf = (one: (typeof all)[number]) => (isByTokens ? one.tokens : one.count)
+
+  return { kinds: all.sort((a, b) => sizeOf(b) - sizeOf(a) || b.count - a.count), isByTokens, sizeOf }
+}
+
+// The bar of the calls' kinds, and its legend: "Files 4 · +12k".
+const toolKindsOf = (ui: DesktopUi, calls: readonly TurnCall[]) => {
+  const { Box, Svg, Text } = ui
+  const { kinds, isByTokens, sizeOf } = kindsOf(calls)
+  const total = kinds.reduce((sum, one) => sum + sizeOf(one), 0)
+  let from = 0
+  const stretches = kinds.map(one => {
+    const run = { from, to: total === 0 ? from : Math.min(1, from + sizeOf(one) / total), ink: one.ink }
+    from = run.to
+
+    return run
+  })
+  const bar = barSvg(stretches, 40, undefined, 5)
+  const what = isByTokens ? 'by what they added to the context' : 'by how many'
+
+  return (
+    <Box flexDirection="column" gap="xs">
+      <Svg source={bar.source} alt={`The calls' kinds, ${what}`} height={bar.height} />
+      <Box flexDirection="row" columnGap={2} rowGap="xs" flexWrap="wrap">
+        {kinds.map(one => (
+          <Box flexDirection="row" alignItems="center" gap={1}>
+            <Svg source={swatchSvg(one.ink)} alt={one.name} width={12} height={8} />
+            <Text size="caption" dimColor tabular>
+              {one.tokens > 0 ? `${one.name} ${one.count} · ${formatGrowth(one.tokens, one.isRough)}` : `${one.name} ${one.count}`}
+            </Text>
+          </Box>
+        ))}
+      </Box>
+    </Box>
+  )
+}
+
 // The Tools card, beside the weather under the subagents: the shown turn's
 // tool calls (its subagents' with them), how many it made in all, then a
 // row for each of `rows`, newest first from `top`, ▲ and ▼ scrolling the
@@ -119,6 +174,7 @@ export function toolsCardOf(
         {canScroll && <Button key="tools-up" plain dimColor label="▲" onPress={() => moveTools($, -1, rows).catch(() => {})} />}
         {canScroll && <Button key="tools-down" plain dimColor label="▼" onPress={() => moveTools($, 1, rows).catch(() => {})} />}
       </Box>
+      {calls.length > 0 && !fold.isFolded && toolKindsOf(ui, calls)}
       {made === 0 && !fold.isFolded && (
         <Text size="caption" dimColor>
           No tools called in this turn
@@ -129,7 +185,7 @@ export function toolsCardOf(
           <Svg source={iconSvg(toolIconOf(call.text), INK.grey, 14)} alt={call.text.split(':')[0] ?? 'Tool'} width={14} height={14} />
           <Box flexGrow={1} flexShrink={1} minWidth={0}>
             <Text size="caption" wrap="truncate">
-              {call.text}
+              {shownActionOf(call.text)}
             </Text>
           </Box>
           {call.agentId !== undefined && (

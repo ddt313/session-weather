@@ -207,7 +207,8 @@ test('on the desktop a card folds to its top line and opens again, kept in the s
   // opened) and the thinking card's switches.
   expect(folded.labels.filter(label => label === '▾' || label === '▸')).toEqual(['▾', '▾', '▸', '▸'])
   expect(folded.texts.slice(folded.texts.indexOf('Thinking') + 1).every(text => !text.includes(' · ') || text.startsWith('Summary'))).toBe(true)
-  expect(await tools()).toBeGreaterThan(5)
+  // More than the three they show at rest, under their bar of kinds.
+  expect(await tools()).toBeGreaterThan(3)
   expect(await tools(WIDE_FROM)).toBeGreaterThan(8)
 
   // The tools folded too: their top line and its count alone; the subagents'
@@ -314,12 +315,12 @@ test('on the desktop under WIDE_FROM columns the Tools card lists the current tu
   const { texts, alts } = await desk($)
   expect(texts.indexOf('Subagents')).toBeLessThan(texts.lastIndexOf('Tools'))
   expect(alts).toContain('4 calls')
-  expect(await card()).toEqual(['Tools', '1–3 of 4', 'Read: f4.ts', '4s', 'Read: f3.ts', '3s', 'Read: f2.ts', '2s'])
+  expect(await card()).toEqual(['Tools', '1–3 of 4', 'Files 4', 'Read: f4.ts', '4s', 'Read: f3.ts', '3s', 'Read: f2.ts', '2s'])
 
   // ▼ to the last three, no further.
   await pressDesk($, 'tools-down')
   await pressDesk($, 'tools-down')
-  expect((await card()).slice(1, 3)).toEqual(['2–4 of 4', 'Read: f3.ts'])
+  expect((await card()).slice(1, 4)).toEqual(['2–4 of 4', 'Files 4', 'Read: f3.ts'])
 })
 
 // A turn of three updates, written at 1s, 16s and 31s: each a gist and one
@@ -637,7 +638,7 @@ test('on the desktop from WIDE_FROM columns the Tools card lists the shown turn\
   const first = await card()
   expect(first.slice(0, 2)).toEqual(['Tools', '1–5 of 7'])
   expect((await desk($, WIDE_FROM)).alts).toContain('7 calls')
-  expect(first.slice(2)).toEqual(['Grep: flaky', 'Scan the docs', '6s', 'Read: f6.ts', '6s', 'Read: f5.ts', '5s', 'Read: f4.ts', '4s', 'Read: f3.ts', '3s'])
+  expect(first.slice(2)).toEqual(['Files 7', 'Grep: flaky','Scan the docs', '6s', 'Read: f6.ts', '6s', 'Read: f5.ts', '5s', 'Read: f4.ts', '4s', 'Read: f3.ts', '3s'])
 
   // ▼ scrolls a row a press, no further than the last.
   await pressDesk($, 'tools-down', WIDE_FROM)
@@ -656,7 +657,7 @@ test('on the desktop from WIDE_FROM columns the Tools card lists the shown turn\
 
   // The turn before, pressed: its calls again.
   await pressDesk($, 'turn-t1', WIDE_FROM)
-  expect((await card()).slice(0, 3)).toEqual(['Tools', '1–5 of 7', 'Grep: flaky'])
+  expect((await card()).slice(0, 4)).toEqual(['Tools', '1–5 of 7', 'Files 7', 'Grep: flaky'])
 })
 
 test("the Tools card says about how much each main-loop call added to the context, once the next request is answered", SLOW, async ($, on) => {
@@ -686,15 +687,15 @@ test("the Tools card says about how much each main-loop call added to the contex
   await request(21_000)
   await call('f1')
   await call('docs', 'a1')
-  expect(await card()).toEqual(['Tools', 'Read: docs.ts', 'Subagent', 'Read: f1.ts'])
+  expect(await card()).toEqual(['Tools', 'Files 2', 'Read: docs.ts', 'Subagent', 'Read: f1.ts'])
   await request(63_000)
-  expect(await card()).toEqual(['Tools', 'Read: docs.ts', 'Subagent', 'Read: f1.ts', '+42k'])
+  expect(await card()).toEqual(['Tools', 'Files 2 · +42k', 'Read: docs.ts', 'Subagent', 'Read: f1.ts', '+42k'])
 
   // Two calls of one request share its growth evenly, marked so.
   await call('f2')
   await call('f3')
   await request(91_000)
-  expect((await card()).slice(1, 5)).toEqual(['Read: f3.ts', '~+14k', 'Read: f2.ts', '~+14k'])
+  expect((await card()).slice(1, 6)).toEqual(['Files 4 · ~+70k', 'Read: f3.ts', '~+14k', 'Read: f2.ts', '~+14k'])
 
   // Four would read alike whatever each did: they get none. Nor does the
   // turn's last call, which no request answers.
@@ -704,17 +705,58 @@ test("the Tools card says about how much each main-loop call added to the contex
   await $.turn.complete(turnDone({ durationMs: 9_000 }) as never)
   await clock.settle()
   await pressDesk($, 'turn-t1', WIDE_FROM)
-  expect((await card()).slice(2, 7)).toEqual(['Read: f8.ts', 'Read: f7.ts', 'Read: f6.ts', 'Read: f5.ts', 'Read: f4.ts'])
+  expect((await card()).slice(3, 8)).toEqual(['Read: f8.ts', 'Read: f7.ts', 'Read: f6.ts', 'Read: f5.ts', 'Read: f4.ts'])
 
   // A request over a smaller context than the last, as after a compaction,
   // puts nothing anywhere and is where the next counts from.
   await $.turn.start({ text: 'next', turnId: 't2' })
   await call('g1')
   await request(30_000, 't2')
-  expect(await card()).toEqual(['Tools', 'Read: g1.ts'])
+  expect(await card()).toEqual(['Tools', 'Files 1', 'Read: g1.ts'])
   await call('g2')
   await request(40_000, 't2')
-  expect(await card()).toEqual(['Tools', 'Read: g2.ts', '+10k', 'Read: g1.ts'])
+  expect(await card()).toEqual(['Tools', 'Files 2 · ~+10k', 'Read: g2.ts', '+10k', 'Read: g1.ts'])
+})
+
+test("the Tools card's bar sorts the turn's calls by kind, by what they added once any has a figure; an MCP tool reads by its server", SLOW, async ($, on) => {
+  const { steps, clock } = engine(on)
+  const request = (context: number) => runStep($, steps, 't1', [stopWith(requestUsage(1_000, context - 1_000, 200))])
+  const call = async (input: Record<string, unknown>) => {
+    await clock.advance(1_000)
+    await $.tool.call(input as never)
+  }
+  const card = async () => {
+    const { texts, alts } = await desk($, WIDE_FROM)
+    const from = texts.lastIndexOf('Tools')
+    const to = texts.findIndex((text, index) => index > from && (text === 'Thinking' || text.startsWith('Turn at ')))
+
+    return { texts: texts.slice(from, to).filter(text => !/^\d+s$/.test(text)), alts }
+  }
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await request(10_000)
+
+  // Before any figure the bar stands by how many: two shell commands, then
+  // the file read and the MCP tool, one each.
+  await call({ tool: 'Read', file_path: '/work/a.ts' })
+  await call({ tool: 'Bash', command: 'ls', description: 'List files' })
+  await call({ tool: 'Bash', command: 'pwd', description: 'Where am I' })
+  await call({ tool: 'mcp__ccd_turn__wrap_up', recap: 'Done.' })
+  const counted = await card()
+  expect(counted.texts.slice(1, 4)).toEqual(['Shell 2', 'Files 1', 'MCP 1'])
+  expect(counted.alts).toContain("The calls' kinds, by how many")
+  expect(counted.texts).toContain('ccd_turn: wrap_up')
+
+  // Then by what they added: the read alone, 30k, ahead of the shell's two.
+  await request(11_000)
+  await call({ tool: 'Read', file_path: '/work/big.ts' })
+  await request(41_000)
+  await call({ tool: 'WebSearch', query: 'weather' })
+  await request(46_000)
+  const added = await card()
+  expect(added.texts.slice(2, 6)).toEqual(['Files 2 · ~+30k', 'Web 1 · +5k', 'Shell 2', 'MCP 1'])
+  expect(added.alts).toContain("The calls' kinds, by what they added to the context")
 })
 
 test('a recent turn keeps its newest 100 tool calls, counting those let go, and a saved session gets them back', SLOW, async ($, on) => {
