@@ -9,7 +9,7 @@ import { formatCost, formatDelta, formatTokens } from '../format'
 import { formatLeft, formatPart, paceOf } from '../limits'
 import type { Folding } from '../prefs'
 import { subagentsOfRecord } from '../turns'
-import { DESK_SUBAGENT_ROWS, DESK_TOOL_ROWS, footerOf, LEFT_CELLS, subagentsCardOf, thinkingCardOf, toolsCardOf, turnsCardOf, wideTurnRowsOf } from './cards'
+import { DESK_SUBAGENT_ROWS, DESK_TOOL_ROWS, LEFT_CELLS, subagentsCardOf, thinkingCardOf, thinkingOffCardOf, toolsCardOf, turnsCardOf, wideTurnRowsOf } from './cards'
 import { isPickingDrawn, isRoomyDrawn, setIsPickingDrawn, setIsRoomyDrawn } from './drawn'
 import { barSvg, cardLook, cardTitleOf, clamp01, DESK, foldButtonOf, foldPlanOf, HATCH, INK, lastTurnPartsOf, limitStretches, paceAlertOf, pillSvg, shownWindowsOf, SKIES, skyOf, swatchSvg, tileSvg, WIDE_HEAD_ROWS, WINDOW_TITLES } from './look'
 import type { DesktopUi, Stretch } from './look'
@@ -52,8 +52,9 @@ const inkOfFill = (fill: Fill, index: number) => (fill.name === REST ? INK.grey 
 // the limits with their pace (on top, as the person looks at them most), the
 // context with what fills it, and the recent turns, one pressed to show its
 // updates; on the right the subagents and the thinking summary, its arrows
-// scrolling the turn shown. With the summary off, the cards stand in one
-// column. Each read subscribes the drawing.
+// scrolling the turn shown. With the summary off the cards stand where
+// they do with it on, the thinking card left out. Each read subscribes the
+// drawing.
 export async function drawWideDesktop ($: EngineInterface, ui: DesktopUi, columns: number, rows: number) {
   const { Box, Button, Svg, Text } = ui
   const [at, now, added, readings, parts, compactAt, turn, spent, listed, figured, known, counted, filled, recent, isSaved, isOn] =
@@ -92,7 +93,7 @@ export async function drawWideDesktop ($: EngineInterface, ui: DesktopUi, column
   // turns, the current one unless the person pressed another.
   const view = isOn ? shownTurnOf(turnNow, picked, recent) : { turn: null, isPast: false }
   const rightCells = columns - LEFT_CELLS - COLUMN_GAP
-  const leftCells = isOn ? LEFT_CELLS : columns
+  const leftCells = LEFT_CELLS
   const barCells = leftCells - 2
 
   const head = (
@@ -315,11 +316,11 @@ export async function drawWideDesktop ($: EngineInterface, ui: DesktopUi, column
     currentId: turnNow?.turnId,
     isSaved,
     foldName: 'turns',
-    fold: { isFolded: isFolded('turns'), grows: isOn && rows >= MIN_PINNED_ROWS && !isFolded('turns') },
+    fold: { isFolded: isFolded('turns'), grows: rows >= MIN_PINNED_ROWS && !isFolded('turns') },
     // Pinned, as many as fit, ▲ and ▼ scrolling the rest; else all of them,
     // the pane scrolling whole.
     rows:
-      isOn && rows >= MIN_PINNED_ROWS
+      rows >= MIN_PINNED_ROWS
         ? wideTurnRowsOf({
             room: rows - WIDE_HEAD_ROWS,
             isContextFolded: isFolded('context'),
@@ -340,7 +341,7 @@ export async function drawWideDesktop ($: EngineInterface, ui: DesktopUi, column
   // oldest turns go first on the left; on the right the lowest card open
   // takes what is left, the summary's oldest lines cut, or the oldest calls
   // or subagents.
-  const isPinned = isOn && rows >= MIN_PINNED_ROWS
+  const isPinned = rows >= MIN_PINNED_ROWS
   const plan = foldPlanOf({
     folded,
     isOn,
@@ -354,7 +355,7 @@ export async function drawWideDesktop ($: EngineInterface, ui: DesktopUi, column
     cardOf.listed,
     cardOf.figured,
     at,
-    isOn ? rightCells : columns,
+    rightCells,
     await read($, subagentTop),
     true,
     cardOf.more,
@@ -363,24 +364,11 @@ export async function drawWideDesktop ($: EngineInterface, ui: DesktopUi, column
   )
   // Under them the tool calls of the same turn.
   const toolsCard = toolsCardOf($, ui, callsRow, await read($, toolTop), plan.tools.rows, plan.tools.fold)
-  const footer = footerOf($, ui, isOn, summarySpent, isDebugging)
 
-  // With the summary off there is nothing to stand beside: one column.
-  if (!isOn) {
-    return (
-      <Box flexDirection="column" gap="sm">
-        {head}
-        {contextCard}
-        {limitsCard}
-        {subagentsCard}
-        {toolsCard}
-        {turnsCard}
-        {footer}
-      </Box>
-    )
-  }
-
-  const thinkingCard = thinkingCardOf($, ui, {
+  // With the summary off the cards stand where they stand with it on, the
+  // thinking card its top line and switch alone: the lowest card open on the
+  // right takes its height.
+  const thinkingCard = !isOn ? thinkingOffCardOf($, ui) : thinkingCardOf($, ui, {
     turnNow,
     shown: view.turn,
     isPast: view.isPast,
@@ -391,6 +379,8 @@ export async function drawWideDesktop ($: EngineInterface, ui: DesktopUi, column
     isWide: true,
     overhead: WIDE_OVERHEAD,
     isFolded: plan.isThinkingFolded,
+    spent: summarySpent,
+    isDebugging,
   })
 
   return (
@@ -406,7 +396,6 @@ export async function drawWideDesktop ($: EngineInterface, ui: DesktopUi, column
           {subagentsCard}
           {toolsCard}
           {thinkingCard}
-          {footer}
         </Box>
       </Box>
     </Box>

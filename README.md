@@ -122,8 +122,9 @@ top:
   and dim. In a pane 24 rows tall or more, ▲ and ▼ scroll them about half the
   window a press, within the turn; they never go to another turn. A shorter
   pane shows the card whole and scrolls itself.
-- Under it, what the summary cost and its switch; while the summary is off,
-  no card, and `Thinking summary is off` beside **Turn summary on**.
+- On its last line, under a rule, what the summary cost and its switch; folded,
+  the switch stands on its top line. While the summary is off the card is its
+  top line alone, `Off` on it and **Turn summary on**, where it stands on.
 
 From 90 columns, with the summary on:
 
@@ -150,10 +151,11 @@ From 90 columns, with the summary on:
     marked ▸; the next prompt shows its own again.
 - On the right: the subagents, with all their tokens on the card's top line;
   the tools; the thinking summary, showing the turn picked, ▲ and ▼ scrolling
-  it, and under it what the summary cost and its switch. A turn picked from
-  the list shows the subagents it started too, as they last stood (one still
-  at work, as it works), the first 30 by when they began and the rest counted
-  (`and 2 more not kept`); the current turn shows those listed now.
+  it, with what the summary cost and its switch on its last line. A turn
+  picked from the list shows the subagents it started too, as they last
+  stood (one still at work, as it works), the first 30 by when they began and
+  the rest counted (`and 2 more not kept`); the current turn shows those
+  listed now.
 - The tools card lists the shown turn's tool calls, its subagents' with
   them, newest first, five at a time, ▲ and ▼ on its top line scrolling the
   rest, beside how many it made (`42 calls`) and where the rows stand (`1–5
@@ -185,10 +187,10 @@ From 90 columns, with the summary on:
   - A subagent's calls get none: they fill a context of its own, which Claude
     Code does not report. What its result added shows on the main loop's
     `Agent` call.
-- With the summary off, the cards stand in one column (the context, the
-  limits, the subagents, the tools, the recent turns): the thinking card is
-  gone, the turns are figures alone, and the footer reads `Thinking summary
-  is off` beside **Turn summary on**.
+- With the summary off, the cards stand where they do with it on, so turning
+  it off or on moves nothing else: the thinking card is its top line, `Off`
+  on it and **Turn summary on**; the lowest card open on the right (the
+  tools, unless folded) takes its height, and the turns are figures alone.
 
 The subagents', the tools' and the thinking card each fold to their top
 line, and from 90 columns so do the context's, the limits' and the recent
@@ -439,8 +441,8 @@ Each row is cut to the column, never wrapped.
   request goes as sent, with Haiku's reply as it came, to a Markdown file
   named after the session's id in `~/.claude/session-weather/debug/`, the
   system prompt at its top and the newest 30 requests kept; each also leaves
-  a dim line in the transcript, which Claude is not sent. The pane's footer
-  says `debug log on` while it is. The file holds your prompts and Claude's
+  a dim line in the transcript, which Claude is not sent. The thinking
+  card's last line says `debug log on` while it is. The file holds your prompts and Claude's
   thinking notes, and stays until the clean-up deletes it, or you do.
 
 **Old files**

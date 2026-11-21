@@ -372,6 +372,42 @@ type ThinkingView = {
   overhead: number
   // Folded to its top line by the person.
   isFolded?: boolean
+  // What the summary has cost, and whether its debug log is on, for the
+  // card's last line.
+  spent: number
+  isDebugging: boolean
+}
+
+// The summary's switch, on the Thinking card: on its last line while it
+// runs, on its top line folded or off.
+function summarySwitchOf($: EngineInterface, ui: DesktopUi, isOn: boolean) {
+  const { Button } = ui
+
+  return (
+    <Button
+      key={TOGGLE}
+      variant="secondary"
+      label={isOn ? 'Turn summary off' : 'Turn summary on'}
+      onPress={() => setSummary($, !isOn).catch(() => {})}
+    />
+  )
+}
+
+// The Thinking card with the summary off: its top line alone, and the switch
+// to turn it on. It stands where the card stands with the summary on, so
+// turning it off or on moves no other card.
+export function thinkingOffCardOf($: EngineInterface, ui: DesktopUi) {
+  const { Box, Svg, Text } = ui
+
+  return (
+    <Box flexDirection="row" alignItems="center" gap={1} paddingX={1} paddingY="sm" {...cardLook(DESK.card)}>
+      <Svg source={iconSvg('compass', INK.grey, 18)} alt="Thinking" width={18} height={18} />
+      <Text weight="semibold">Thinking</Text>
+      {chipOf(ui, 'Off')}
+      <Box flexGrow={1} />
+      {summarySwitchOf($, ui, false)}
+    </Box>
+  )
 }
 
 // The thinking card: the turn's updates as the terminal lists them, newest
@@ -454,6 +490,7 @@ export function thinkingCardOf($: EngineInterface, ui: DesktopUi, view: Thinking
         {canScroll && (
           <Button key="older" plain dimColor label="▼" onPress={() => moveUpdates($, step, width, view.isWide).catch(() => {})} />
         )}
+        {isFolded && summarySwitchOf($, ui, true)}
       </Box>
       {status !== null && (
         <Text size="caption" dimColor>
@@ -470,7 +507,11 @@ export function thinkingCardOf($: EngineInterface, ui: DesktopUi, view: Thinking
         />
       )}
       {groups.length > 0 && (
-        <Box flexDirection="column" gap="xs">
+        <Box
+          flexDirection="column"
+          gap="xs"
+          {...(isPinned ? { flexGrow: 1, flexShrink: 1, minHeight: 0, overflow: 'hidden' as const } : {})}
+        >
           {groups.flatMap((group, at) => [
             ...(at === 0 ? [] : [rule]),
             <Box flexDirection="column" gap="xs">
@@ -510,6 +551,19 @@ export function thinkingCardOf($: EngineInterface, ui: DesktopUi, view: Thinking
               })}
             </Box>,
           ])}
+        </Box>
+      )}
+      {!isFolded && (
+        <Box flexDirection="column" gap="xs" flexShrink={0}>
+          <Box flexGrow={1} minWidth={0}>
+            <Svg source={RULE_SVG} alt="Above the summary's cost" height={LINE_PX} />
+          </Box>
+          <Box flexDirection="row" alignItems="center" justifyContent="space-between" gap={1}>
+            <Text size="caption" dimColor wrap="truncate">
+              {`Summary ${formatSummaryCost(view.spent)} · ${HAIKU_NAME}${view.isDebugging ? ' · debug log on' : ''}`}
+            </Text>
+            {summarySwitchOf($, ui, true)}
+          </Box>
         </Box>
       )}
     </Box>
@@ -731,25 +785,6 @@ export function turnsCardOf(
       </Box>
       )}
       {!turnsFolded && persist}
-    </Box>
-  )
-}
-
-// The summary's footer on the desktop: what it cost, and its switch.
-export function footerOf($: EngineInterface, ui: DesktopUi, isOn: boolean, spent: number, isDebugging: boolean) {
-  const { Box, Button, Text } = ui
-
-  return (
-    <Box flexDirection="row" alignItems="center" justifyContent="space-between" gap={1}>
-      <Text size="caption" dimColor wrap="truncate">
-        {isOn ? `Summary ${formatSummaryCost(spent)} · ${HAIKU_NAME}${isDebugging ? ' · debug log on' : ''}` : 'Thinking summary is off'}
-      </Text>
-      <Button
-        key={TOGGLE}
-        variant="secondary"
-        label={isOn ? 'Turn summary off' : 'Turn summary on'}
-        onPress={() => setSummary($, !isOn).catch(() => {})}
-      />
     </Box>
   )
 }

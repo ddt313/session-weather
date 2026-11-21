@@ -7,7 +7,7 @@ import { sessionParts } from '../context'
 import { formatCost, formatDelta, formatTokens } from '../format'
 import { formatLeft, formatPart } from '../limits'
 import { maxRecent, subagentsOfRecord } from '../turns'
-import { footerOf, NARROW_SUBAGENT_ROWS, NARROW_TOOL_ROWS, NARROW_TURN_ROWS, subagentsCardOf, thinkingCardOf, toolsCardOf, TURN_ROW_PX, turnsCardOf } from './cards'
+import { NARROW_SUBAGENT_ROWS, NARROW_TOOL_ROWS, NARROW_TURN_ROWS, subagentsCardOf, thinkingCardOf, thinkingOffCardOf, toolsCardOf, TURN_ROW_PX, turnsCardOf } from './cards'
 import { isPickingDrawn, isRoomyDrawn, setIsPickingDrawn, setIsRoomyDrawn } from './drawn'
 import { barSvg, CARD_GAP_ROWS, CARD_TOP_ROWS, cardLook, clamp01, DESK, foldPlanOf, iconSvg, INK, lastTurnPartsOf, limitStretches, LINE_PX, NARROW_HEAD_ROWS, paceAlertOf, shownWindowsOf, SKIES, skyOf, tileSvg, WINDOW_TITLES } from './look'
 import type { DesktopUi } from './look'
@@ -40,8 +40,8 @@ const isDebugOn = atom({ plugin: 'session-weather', key: 'isDebugOn' } as const,
 // The pane on the desktop under WIDE_FROM columns, as the design's narrow
 // layout draws it: the sky, the context and the windows in tiles, a warning
 // where a window is on pace to run out, the last turn, the subagents, the
-// thinking summary and its footer. Each read subscribes the drawing to its
-// value.
+// thinking summary, its cost and switch on its card. Each read subscribes
+// the drawing to its value.
 export async function drawNarrowDesktop ($: EngineInterface, ui: DesktopUi, columns: number, rows: number) {
   const { Box, Button, Svg, Text } = ui
   const [at, now, added, readings, parts, compactAt, turn, spent, listed, figured, known, counted, isOn] =
@@ -266,22 +266,23 @@ export async function drawNarrowDesktop ($: EngineInterface, ui: DesktopUi, colu
   const toolsCard = toolsCardOf($, ui, callsRow, toolAt, plan.tools.rows, plan.tools.fold)
   // The turn shown, the current one unless one was picked; its text stands a
   // cell in from each side. Its arrows step through the turn shown.
-  const thinkingCard =
-    isOn &&
-    thinkingCardOf($, ui, {
-      turnNow,
-      shown: view.turn,
-      isPast: view.isPast,
-      place,
-      at,
-      rows,
-      cardColumns: columns - 2,
-      isWide: true,
-      overhead: PANE_OVERHEAD,
-      isFolded: plan.isThinkingFolded,
-    })
-
-  const footer = footerOf($, ui, isOn, summarySpent, isDebugging)
+  // Off, its top line and the switch alone, where it stands on.
+  const thinkingCard = !isOn
+    ? thinkingOffCardOf($, ui)
+    : thinkingCardOf($, ui, {
+        turnNow,
+        shown: view.turn,
+        isPast: view.isPast,
+        place,
+        at,
+        rows,
+        cardColumns: columns - 2,
+        isWide: true,
+        overhead: PANE_OVERHEAD,
+        isFolded: plan.isThinkingFolded,
+        spent: summarySpent,
+        isDebugging,
+      })
 
   return (
     <Box flexDirection="column" gap="sm" {...(isPinned ? { height: rows } : {})}>
@@ -293,7 +294,6 @@ export async function drawNarrowDesktop ($: EngineInterface, ui: DesktopUi, colu
       {toolsCard}
       {turnsCard}
       {thinkingCard}
-      {footer}
     </Box>
   )
 }

@@ -813,16 +813,34 @@ test("on the desktop from WIDE_FROM columns the shown turn's fill lies under its
   expect(bars.map(one => /<rect y="13" [^>]*height="6"/.test(String(one.props.source)))).toEqual([true, true])
 })
 
-test('on the desktop from WIDE_FROM columns with the summary off, the cards stand in one column', async ($, on) => {
+test('on the desktop with the summary off, the cards stand where they do with it on, the thinking card its top line and switch alone', async ($, on) => {
   engine(on, { stored: { isSummaryOff: true }, rateLimits: limits(25) })
+  const TITLES = ['Context', 'Usage limits', 'Recent turns', 'Subagents', 'Tools', 'Thinking']
+  // The cards' titles in the order drawn: the left column's, then the right's.
+  const titles = async () => (await desk($, 120)).texts.filter(text => TITLES.includes(text))
 
   await $.session.start(start)
-  const { texts, labels } = await desk($, 120)
-  expect(texts).toContain('Context')
-  expect(texts.indexOf('Usage limits')).toBeGreaterThan(-1)
-  expect(texts.indexOf('Context')).toBeLessThan(texts.indexOf('Usage limits'))
-  expect(texts).not.toContain('Thinking')
-  expect(texts.at(-1)).toBe('Thinking summary is off')
-  // The switches of the context, the limits, the subagents and the tools.
-  expect(labels).toEqual(['▾', '▾', '▾', '▾', 'Turn summary on'])
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  expect(await titles()).toEqual(TITLES)
+  // Off, the thinking card is its top line, Off on it, and the switch: the
+  // last of the pane. No other card folds or moves.
+  const off = await desk($, 120)
+  expect(off.texts.at(-1)).toBe('Thinking')
+  expect(off.alts).toContain('Off')
+  expect(off.labels.at(-1)).toBe('Turn summary on')
+  expect(off.labels.filter(label => label === '▾' || label === '▸')).toHaveLength(5)
+  // Under WIDE_FROM columns too.
+  const narrow = await desk($)
+  expect(narrow.texts.at(-1)).toBe('Thinking')
+  expect(narrow.alts).toContain('Off')
+  expect(narrow.labels.at(-1)).toBe('Turn summary on')
+
+  // Turned on, the card opens where it stood, its cost and switch on its
+  // last line; nothing else moves.
+  await pressDesk($, 'summary-toggle', 120)
+  const on_ = await desk($, 120)
+  expect(on_.texts.filter(text => TITLES.includes(text))).toEqual(TITLES)
+  expect(on_.texts.at(-1)).toMatch(/^Summary \$[\d.]+ · Haiku/)
+  expect(on_.labels.at(-1)).toBe('Turn summary off')
+  expect(on_.alts).toContain("Above the summary's cost")
 })

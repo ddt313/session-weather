@@ -214,14 +214,13 @@ export function foldButtonOf($: EngineInterface, ui: DesktopUi, name: Folding, i
 
 // The body rows, about, that the desktop's parts stand in, a row a line of
 // body text: a card's top line with its padding (a folded card's whole), a
-// subagent's row, a tool call's, the footer and the gaps between cards.
+// subagent's row, a tool call's, and the gaps between cards.
 export const CARD_TOP_ROWS = 2
 const SUBAGENT_ROW_ROWS = 3.5
 const TOOL_ROW_ROWS = 1.1
 // The Tools card's bar of kinds and its legend, over the rows: a line each,
 // and a little more where the legend wraps.
 const TOOL_KINDS_ROWS = 2.5
-const FOOTER_ROWS = 2
 export const CARD_GAP_ROWS = 0.5
 // What stands above the cards: under WIDE_FROM columns the sky, the tiles
 // and the last turn (a warning adds two); from them the header across the
@@ -230,8 +229,7 @@ export const NARROW_HEAD_ROWS = 10
 export const WIDE_HEAD_ROWS = 3
 
 // How the folding cards stand, and how many rows the subagents' and the
-// tools' show: in a pinned pane (`room` the rows the cards and the footer
-// have) the lowest card open takes the height the others leave, the
+// tools' show: in a pinned pane (`room` the rows the cards have) the lowest card open takes the height the others leave, the
 // thinking card's own way, the other two as many rows as fit, never fewer
 // than they show at rest.
 export const foldPlanOf = (plan: {
@@ -257,15 +255,14 @@ export const foldPlanOf = (plan: {
   const subagentsHigh = isFolded('subagents')
     ? CARD_TOP_ROWS
     : CARD_TOP_ROWS + Math.max(1, Math.min(plan.subagents.rows, plan.subagents.count) * SUBAGENT_ROW_ROWS)
-  // What the grower has: the room less the footer, the gaps, the thinking
-  // card folded where it shows, and the other card above it, and its own
-  // top line.
+  // What the grower has: the room less the gaps, the thinking card's top
+  // line (folded, or with the summary off, it is no more), the other card
+  // above it, and its own top line.
   const left =
     (plan.room ?? 0) -
     (plan.taken ?? 0) -
-    FOOTER_ROWS -
-    3 * CARD_GAP_ROWS -
-    (plan.isOn ? CARD_TOP_ROWS : 0) -
+    2 * CARD_GAP_ROWS -
+    CARD_TOP_ROWS -
     (grower === 'tools' ? subagentsHigh : CARD_TOP_ROWS) -
     CARD_TOP_ROWS
 
