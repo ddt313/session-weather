@@ -122,15 +122,23 @@ From 90 columns, with the summary on:
     after it, and its tool calls; with **☐ Persist** above. Press a turn to
     show its updates on the right, marked ▸; the next prompt shows its own
     again.
-- On the right: the subagents, with all their tokens on the card's top line,
-  the thinking summary, showing the turn picked, ▲ and ▼ scrolling it, and
-  under it what the summary cost and its switch. A turn picked from the list
-  shows the subagents it started too, as they last stood (one still at work,
-  as it works), the first 30 by when they began and the rest counted (`and 2
-  more not kept`); the current turn shows those listed now.
+- On the right: the subagents, with all their tokens on the card's top line;
+  the tools; the thinking summary, showing the turn picked, ▲ and ▼ scrolling
+  it, and under it what the summary cost and its switch. A turn picked from
+  the list shows the subagents it started too, as they last stood (one still
+  at work, as it works), the first 30 by when they began and the rest counted
+  (`and 2 more not kept`); the current turn shows those listed now.
+- The tools card lists the shown turn's tool calls, its subagents' with
+  them, newest first, five at a time, ▲ and ▼ on its top line scrolling the
+  rest, beside how many it made (`42 calls`) and where the rows stand (`1–5
+  of 42`). Each row: the tool's icon, the tool and what it was aimed at
+  (`Read: register.tsx`, a command by its description, never its text), the
+  subagent's task where one made it, and its time into the turn. A turn keeps
+  its newest 100 calls, the rest counted (`and 3 earlier not kept`); one that
+  made none reads `No tools called in this turn`.
 - With the summary off, the cards stand in one column (the limits, the
-  context, the subagents, the recent turns): the thinking card is gone, the
-  turns are figures alone, and the footer reads `Thinking summary is off`
+  context, the subagents, the tools, the recent turns): the thinking card is
+  gone, the turns are figures alone, and the footer reads `Thinking summary is off`
   beside **Turn summary on**.
 
 Colors follow the theme where text takes them; the fills, the bars and the
@@ -248,8 +256,8 @@ Each row is cut to the column, never wrapped.
   Code loses them, unless you persist the session: **☐ Persist**, a box
   beside the header, unticked until you press it, and for this session
   alone. Ticked, **☑ Persist**, the session's turns (as many as the list
-  keeps, no more, each with the subagents it started) and its count of
-  compactions go to a file named after the session's id in
+  keeps, no more, each with the subagents it started and its tool calls)
+  and its count of compactions go to a file named after the session's id in
   `~/.claude/session-weather/turns/`, written again as each turn ends or gets
   an update. When the session starts again, after a restart or resumed, they
   come back, the box still ticked; a turn the restart cut short reads

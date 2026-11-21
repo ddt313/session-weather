@@ -141,7 +141,17 @@ export type RecentTurn = {
   // them. Absent for a turn that started none, or kept by an earlier version.
   subagents?: TurnSubagent[]
   moreSubagents?: number
+  // The tool calls made while it ran, its subagents' with them, oldest
+  // first: the newest MAX_TURN_CALLS; `moreCalls` counts those let go before
+  // them. Absent for a turn that made none, or kept by an earlier version.
+  calls?: TurnCall[]
+  moreCalls?: number
 }
+
+// A tool call of a recent turn: when it was made (ms since the epoch), the
+// tool and what it was aimed at in a few words, and, made by a subagent, its
+// id.
+export type TurnCall = { at: number; text: string; agentId?: string }
 
 // A subagent a recent turn started, as its row last stood: where it stood,
 // since when it ran and until when, the model and effort of its latest
@@ -214,6 +224,9 @@ declare module 'claude-code' {
       // The first of the subagents the desktop's card shows, in the order it
       // lists them, the top at 0; ▲ and ▼ move it.
       subagentTop: number
+      // The first of the tool calls the desktop's Tools card shows, newest
+      // first, the top at 0; its ▲ and ▼ move it.
+      toolTop: number
       // Whether each Haiku request of the summary, and its reply, goes to the
       // debug log; the person turns it on and off.
       isDebugOn: boolean

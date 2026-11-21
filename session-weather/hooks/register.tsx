@@ -29,6 +29,7 @@ import type {
   SubagentFigures,
   Thinking,
   ThinkingEntry,
+  TurnCall,
   TurnMark,
   TurnSubagent,
 } from '../types'
@@ -59,6 +60,7 @@ const isSummaryOn = atom({ plugin: 'session-weather', key: 'isSummaryOn' } as co
 const summaryCost = atom({ plugin: 'session-weather', key: 'summaryCost' } as const, 0)
 const summaryPlace = atom({ plugin: 'session-weather', key: 'summaryPlace' } as const, { line: 0, row: 0 })
 const subagentTop = atom({ plugin: 'session-weather', key: 'subagentTop' } as const, 0)
+const toolTop = atom({ plugin: 'session-weather', key: 'toolTop' } as const, 0)
 const isDebugOn = atom({ plugin: 'session-weather', key: 'isDebugOn' } as const, false)
 
 const COMMAND = 'session-weather'
@@ -1691,6 +1693,8 @@ const recordTurn = ($: EngineInterface, turn: Thinking) =>
       entries: turn.entries.slice(-MAX_ENTRIES),
       ...(before?.subagents === undefined ? {} : { subagents: before.subagents }),
       ...(before?.moreSubagents === undefined ? {} : { moreSubagents: before.moreSubagents }),
+      ...(before?.calls === undefined ? {} : { calls: before.calls }),
+      ...(before?.moreCalls === undefined ? {} : { moreCalls: before.moreCalls }),
     }
 
     return before === undefined
@@ -1722,14 +1726,26 @@ const openRecord = ($: EngineInterface, turnId: string, startedAt: number, fill:
   )
 }
 
-// A tool call while the newest turn runs or waits counts toward it.
-const countTool = ($: EngineInterface) =>
+// The tool calls a recent turn keeps at most, the newest; past them it
+// counts how many it let go.
+const MAX_TURN_CALLS = 100
+
+// A tool call while the newest turn runs or waits counts toward it, and is
+// kept in its row.
+const countTool = ($: EngineInterface, call: TurnCall) =>
   update($, recentTurns, list => {
     const last = list.at(-1)
 
-    return last === undefined || last.durationMs !== undefined
-      ? list
-      : [...list.slice(0, -1), { ...last, tools: last.tools + 1 }]
+    if (last === undefined || last.durationMs !== undefined) return list
+
+    const calls = [...(last.calls ?? []), call]
+    const over = Math.max(0, calls.length - MAX_TURN_CALLS)
+    const more = (last.moreCalls ?? 0) + over
+
+    return [
+      ...list.slice(0, -1),
+      { ...last, tools: last.tools + 1, calls: calls.slice(over), ...(more > 0 ? { moreCalls: more } : {}) },
+    ]
   })
 
 // The fill as measured: the newest turn has added what lies past its start.
@@ -1896,6 +1912,7 @@ const shownTurnOf = (current: Thinking | null, picked: string | null, recent: re
 const pickTurn = async ($: EngineInterface, turnId: string | null) => {
   await update($, pickedTurn, () => turnId)
   await update($, subagentTop, () => 0)
+  await update($, toolTop, () => 0)
   await toNewest($)
 }
 
@@ -1951,6 +1968,13 @@ const isTurnSubagent = (value: unknown): value is TurnSubagent => {
   )
 }
 
+// A turn's tool call as a saved file holds it.
+const isTurnCall = (value: unknown): value is TurnCall => {
+  const one = value as Partial<TurnCall> | null
+
+  return typeof one === 'object' && one !== null && typeof one.at === 'number' && typeof one.text === 'string' && isStringOrNone(one.agentId)
+}
+
 // A turn's row as a saved file holds it.
 const isRecentTurn = (value: unknown): value is RecentTurn => {
   const one = value as Partial<RecentTurn> | null
@@ -1969,7 +1993,9 @@ const isRecentTurn = (value: unknown): value is RecentTurn => {
     Array.isArray(one.entries) &&
     one.entries.every(isEntry) &&
     (one.subagents === undefined || (Array.isArray(one.subagents) && one.subagents.every(isTurnSubagent))) &&
-    isNumberOrNone(one.moreSubagents)
+    isNumberOrNone(one.moreSubagents) &&
+    (one.calls === undefined || (Array.isArray(one.calls) && one.calls.every(isTurnCall))) &&
+    isNumberOrNone(one.moreCalls)
   )
 }
 
@@ -3507,6 +3533,42 @@ const pillSvg = (words: string) => {
   )
 }
 
+// A card's chip ("2 at work", "7 calls", "done"): its words on a grey pill
+// 20 pixels tall, round at both ends, in Claude's orange (`isMine`) or a grey
+// that reads on a dark theme or a light one. Drawn whole, as a Text's own
+// fill has square corners and a Box's round border stands taller; and it
+// never wraps.
+const CHIP_PX = 20
+
+const chipSvg = (words: string, isMine = false) => {
+  const width = Math.ceil(textPx(words, 11) * 1.04 + 16)
+  const ink = isMine
+    ? `.c{fill:${INK.mine}}`
+    : '.c{fill:#5E5E5E}@media (prefers-color-scheme: dark){.c{fill:#A8A8A8}}'
+
+  return {
+    width,
+    source:
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${CHIP_PX}" viewBox="0 0 ${width} ${CHIP_PX}">` +
+      `<style>${ink}</style>` +
+      `<rect width="${width}" height="${CHIP_PX}" rx="${CHIP_PX / 2}" fill="${DESK.chip}"/>` +
+      `<text class="c" x="${width / 2}" y="14" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11" font-weight="500">` +
+      `${svgText(words)}</text></svg>`,
+  }
+}
+
+// The chip as a card's top line places it, its words in its alt.
+const chipOf = (ui: DesktopUi, words: string, isMine = false) => {
+  const { Box, Svg } = ui
+  const chip = chipSvg(words, isMine)
+
+  return (
+    <Box flexShrink={0}>
+      <Svg source={chip.source} alt={words} width={chip.width} height={CHIP_PX} />
+    </Box>
+  )
+}
+
 // A run along a bar, from and to as shares of its length (0 to 1), in an ink
 // or, for a projection, the hatch.
 type Stretch = { from: number; to: number; ink: string }
@@ -3875,12 +3937,113 @@ const DESK_SUBAGENT_ROWS = 2
 // toward the top), within those listed. A top kept from a longer list is
 // read as the last place the list has.
 const moveSubagents = async ($: EngineInterface, by: number) => {
-  const [listed, top] = await Promise.all([read($, subagents), read($, subagentTop)])
-  const last = Math.max(0, listed.length - DESK_SUBAGENT_ROWS)
+  const [listed, figured, top, picked] = await Promise.all([
+    read($, subagents),
+    read($, subagentFigures),
+    read($, subagentTop),
+    pickedRecordOf($),
+  ])
+  // A turn picked from the list shows those it started.
+  const count = picked === undefined ? listed.length : subagentsOfRecord(picked, listed, figured).listed.length
+  const last = Math.max(0, count - DESK_SUBAGENT_ROWS)
   const to = Math.max(0, Math.min(last, Math.min(top, last) + by))
 
   // At either end a press has nothing to write, nothing to draw.
   if (to !== top) await update($, subagentTop, () => to)
+}
+
+// The row of the turn picked from the recent turns, where the wide layout
+// shows one; undefined for the newest.
+const pickedRecordOf = async ($: EngineInterface) => {
+  if (!isWideDrawn) return undefined
+
+  const [picked, recent] = await Promise.all([read($, pickedTurn), read($, recentTurns)])
+
+  return picked === null ? undefined : recent.find(one => one.turnId === picked)
+}
+
+// The tool calls the desktop's Tools card shows at once; ▲ and ▼ scroll the
+// rest.
+const DESK_TOOL_ROWS = 5
+
+// Moves the Tools card's window over the shown turn's calls `by` rows
+// (negative toward the newest), as `moveSubagents` does.
+const moveTools = async ($: EngineInterface, by: number) => {
+  const [recent, top, picked] = await Promise.all([read($, recentTurns), read($, toolTop), pickedRecordOf($)])
+  const count = (picked ?? recent.at(-1))?.calls?.length ?? 0
+  const last = Math.max(0, count - DESK_TOOL_ROWS)
+  const to = Math.max(0, Math.min(last, Math.min(top, last) + by))
+
+  if (to !== top) await update($, toolTop, () => to)
+}
+
+// The Tools card, beside the weather under the subagents: the shown turn's
+// tool calls (its subagents' with them), how many it made in all, then a
+// row for each of DESK_TOOL_ROWS, newest first from `top`, ▲ and ▼ scrolling
+// the rest: the tool's icon, the tool and what it was aimed at, the subagent
+// that made it where one did, and its time into the turn. Drawn for a turn
+// that made none too, which it says.
+const toolsCardOf = ($: EngineInterface, ui: DesktopUi, row: RecentTurn | undefined, top: number) => {
+  const { Box, Button, Svg, Text } = ui
+  const calls = row?.calls ?? []
+  const made = row?.tools ?? 0
+  const canScroll = calls.length > DESK_TOOL_ROWS
+  const first = Math.max(0, Math.min(top, calls.length - DESK_TOOL_ROWS))
+  const shown = [...calls].reverse().slice(first, first + DESK_TOOL_ROWS)
+  const more = row?.moreCalls ?? 0
+  const labelOf = (agentId: string) => row?.subagents?.find(one => one.id === agentId)?.label ?? 'Subagent'
+
+  return (
+    <Box flexDirection="column" gap="xs" paddingX={1} paddingY="sm" {...cardLook(DESK.card)}>
+      <Box flexDirection="row" alignItems="center" gap={1}>
+        <Svg source={iconSvg('tool', INK.mine, 18)} alt="Tools" width={18} height={18} />
+        <Text weight="semibold">Tools</Text>
+        {made > 0 && chipOf(ui, plural(made, 'call'))}
+        {canScroll && <Box flexGrow={1} />}
+        {canScroll && (
+          <Box flexShrink={0}>
+            <Text size="caption" dimColor tabular>
+              {`${first + 1}–${first + shown.length} of ${calls.length}`}
+            </Text>
+          </Box>
+        )}
+        {canScroll && <Button key="tools-up" plain dimColor label="▲" onPress={() => moveTools($, -1).catch(() => {})} />}
+        {canScroll && <Button key="tools-down" plain dimColor label="▼" onPress={() => moveTools($, 1).catch(() => {})} />}
+      </Box>
+      {made === 0 && (
+        <Text size="caption" dimColor>
+          No tools called in this turn
+        </Text>
+      )}
+      {shown.map(call => (
+        <Box flexDirection="row" alignItems="center" gap={1}>
+          <Svg source={iconSvg(toolIconOf(call.text), INK.grey, 14)} alt={call.text.split(':')[0] ?? 'Tool'} width={14} height={14} />
+          <Box flexGrow={1} flexShrink={1} minWidth={0}>
+            <Text size="caption" wrap="truncate">
+              {call.text}
+            </Text>
+          </Box>
+          {call.agentId !== undefined && (
+            <Box flexShrink={2} minWidth={0}>
+              <Text size="caption" dimColor wrap="truncate">
+                {labelOf(call.agentId)}
+              </Text>
+            </Box>
+          )}
+          {row !== undefined && (
+            <Text size="caption" dimColor tabular>
+              {formatDuration(Math.max(0, call.at - row.startedAt))}
+            </Text>
+          )}
+        </Box>
+      ))}
+      {more > 0 && (!canScroll || first + shown.length >= calls.length) && (
+        <Text size="caption" dimColor>
+          {`and ${more} earlier not kept`}
+        </Text>
+      )}
+    </Box>
+  )
 }
 
 // The subagents' card, drawn for a turn that started none too, which it says:
@@ -3914,26 +4077,23 @@ const subagentsCardOf = (
       <Box flexDirection="row" alignItems="center" gap={1}>
         <Svg source={iconSvg('fork', INK.mine, 18)} alt="Subagents" width={18} height={18} />
         <Text weight="semibold">Subagents</Text>
-        {working > 0 && (
-          <Text size="caption" weight="medium" color="claude" backgroundColor={DESK.chip}>
-            {` ${working} at work `}
-          </Text>
-        )}
-        {finished > 0 && (
-          <Text size="caption" weight="medium" dimColor backgroundColor={DESK.chip}>
-            {` ${finished} finished `}
-          </Text>
-        )}
+        {working > 0 && chipOf(ui, `${working} at work`, true)}
+        {finished > 0 && chipOf(ui, `${finished} finished`)}
         {((showTotal && total > 0) || canScroll) && <Box flexGrow={1} />}
+        {/* Each caption on one line: what gives way is the space beside them. */}
         {showTotal && total > 0 && (
-          <Text size="caption" dimColor tabular>
-            {`${formatTokens(total)} tokens`}
-          </Text>
+          <Box flexShrink={0}>
+            <Text size="caption" dimColor tabular>
+              {`${formatTokens(total)} tokens`}
+            </Text>
+          </Box>
         )}
         {canScroll && (
-          <Text size="caption" dimColor tabular>
-            {`${first + 1}–${first + shown.length} of ${listed.length}`}
-          </Text>
+          <Box flexShrink={0}>
+            <Text size="caption" dimColor tabular>
+              {`${first + 1}–${first + shown.length} of ${listed.length}`}
+            </Text>
+          </Box>
         )}
         {canScroll && (
           <Button key="subagents-up" plain dimColor label="▲" onPress={() => moveSubagents($, -1).catch(() => {})} />
@@ -3999,9 +4159,12 @@ const subagentsCardOf = (
                   <Box flexGrow={1} flexShrink={1} minWidth={0}>
                     <Svg source={share.source} alt={`${Math.round((tokens / Math.max(1, total)) * 100)}% of the subagents' tokens`} height={share.height} />
                   </Box>
-                  <Text size="caption" dimColor={!isWorking} tabular>
-                    {`${formatTokens(tokens)} tokens`}
-                  </Text>
+                  {/* On one line: the bar beside it gives way. */}
+                  <Box flexShrink={0}>
+                    <Text size="caption" dimColor={!isWorking} tabular>
+                      {`${formatTokens(tokens)} tokens`}
+                    </Text>
+                  </Box>
                 </Box>
               )}
             </Box>
@@ -4092,11 +4255,7 @@ const thinkingCardOf = ($: EngineInterface, ui: DesktopUi, view: ThinkingView) =
             {took}
           </Text>
         )}
-        {standing !== null && (
-          <Text size="caption" weight="medium" dimColor backgroundColor={DESK.chip}>
-            {` ${standing} `}
-          </Text>
-        )}
+        {standing !== null && chipOf(ui, standing)}
         {shown?.isSummarizing === true && (
           <Text size="caption" dimColor>
             summarizing…
@@ -4573,6 +4732,8 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
     true,
     cardOf.more,
   )
+  // Under them the tool calls of the same turn.
+  const toolsCard = toolsCardOf($, ui, pastRow ?? recent.at(-1), await read($, toolTop))
   const footer = footerOf($, ui, isOn, summarySpent, isDebugging)
 
   // With the summary off there is nothing to stand beside: one column.
@@ -4583,6 +4744,7 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
         {limitsCard}
         {contextCard}
         {subagentsCard}
+        {toolsCard}
         {turnsCard}
         {footer}
       </Box>
@@ -4616,6 +4778,7 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
         </Box>
         <Box flexDirection="column" gap="sm" flexGrow={1} flexShrink={1} minWidth={0}>
           {subagentsCard}
+          {toolsCard}
           {thinkingCard}
           {footer}
         </Box>
@@ -4842,8 +5005,9 @@ export const register: Register = (on, options) => {
         await update($, pickedTurn, () => null)
         // The subagents the prompt before saw end go; those at work stay.
         await forgetEnded($)
-        // The desktop's card lists them again from the top.
+        // The desktop's cards list them again from the top.
         await update($, subagentTop, () => 0)
+        await update($, toolTop, () => 0)
       }
 
       if (isOn) {
@@ -4937,8 +5101,12 @@ export const register: Register = (on, options) => {
   // and a subagent's latest, for its row to say what it is at.
   on('tool.call', async ($, e, next) => {
     await update($, turnTools, n => n + 1)
-    await countTool($)
     const action = actionOf(e.tool, e as unknown as Readonly<Record<string, unknown>>)
+    await countTool($, {
+      at: await $.clock.now(),
+      text: action,
+      ...(e.agentId === undefined ? {} : { agentId: e.agentId }),
+    })
 
     if (e.agentId === undefined) {
       await keepMark($, 'actions', action)
@@ -5161,6 +5329,7 @@ export const register: Register = (on, options) => {
       await update($, recentTurns, () => [])
       await update($, pickedTurn, () => null)
       await update($, subagentTop, () => 0)
+      await update($, toolTop, () => 0)
       await update($, isSaving, () => false)
       await showStatus($).catch(() => {})
       await toNewest($)

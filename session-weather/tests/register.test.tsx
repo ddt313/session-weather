@@ -4503,28 +4503,24 @@ test("on the desktop each subagent's row says its state, task and time, its mode
   const working = await desk($)
   expect(card(working.texts)).toEqual([
     'Subagents',
-    ' 1 at work ',
     'Find the flaky test',
     'Opus 5.5 · high · ctx 24.3k',
     '<1m',
     'Read: ProductList.tsx',
     '45.8k tokens',
   ])
-  expect(working.alts).toEqual(expect.arrayContaining(['Subagents', 'running', 'Read', "100% of the subagents' tokens"]))
+  // The chip is a rounded drawing, its words in its alt.
+  expect(working.alts).toEqual(expect.arrayContaining(['Subagents', '1 at work', 'running', 'Read', "100% of the subagents' tokens"]))
 
   // Ended: done, how long it ran, its model and effort; what it was at and
   // its context go.
   await clock.advance(2 * MINUTE)
   agents[0]!.status = 'completed'
   await $.turn.complete(turnDone({ agentId: 'a1', durationMs: 2 * MINUTE }) as never)
-  expect(card((await desk($)).texts)).toEqual([
-    'Subagents',
-    ' 1 finished ',
-    'Find the flaky test',
-    'Done · Opus 5.5 · high',
-    '2m 1s',
-    '45.8k tokens',
-  ])
+  const ended = await desk($)
+  expect(card(ended.texts)).toEqual(['Subagents', 'Find the flaky test', 'Done · Opus 5.5 · high', '2m 1s', '45.8k tokens'])
+  expect(ended.alts).toContain('1 finished')
+  expect(ended.alts).not.toContain('1 at work')
 })
 
 test('on the desktop the subagents card shows two rows at once, ▲ and ▼ scrolling the rest a row a press', async ($, on) => {
@@ -4725,7 +4721,8 @@ test('on the desktop from WIDE_FROM columns: the sky, the cost across the top; t
     '2s · 0 tools · cache 96%',
   ])
   // The recent turns as a table, the one shown marked; then, atop the right
-  // column, the subagents' card, which says the turn started none.
+  // column, the subagents' card and the tools', which say the turn started
+  // and called none.
   expect(between('Recent turns', 'Thinking')).toEqual([
     'Recent turns',
     'Time · Duration',
@@ -4736,6 +4733,8 @@ test('on the desktop from WIDE_FROM columns: the sky, the cost across the top; t
     '0',
     'Subagents',
     'No subagents ran in this turn',
+    'Tools',
+    'No tools called in this turn',
   ])
   expect(labels).toEqual(['☐ Persist', `▸ ${clockOf(NOW)}  2s`, 'Turn summary off'])
 })
@@ -4749,13 +4748,13 @@ test('on the desktop from WIDE_FROM columns a recent turn pressed shows beside t
   replies.push(answer('GIST: Bốn.'))
   await oneTurn($, steps, clock, 't2', 'and this')
 
-  // The thinking card's title and its lines, past its duration and its chip
-  // and up to the footer; and the pane's Buttons, in order.
+  // The thinking card's title and its lines, past its duration (its chip a
+  // drawing, no text) and up to the footer; and the pane's Buttons, in order.
   const card = async () => {
     const { texts, labels } = await desk($, WIDE_FROM)
     const top = texts.findIndex(text => text === 'Thinking' || text.startsWith('Turn at '))
 
-    return { title: texts[top], lines: texts.slice(top + 3, -1), labels }
+    return { title: texts[top], lines: texts.slice(top + 2, -1), labels }
   }
   const [first, second] = [clockOf(NOW), clockOf(NOW + 31 * SECOND + MINUTE)]
 
@@ -4848,10 +4847,84 @@ test('on the desktop from WIDE_FROM columns a recent turn pressed shows the suba
   expect(past).toEqual(expect.arrayContaining(['First 1', 'First 2', '1–2 of 30', 'and 2 more not kept']))
   expect(past).not.toContain('Second 1')
   expect(past.some(text => text.startsWith('Done'))).toBe(true)
+  // ▼ scrolls them, the current turn's one subagent notwithstanding.
+  await pressDesk($, 'subagents-down', WIDE_FROM)
+  expect(await card()).toContain('2–3 of 30')
 
   // Back to the current turn: its own again.
   await pressDesk($, 'turn-t2', WIDE_FROM)
   expect(await card()).toContain('Second 1')
+})
+
+test('on the desktop from WIDE_FROM columns the Tools card lists the shown turn\'s calls newest first, five at once, ▲ and ▼ scrolling the rest', async ($, on) => {
+  const { agents, clock } = engine(on)
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: 'a1' }))
+
+  const card = async () => {
+    const { texts } = await desk($, WIDE_FROM)
+    // The card's title, past the recent turns' column of the same name.
+    const at = texts.lastIndexOf('Tools')
+
+    return texts.slice(at, texts.findIndex((text, index) => index > at && (text === 'Thinking' || text.startsWith('Turn at '))))
+  }
+
+  // A turn of seven calls, one of them its subagent's.
+  await $.session.start(start)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  agents.push({ id: 'a1', description: 'Scan the docs', type: 'general-purpose', status: 'running' })
+  await $.agent.spawn({ prompt: 'Scan.', description: 'Scan the docs' } as never)
+  for (let n = 1; n <= 6; n += 1) {
+    await clock.advance(1_000)
+    await $.tool.call({ tool: 'Read', file_path: `/work/f${n}.ts` } as never)
+  }
+  await $.tool.call({ tool: 'Grep', pattern: 'flaky', agentId: 'a1' } as never)
+
+  // Newest first, five at once, the subagent's call by its task.
+  const first = await card()
+  expect(first.slice(0, 2)).toEqual(['Tools', '1–5 of 7'])
+  expect((await desk($, WIDE_FROM)).alts).toContain('7 calls')
+  expect(first.slice(2)).toEqual(['Grep: flaky', 'Scan the docs', '6s', 'Read: f6.ts', '6s', 'Read: f5.ts', '5s', 'Read: f4.ts', '4s', 'Read: f3.ts', '3s'])
+
+  // ▼ scrolls a row a press, no further than the last.
+  await pressDesk($, 'tools-down', WIDE_FROM)
+  await pressDesk($, 'tools-down', WIDE_FROM)
+  await pressDesk($, 'tools-down', WIDE_FROM)
+  const end = await card()
+  expect(end).toContain('3–7 of 7')
+  expect(end.at(-2)).toBe('Read: f1.ts')
+
+  // The next prompt shows its own calls, none yet, from the top.
+  agents.splice(0)
+  await $.turn.complete(turnDone({ durationMs: 7_000 }) as never)
+  await clock.settle()
+  await $.turn.start({ text: 'next', turnId: 't2' })
+  expect(await card()).toEqual(['Tools', 'No tools called in this turn'])
+
+  // The turn before, pressed: its calls again.
+  await pressDesk($, 'turn-t1', WIDE_FROM)
+  expect((await card()).slice(0, 3)).toEqual(['Tools', '1–5 of 7', 'Grep: flaky'])
+})
+
+test('a recent turn keeps its newest 100 tool calls, counting those let go, and a saved session gets them back', async ($, on) => {
+  const { files, clock } = engine(on)
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await pressDesk($, 'save-turns', WIDE_FROM)
+  for (let n = 1; n <= 103; n += 1) await $.tool.call({ tool: 'Bash', description: `Step ${n}` } as never)
+  await $.turn.complete(turnDone({ durationMs: 5_000 }) as never)
+  await clock.settle()
+
+  const saved = JSON.parse(files.get(SAVED) ?? 'null') as { turns: { tools: number; calls?: { text: string }[]; moreCalls?: number }[] }
+  expect(saved.turns[0]?.tools).toBe(103)
+  expect(saved.turns[0]?.calls?.length).toBe(100)
+  expect(saved.turns[0]?.calls?.[0]?.text).toBe('Bash: Step 4')
+  expect(saved.turns[0]?.moreCalls).toBe(3)
+
+  // Scrolled to the oldest kept, the card counts those let go.
+  for (let n = 0; n < 95; n += 1) await pressDesk($, 'tools-down', WIDE_FROM)
+  const { texts } = await desk($, WIDE_FROM)
+  expect(texts).toEqual(expect.arrayContaining(['96–100 of 100', 'Bash: Step 4', 'and 3 earlier not kept']))
 })
 
 test("on the desktop from WIDE_FROM columns the shown turn's fill lies under its row, which stands as tall as the others", async ($, on) => {
