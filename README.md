@@ -492,10 +492,25 @@ claude plugin test session-weather
 claude plugin validate session-weather
 ```
 
-- `session-weather/hooks/register.tsx`: the hooks module.
+- `session-weather/hooks/register.tsx`: the hooks module, which
+  `hooks/hooks.json` names. It holds the hooks; what they do is in the files
+  beside it, one area each: the context, the limits, the spend, the status
+  line, the thinking summary (`summary/`), its log and debug log, the recent
+  turns, the subagents and the mod's files, and the desktop pane's look,
+  cards and layouts (`ui/`).
 - `session-weather/types/index.d.ts`: the contract of the values the mod
   keeps in `$.state`.
-- `session-weather/tests/register.test.tsx`: its tests.
+- `session-weather/tests/`: the tests, a file for each area, and
+  `helpers.tsx`, the engine and readings they share.
+
+Two rules of the engine shape how the code is split:
+
+- A function that takes `$` and lives in a file other than `register.tsx` is
+  a `function` declaration, not an arrow: past an import, the engine follows
+  `$` only into a declaration.
+- Each file that reads or updates a value in `$.state` writes that value's
+  atom itself, as the engine's scan reads it only there. The shape tags of
+  `thinking` and `recentTurns` are in `hooks/atoms.ts`.
 
 Claude Code writes the API's type declarations into
 `session-weather/.claude-plugin/types/` when it loads the mod; they are not
