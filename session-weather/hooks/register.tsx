@@ -3481,6 +3481,13 @@ const iconSvg = (name: IconName, ink: string, size: number) =>
 // and the space above and below them.
 const LINE_PX = 20
 
+// The thinking card's rule between two updates: a line a pixel thick in the
+// middle of a drawing LINE_PX tall, squeezed or stretched across the card,
+// in a grey that reads on a dark theme or a light one.
+const RULE_SVG =
+  `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="${LINE_PX}" viewBox="0 0 400 ${LINE_PX}" preserveAspectRatio="none">` +
+  `<rect y="${LINE_PX / 2}" width="400" height="1" fill="rgba(128, 128, 128, 0.35)"/></svg>`
+
 // An icon `size` pixels square, in `ink`, standing in the middle of a box a
 // line of text tall: set at the top of a row, beside words that may wrap, it
 // sits level with their first line.
@@ -3894,7 +3901,11 @@ const drawNarrowDesktop = async ($: EngineInterface, ui: DesktopUi, columns: num
     </Box>
   )
 
-  const subagentsCard = subagentsCardOf($, ui, listed, figured, at, columns, await read($, subagentTop))
+  // Room is short under WIDE_FROM columns: one subagent at once, and the
+  // current turn's tool calls three at once.
+  const [subagentAt, toolAt, recent] = await Promise.all([read($, subagentTop), read($, toolTop), read($, recentTurns)])
+  const subagentsCard = subagentsCardOf($, ui, listed, figured, at, columns, subagentAt, false, 0, NARROW_SUBAGENT_ROWS)
+  const toolsCard = toolsCardOf($, ui, recent.at(-1), toolAt, NARROW_TOOL_ROWS)
   // Under WIDE_FROM columns the card shows the current turn, as the
   // terminal's one column does; its text stands a cell in from each side.
   const thinkingCard =
@@ -3924,19 +3935,22 @@ const drawNarrowDesktop = async ($: EngineInterface, ui: DesktopUi, columns: num
       {alertBox}
       {lastTurnChip}
       {subagentsCard}
+      {toolsCard}
       {thinkingCard}
       {footer}
     </Box>
   )
 }
 
-// The subagents the desktop's card shows at once; ▲ and ▼ scroll the rest.
+// The subagents the desktop's card shows at once, from WIDE_FROM columns and
+// under them, where room is short; ▲ and ▼ scroll the rest.
 const DESK_SUBAGENT_ROWS = 2
+const NARROW_SUBAGENT_ROWS = 1
 
 // Moves the desktop card's window over the subagents `by` rows (negative
-// toward the top), within those listed. A top kept from a longer list is
-// read as the last place the list has.
-const moveSubagents = async ($: EngineInterface, by: number) => {
+// toward the top), within those listed, the card showing `rows` at once. A
+// top kept from a longer list is read as the last place the list has.
+const moveSubagents = async ($: EngineInterface, by: number, rows: number) => {
   const [listed, figured, top, picked] = await Promise.all([
     read($, subagents),
     read($, subagentFigures),
@@ -3945,7 +3959,7 @@ const moveSubagents = async ($: EngineInterface, by: number) => {
   ])
   // A turn picked from the list shows those it started.
   const count = picked === undefined ? listed.length : subagentsOfRecord(picked, listed, figured).listed.length
-  const last = Math.max(0, count - DESK_SUBAGENT_ROWS)
+  const last = Math.max(0, count - rows)
   const to = Math.max(0, Math.min(last, Math.min(top, last) + by))
 
   // At either end a press has nothing to write, nothing to draw.
@@ -3962,16 +3976,17 @@ const pickedRecordOf = async ($: EngineInterface) => {
   return picked === null ? undefined : recent.find(one => one.turnId === picked)
 }
 
-// The tool calls the desktop's Tools card shows at once; ▲ and ▼ scroll the
-// rest.
+// The tool calls the desktop's Tools card shows at once, from WIDE_FROM
+// columns and under them; ▲ and ▼ scroll the rest.
 const DESK_TOOL_ROWS = 5
+const NARROW_TOOL_ROWS = 3
 
 // Moves the Tools card's window over the shown turn's calls `by` rows
 // (negative toward the newest), as `moveSubagents` does.
-const moveTools = async ($: EngineInterface, by: number) => {
+const moveTools = async ($: EngineInterface, by: number, rows: number) => {
   const [recent, top, picked] = await Promise.all([read($, recentTurns), read($, toolTop), pickedRecordOf($)])
   const count = (picked ?? recent.at(-1))?.calls?.length ?? 0
-  const last = Math.max(0, count - DESK_TOOL_ROWS)
+  const last = Math.max(0, count - rows)
   const to = Math.max(0, Math.min(last, Math.min(top, last) + by))
 
   if (to !== top) await update($, toolTop, () => to)
@@ -3979,17 +3994,17 @@ const moveTools = async ($: EngineInterface, by: number) => {
 
 // The Tools card, beside the weather under the subagents: the shown turn's
 // tool calls (its subagents' with them), how many it made in all, then a
-// row for each of DESK_TOOL_ROWS, newest first from `top`, ▲ and ▼ scrolling
-// the rest: the tool's icon, the tool and what it was aimed at, the subagent
+// row for each of `rows`, newest first from `top`, ▲ and ▼ scrolling the
+// rest: the tool's icon, the tool and what it was aimed at, the subagent
 // that made it where one did, and its time into the turn. Drawn for a turn
 // that made none too, which it says.
-const toolsCardOf = ($: EngineInterface, ui: DesktopUi, row: RecentTurn | undefined, top: number) => {
+const toolsCardOf = ($: EngineInterface, ui: DesktopUi, row: RecentTurn | undefined, top: number, rows = DESK_TOOL_ROWS) => {
   const { Box, Button, Svg, Text } = ui
   const calls = row?.calls ?? []
   const made = row?.tools ?? 0
-  const canScroll = calls.length > DESK_TOOL_ROWS
-  const first = Math.max(0, Math.min(top, calls.length - DESK_TOOL_ROWS))
-  const shown = [...calls].reverse().slice(first, first + DESK_TOOL_ROWS)
+  const canScroll = calls.length > rows
+  const first = Math.max(0, Math.min(top, calls.length - rows))
+  const shown = [...calls].reverse().slice(first, first + rows)
   const more = row?.moreCalls ?? 0
   const labelOf = (agentId: string) => row?.subagents?.find(one => one.id === agentId)?.label ?? 'Subagent'
 
@@ -4003,12 +4018,12 @@ const toolsCardOf = ($: EngineInterface, ui: DesktopUi, row: RecentTurn | undefi
         {canScroll && (
           <Box flexShrink={0}>
             <Text size="caption" dimColor tabular>
-              {`${first + 1}–${first + shown.length} of ${calls.length}`}
+              {shown.length === 1 ? `${first + 1} of ${calls.length}` : `${first + 1}–${first + shown.length} of ${calls.length}`}
             </Text>
           </Box>
         )}
-        {canScroll && <Button key="tools-up" plain dimColor label="▲" onPress={() => moveTools($, -1).catch(() => {})} />}
-        {canScroll && <Button key="tools-down" plain dimColor label="▼" onPress={() => moveTools($, 1).catch(() => {})} />}
+        {canScroll && <Button key="tools-up" plain dimColor label="▲" onPress={() => moveTools($, -1, rows).catch(() => {})} />}
+        {canScroll && <Button key="tools-down" plain dimColor label="▼" onPress={() => moveTools($, 1, rows).catch(() => {})} />}
       </Box>
       {made === 0 && (
         <Text size="caption" dimColor>
@@ -4048,10 +4063,10 @@ const toolsCardOf = ($: EngineInterface, ui: DesktopUi, row: RecentTurn | undefi
 
 // The subagents' card, drawn for a turn that started none too, which it says:
 // how many work and finished (with `showTotal`, the
-// tokens of them all), then a row for each of DESK_SUBAGENT_ROWS from `top`,
-// ▲ and ▼ scrolling the rest: its state, its task, how long it has run (once
-// ended, how long it ran), its model, effort and context, what it is at, and
-// its tokens, with a bar of its share of all the subagents' tokens.
+// tokens of them all), then a row for each of `rows` from `top`, ▲ and ▼
+// scrolling the rest: its state, its task, how long it has run (once ended,
+// how long it ran), its model, effort and context, what it is at, and its
+// tokens, with a bar of its share of all the subagents' tokens.
 const subagentsCardOf = (
   $: EngineInterface,
   ui: DesktopUi,
@@ -4062,15 +4077,16 @@ const subagentsCardOf = (
   top: number,
   showTotal = false,
   more = 0,
+  rows = DESK_SUBAGENT_ROWS,
 ) => {
   const { Box, Button, Svg, Text } = ui
   const working = workingOf(listed)
   const finished = listed.length - working
   const total = listed.reduce((sum, one) => sum + tokensOf(figured.find(figure => figure.id === one.id)), 0)
   const barCells = Math.max(10, columns - ROW_INDENT - 18)
-  const canScroll = listed.length > DESK_SUBAGENT_ROWS
-  const first = Math.max(0, Math.min(top, listed.length - DESK_SUBAGENT_ROWS))
-  const shown = subagentOrder(listed).slice(first, first + DESK_SUBAGENT_ROWS)
+  const canScroll = listed.length > rows
+  const first = Math.max(0, Math.min(top, listed.length - rows))
+  const shown = subagentOrder(listed).slice(first, first + rows)
 
   return (
     <Box flexDirection="column" gap="xs" paddingX={1} paddingY="sm" {...cardLook(DESK.card)}>
@@ -4091,15 +4107,15 @@ const subagentsCardOf = (
         {canScroll && (
           <Box flexShrink={0}>
             <Text size="caption" dimColor tabular>
-              {`${first + 1}–${first + shown.length} of ${listed.length}`}
+              {shown.length === 1 ? `${first + 1} of ${listed.length}` : `${first + 1}–${first + shown.length} of ${listed.length}`}
             </Text>
           </Box>
         )}
         {canScroll && (
-          <Button key="subagents-up" plain dimColor label="▲" onPress={() => moveSubagents($, -1).catch(() => {})} />
+          <Button key="subagents-up" plain dimColor label="▲" onPress={() => moveSubagents($, -1, rows).catch(() => {})} />
         )}
         {canScroll && (
-          <Button key="subagents-down" plain dimColor label="▼" onPress={() => moveSubagents($, 1).catch(() => {})} />
+          <Button key="subagents-down" plain dimColor label="▼" onPress={() => moveSubagents($, 1, rows).catch(() => {})} />
         )}
       </Box>
       {listed.length === 0 && (
@@ -4232,10 +4248,13 @@ const thinkingCardOf = ($: EngineInterface, ui: DesktopUi, view: ThinkingView) =
           ? waitingFor(shown.paused.subagents)
           : null
   const status = isPast ? (shown?.entries.length === 0 ? 'No updates on this turn.' : null) : statusOf(view.turnNow)
+  // The rule between two updates: a hairline drawn across the card's whole
+  // width, standing a line high as the updates' lines do. A row of ─ in the
+  // app's font came out a little wider than the card and was cut with "…".
   const rule = (
-    <Text dimColor mono wrap="truncate">
-      {'─'.repeat(Math.max(1, view.cardColumns - 1))}
-    </Text>
+    <Box flexGrow={1} minWidth={0}>
+      <Svg source={RULE_SVG} alt="Between updates" height={LINE_PX} />
+    </Box>
   )
 
   return (
@@ -4760,8 +4779,8 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
     return (
       <Box flexDirection="column" gap="sm">
         {head}
-        {limitsCard}
         {contextCard}
+        {limitsCard}
         {subagentsCard}
         {toolsCard}
         {turnsCard}
@@ -4791,8 +4810,8 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
       {head}
       <Box flexDirection="row" gap={COLUMN_GAP} {...(isPinned ? { flexGrow: 1, flexShrink: 1, minHeight: 0 } : {})}>
         <Box flexDirection="column" gap="sm" width={LEFT_CELLS} flexShrink={0} {...(isPinned ? { overflow: 'hidden' as const } : {})}>
-          {limitsCard}
           {contextCard}
+          {limitsCard}
           {turnsCard}
         </Box>
         <Box flexDirection="column" gap="sm" flexGrow={1} flexShrink={1} minWidth={0}>

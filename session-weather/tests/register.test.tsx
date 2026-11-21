@@ -4438,9 +4438,12 @@ test('on the desktop under WIDE_FROM columns: the sky and the session, a tile ea
     'reset 2d 5h',
     'Last turn',
     '+90k',
-    // A turn that started no subagents still gets their card, which says so.
+    // A turn that started no subagents and called no tools still gets their
+    // cards, which say so.
     'Subagents',
     'No subagents ran in this turn',
+    'Tools',
+    'No tools called in this turn',
   ])
   expect(alts.slice(0, 4)).toEqual([
     'Cloudy',
@@ -4499,7 +4502,8 @@ test("on the desktop each subagent's row says its state, task and time, its mode
   await $.tool.call({ tool: 'Read', file_path: '/work/app/src/ProductList.tsx', agentId: 'a1' } as never)
   await clock.advance(SECOND)
 
-  const card = (texts: string[]) => texts.slice(texts.indexOf('Subagents'), texts.indexOf('Thinking'))
+  // The subagents' card, up to the Tools card under it.
+  const card = (texts: string[]) => texts.slice(texts.indexOf('Subagents'), texts.lastIndexOf('Tools'))
   const working = await desk($)
   expect(card(working.texts)).toEqual([
     'Subagents',
@@ -4523,7 +4527,7 @@ test("on the desktop each subagent's row says its state, task and time, its mode
   expect(ended.alts).not.toContain('1 at work')
 })
 
-test('on the desktop the subagents card shows two rows at once, ▲ and ▼ scrolling the rest a row a press', async ($, on) => {
+test('on the desktop the subagents card shows one row at once under WIDE_FROM columns and two from them, ▲ and ▼ scrolling the rest a row a press', async ($, on) => {
   const { agents } = engine(on)
   on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: 'w0' }))
 
@@ -4534,39 +4538,70 @@ test('on the desktop the subagents card shows two rows at once, ▲ and ▼ scro
   }
   await $.agent.spawn({ prompt: 'Run it.', description: 'Step 5' } as never)
 
-  const card = async () => {
-    const { texts, labels } = await desk($)
-    const rows = texts.slice(texts.indexOf('Subagents'), texts.indexOf('Thinking')).filter(one => one.startsWith('Step '))
+  // The card's rows, where they stand among four, and its arrows; the Tools
+  // card's arrows, which a turn without calls has none of, left out.
+  const card = async (columns?: number) => {
+    const { texts, labels } = await desk($, columns)
+    const rows = texts.slice(texts.indexOf('Subagents'), texts.lastIndexOf('Tools')).filter(one => one.startsWith('Step '))
 
     return { rows, place: texts.find(one => one.endsWith(' of 4')), labels: labels.filter(one => one === '▲' || one === '▼') }
   }
 
-  // The first two, where they stand among four, and the arrows.
-  expect(await card()).toEqual({ rows: ['Step 1', 'Step 2'], place: '1–2 of 4', labels: ['▲', '▼'] })
+  // Under WIDE_FROM columns: the first one, where it stands, and the arrows.
+  expect(await card()).toEqual({ rows: ['Step 1'], place: '1 of 4', labels: ['▲', '▼'] })
 
-  // ▼ a row a press, to the last two and no further; ▲ back up.
+  // ▼ a row a press, to the last and no further; ▲ back up.
   await pressDesk($, 'subagents-down')
-  expect((await card()).rows).toEqual(['Step 2', 'Step 3'])
-  await pressDesk($, 'subagents-down')
-  await pressDesk($, 'subagents-down')
-  expect(await card()).toEqual({ rows: ['Step 3', 'Step 4'], place: '3–4 of 4', labels: ['▲', '▼'] })
+  expect((await card()).rows).toEqual(['Step 2'])
+  for (let n = 0; n < 3; n += 1) await pressDesk($, 'subagents-down')
+  expect(await card()).toEqual({ rows: ['Step 4'], place: '4 of 4', labels: ['▲', '▼'] })
   await pressDesk($, 'subagents-up')
-  expect((await card()).rows).toEqual(['Step 2', 'Step 3'])
+  expect((await card()).rows).toEqual(['Step 3'])
 
   // The person's next prompt lists them from the top again.
   await $.turn.start({ text: 'next', turnId: 't2' })
-  expect((await card()).rows).toEqual(['Step 1', 'Step 2'])
-  await pressDesk($, 'subagents-down')
+  expect((await card()).rows).toEqual(['Step 1'])
 
-  // From WIDE_FROM columns the card scrolls the same.
-  const wide = await desk($, WIDE_FROM)
-  expect(wide.texts).toEqual(expect.arrayContaining(['Step 2', 'Step 3', '2–3 of 4']))
-  expect(wide.texts).not.toContain('Step 1')
+  // From WIDE_FROM columns two at once, scrolled the same, no further than
+  // the last two.
+  expect(await card(WIDE_FROM)).toEqual({ rows: ['Step 1', 'Step 2'], place: '1–2 of 4', labels: ['▲', '▼'] })
+  for (let n = 0; n < 3; n += 1) await pressDesk($, 'subagents-down', WIDE_FROM)
+  expect(await card(WIDE_FROM)).toEqual({ rows: ['Step 3', 'Step 4'], place: '3–4 of 4', labels: ['▲', '▼'] })
 
-  // Two or fewer: all of them, no arrows.
+  // Two or fewer from WIDE_FROM columns: all of them, no arrows; one under
+  // them still scrolls.
   agents.splice(2)
   await $.agent.spawn({ prompt: 'Run it.', description: 'Step 6' } as never)
-  expect(await card()).toEqual({ rows: ['Step 1', 'Step 2'], place: undefined, labels: [] })
+  expect(await card(WIDE_FROM)).toEqual({ rows: ['Step 1', 'Step 2'], place: undefined, labels: [] })
+  expect((await card()).labels).toEqual(['▲', '▼'])
+})
+
+test('on the desktop under WIDE_FROM columns the Tools card lists the current turn\'s calls three at once', async ($, on) => {
+  const { clock } = engine(on)
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  for (let n = 1; n <= 4; n += 1) {
+    await clock.advance(1_000)
+    await $.tool.call({ tool: 'Read', file_path: `/work/f${n}.ts` } as never)
+  }
+
+  const card = async () => {
+    const { texts } = await desk($)
+
+    return texts.slice(texts.lastIndexOf('Tools'), texts.findIndex(text => text === 'Thinking' || text.startsWith('Turn at ')))
+  }
+
+  // Under the subagents' card, newest first, three of the four.
+  const { texts, alts } = await desk($)
+  expect(texts.indexOf('Subagents')).toBeLessThan(texts.lastIndexOf('Tools'))
+  expect(alts).toContain('4 calls')
+  expect(await card()).toEqual(['Tools', '1–3 of 4', 'Read: f4.ts', '4s', 'Read: f3.ts', '3s', 'Read: f2.ts', '2s'])
+
+  // ▼ to the last three, no further.
+  await pressDesk($, 'tools-down')
+  await pressDesk($, 'tools-down')
+  expect((await card()).slice(1, 3)).toEqual(['2–4 of 4', 'Read: f3.ts'])
 })
 
 // A turn of three updates, written at 1s, 16s and 31s: each a gist and one
@@ -4593,10 +4628,6 @@ const threeUpdates = async (
   }
 }
 
-// The rule between two updates in the card of a desktop pane 60 columns
-// wide: across the card's text, a cell in from each side.
-const DESK_RULE = '─'.repeat(60 - 2 - 1)
-
 test("on the desktop under WIDE_FROM columns the thinking card lists the turn's updates newest first, each gist by its time, what follows by an icon", async ($, on) => {
   const { replies, steps, clock } = engine(on)
   await threeUpdates($, replies, steps, clock)
@@ -4610,17 +4641,17 @@ test("on the desktop under WIDE_FROM columns the thinking card lists the turn's 
     '31s · Ba.',
     '31s ·',
     'Test đã xanh',
-    DESK_RULE,
     '16s · Hai.',
     '16s ·',
     'Chạy test',
-    DESK_RULE,
     '1s · Một.',
     '1s ·',
     'Chỉ sửa file A',
     'Summary $0.006 · Haiku 5.5',
   ])
   expect(alts).toEqual(expect.arrayContaining(['Thinking', 'Decided', 'To check', 'Next']))
+  // The rules between them are drawn lines, one between each two.
+  expect(alts.filter(alt => alt === 'Between updates').length).toBe(2)
   // Pinned in a body of 30 rows: the arrows to scroll it.
   expect(labels).toEqual(['▲', '▼', 'Turn summary off'])
 })
@@ -4660,7 +4691,7 @@ test("on the desktop ▲ and ▼ scroll the turn's updates about half the window
   expect(second.labels).toEqual(['Turn summary off'])
 })
 
-test('on the desktop from WIDE_FROM columns: the sky, the cost across the top; the limits, the context and the recent turns on the left', async ($, on) => {
+test('on the desktop from WIDE_FROM columns: the sky, the cost across the top; the context, the limits and the recent turns on the left', async ($, on) => {
   const { clock, steps } = engine(on, { rateLimits: limits(25), breakdown: BREAKDOWN, cost: 1.234, startedAt: NOW, turns: 3 })
 
   await $.session.start(start)
@@ -4671,15 +4702,15 @@ test('on the desktop from WIDE_FROM columns: the sky, the cost across the top; t
   const { texts, labels } = await desk($, WIDE_FROM)
   const between = (from: string, to: string) => texts.slice(texts.indexOf(from), texts.indexOf(to))
 
-  expect(texts.slice(0, texts.indexOf('Usage limits'))).toEqual([
+  expect(texts.slice(0, texts.indexOf('Context'))).toEqual([
     'Cloudy',
     `Fable 5.2 · since ${clockOf(NOW)} · 3 turns`,
     'Session cost',
     '$1.23',
   ])
-  // On top, as the person looks at them most: each window with this
-  // session's part, its reset and its pace.
-  expect(between('Usage limits', 'Context')).toEqual([
+  // Under the context: each window with this session's part, its reset and
+  // its pace.
+  expect(between('Usage limits', 'Recent turns')).toEqual([
     'Usage limits',
     '5-hour',
     '3%',
@@ -4695,8 +4726,9 @@ test('on the desktop from WIDE_FROM columns: the sky, the cost across the top; t
     'This session',
     'Projected at reset',
   ])
-  // What fills the context, each part with its share; the last turn.
-  expect(between('Context', 'Recent turns')).toEqual([
+  // On top, as the person looks at it most: what fills the context, each
+  // part with its share; the last turn.
+  expect(between('Context', 'Usage limits')).toEqual([
     'Context',
     'Auto-compact at 92% · 184k',
     '45%',
@@ -4766,25 +4798,20 @@ test('on the desktop from WIDE_FROM columns a recent turn pressed shows beside t
     labels: ['☐ Persist', `▸ ${second}  2s`, `${first}  31s`, 'Turn summary off'],
   })
 
-  // The one before, pressed: its updates, its recap on top, a rule between
-  // two across the right column's card (90 cells, less the left column's 43
-  // and the 2 between, less a cell each side), and arrows to scroll them.
+  // The one before, pressed: its updates, its recap on top, a drawn rule
+  // between two (no text), and arrows to scroll them.
   await pressDesk($, 'turn-t1', WIDE_FROM)
-  const rule = '─'.repeat(WIDE_FROM - 43 - 2 - 2 - 1)
   expect(await card()).toEqual({
     title: `Turn at ${first}`,
     lines: [
       'Recap. Claude đang sửa lỗi.',
       'Recap.',
-      rule,
       '31s · Ba.',
       '31s ·',
       'Test đã xanh',
-      rule,
       '16s · Hai.',
       '16s ·',
       'Chạy test',
-      rule,
       '1s · Một.',
       '1s ·',
       'Chỉ sửa file A',
@@ -4974,7 +5001,7 @@ test('on the desktop from WIDE_FROM columns with the summary off, the cards stan
   const { texts, labels } = await desk($, 120)
   expect(texts).toContain('Context')
   expect(texts.indexOf('Usage limits')).toBeGreaterThan(-1)
-  expect(texts.indexOf('Usage limits')).toBeLessThan(texts.indexOf('Context'))
+  expect(texts.indexOf('Context')).toBeLessThan(texts.indexOf('Usage limits'))
   expect(texts).not.toContain('Thinking')
   expect(texts.at(-1)).toBe('Thinking summary is off')
   expect(labels).toEqual(['Turn summary on'])

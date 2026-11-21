@@ -83,15 +83,18 @@ top:
 - The last turn in one line: `Last turn +11k 1m 36s · 5 tools · cache 100%`.
 - The subagents, as a card, there for a turn that started none too, where it
   reads `No subagents ran in this turn`: how many work and finished, then a
-  row each, two at a time, those at work first; past two, ▲ and ▼ on the card's top
-  line scroll the rest a row a press, beside where the rows stand (`1–2 of
-  4`). Each row: its state's icon, its task and how long it has run; under
-  the task its model and effort, led by
-  its state in words unless it runs (`Pending`, `Waiting`, `Done`, `Failed`,
-  `Stopped`), and, while it works, the context its latest request carried;
-  then, while it works, its latest tool call with an icon for its kind; and,
-  once it has tokens, those beside a bar of its share of all the subagents'
-  tokens. A row at work stands on a fill of its own.
+  row each, one at a time here (two from 90 columns), those at work first;
+  past that, ▲ and ▼ on the card's top line scroll the rest a row a press,
+  beside where the rows stand (`1 of 4`, or `1–2 of 4` from 90 columns).
+  Each row: its state's icon, its task and how long it has run; under the
+  task its model and effort, led by its state in words unless it runs
+  (`Pending`, `Waiting`, `Done`, `Failed`, `Stopped`), and, while it works,
+  the context its latest request carried; then, while it works, its latest
+  tool call with an icon for its kind; and, once it has tokens, those beside
+  a bar of its share of all the subagents' tokens. A row at work stands on a
+  fill of its own.
+- The tools, as a card under it: the current turn's tool calls as the wide
+  layout lists them (see the tools card below), three at a time here.
 - The thinking summary, as a card: the current turn's updates as the
   terminal lists them (see **Thinking summary**), newest first, a rule
   between two; each gist led by its time into the turn (or `Recap.`) in a
@@ -108,15 +111,14 @@ From 90 columns, with the summary on:
 - Across the top: the sky and the session's line, the warning where there
   is one, and the session's cost.
 - On the left, a column of three cards:
-  - The limits, on top: each window's share used over its bar, this
-    session's part, when it resets and where its pace would take it
-    (`~37% at reset`, or `>100% at reset` in red), and what the bar's colors
-    mean.
-  - The context: its share used and its tokens, a bar of what fills it, the
-    four largest parts (messages, system tools and so on) in a color each
-    and the rest in grey, with a mark where auto-compact runs, each part's
-    tokens and share under it, and the last turn. Past five parts the
+  - The context, on top: its share used and its tokens, a bar of what fills
+    it, the four largest parts (messages, system tools and so on) in a color
+    each and the rest in grey, with a mark where auto-compact runs, each
+    part's tokens and share under it, and the last turn. Past five parts the
     smallest fold together as `Other`.
+  - The limits: each window's share used over its bar, this session's part,
+    when it resets and where its pace would take it (`~37% at reset`, or
+    `>100% at reset` in red), and what the bar's colors mean.
   - The recent turns, as a table: when each began and how long it ran, what
     it added to the context as a bar beside the others' with its tokens
     after it, how many subagents it started (blank for none), and its tool
@@ -138,8 +140,8 @@ From 90 columns, with the summary on:
   subagent's task where one made it, and its time into the turn. A turn keeps
   its newest 100 calls, the rest counted (`and 3 earlier not kept`); one that
   made none reads `No tools called in this turn`.
-- With the summary off, the cards stand in one column (the limits, the
-  context, the subagents, the tools, the recent turns): the thinking card is
+- With the summary off, the cards stand in one column (the context, the
+  limits, the subagents, the tools, the recent turns): the thinking card is
   gone, the turns are figures alone, and the footer reads `Thinking summary is off`
   beside **Turn summary on**.
 
