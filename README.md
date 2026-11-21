@@ -159,9 +159,26 @@ From 90 columns, with the summary on:
   rest, beside how many it made (`42 calls`) and where the rows stand (`1–5
   of 42`). Each row: the tool's icon, the tool and what it was aimed at
   (`Read: register.tsx`, a command by its description, never its text), the
-  subagent's task where one made it, and its time into the turn. A turn keeps
-  its newest 100 calls, the rest counted (`and 3 earlier not kept`); one that
-  made none reads `No tools called in this turn`.
+  subagent's task where one made it, its time into the turn, and about how
+  much it added to the context (`+42k`). A turn keeps its newest 100 calls,
+  the rest counted (`and 3 earlier not kept`); one that made none reads `No
+  tools called in this turn`.
+
+  The figure is an estimate. Claude Code tells the mod how large the context
+  was that each model request was answered over, and a call's result goes
+  with the next request, so the context's growth from one request to the next
+  goes on the calls the first made. The growth also holds the model's own
+  words and what a hook added. So:
+
+  - A call gets its figure once the next request is answered, not as it ends.
+  - Two or three calls of one request share its growth evenly, marked `~`
+    (`~+14k`); more get none, as a large read and a short command would read
+    alike.
+  - A turn's last calls, or those of a request that was cut, get none, nor do
+    those before a compaction: a context that shrank puts nothing anywhere.
+  - A subagent's calls get none: they fill a context of its own, which Claude
+    Code does not report. What its result added shows on the main loop's
+    `Agent` call.
 - With the summary off, the cards stand in one column (the context, the
   limits, the subagents, the tools, the recent turns): the thinking card is
   gone, the turns are figures alone, and the footer reads `Thinking summary

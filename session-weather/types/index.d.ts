@@ -150,8 +150,11 @@ export type RecentTurn = {
 
 // A tool call of a recent turn: when it was made (ms since the epoch), the
 // tool and what it was aimed at in a few words, and, made by a subagent, its
-// id.
-export type TurnCall = { at: number; text: string; agentId?: string }
+// id. A call of the main loop gets `tokens` once the next model request has
+// been answered: about how much the context grew with its result, shared
+// evenly (`isShared`) with the other calls of its request when it made two
+// or three.
+export type TurnCall = { at: number; text: string; agentId?: string; tokens?: number; isShared?: true }
 
 // A subagent a recent turn started, as its row last stood: where it stood,
 // since when it ran and until when, the model and effort of its latest

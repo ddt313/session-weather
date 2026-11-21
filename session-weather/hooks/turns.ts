@@ -101,6 +101,27 @@ export function countTool($: EngineInterface, call: TurnCall) {
   })
 }
 
+// What the calls a request answered added to the context, on their rows in
+// the newest turn: each call found by when it was made and what it did.
+export function chargeCalls(
+  $: EngineInterface,
+  charge: { calls: readonly { at: number; text: string }[]; tokens: number; isShared: boolean },
+) {
+  return update($, recentTurns, list => {
+    const last = list.at(-1)
+
+    if (last?.calls === undefined) return list
+
+    const isAnswered = (call: TurnCall) =>
+      call.agentId === undefined && charge.calls.some(one => one.at === call.at && one.text === call.text)
+    const calls = last.calls.map(call =>
+      isAnswered(call) ? { ...call, tokens: charge.tokens, ...(charge.isShared ? { isShared: true as const } : {}) } : call,
+    )
+
+    return [...list.slice(0, -1), { ...last, calls }]
+  })
+}
+
 // The fill as measured: the newest turn has added what lies past its start.
 export function measureRecord($: EngineInterface, tokens: number) {
   return update($, recentTurns, list => {
@@ -268,7 +289,15 @@ const isTurnSubagent = (value: unknown): value is TurnSubagent => {
 const isTurnCall = (value: unknown): value is TurnCall => {
   const one = value as Partial<TurnCall> | null
 
-  return typeof one === 'object' && one !== null && typeof one.at === 'number' && typeof one.text === 'string' && isStringOrNone(one.agentId)
+  return (
+    typeof one === 'object' &&
+    one !== null &&
+    typeof one.at === 'number' &&
+    typeof one.text === 'string' &&
+    isStringOrNone(one.agentId) &&
+    isNumberOrNone(one.tokens) &&
+    (one.isShared === undefined || one.isShared === true)
+  )
 }
 
 // A turn's row as a saved file holds it.

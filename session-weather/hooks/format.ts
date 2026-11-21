@@ -20,7 +20,11 @@ export const formatTokens = (n: number) =>
     ? `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
     : `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k`
 
-export const formatDelta = (n: number) => (n < 0 ? `▼ -${formatTokens(-n)}` : `▲ +${formatTokens(n)}`)
+// What a tool call added to the context: "+42k", or "~+14k" for a share of
+// what its request's calls added together.
+export const formatGrowth = (tokens: number, isShared: boolean) => `${isShared ? '~' : ''}+${formatTokens(tokens)}`
+
+export const formatDelta =(n: number) => (n < 0 ? `▼ -${formatTokens(-n)}` : `▲ +${formatTokens(n)}`)
 
 // "14s", "2m 14s", "1h 5m".
 export const formatDuration = (ms: number) => {

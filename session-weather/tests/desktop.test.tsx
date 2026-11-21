@@ -659,6 +659,64 @@ test('on the desktop from WIDE_FROM columns the Tools card lists the shown turn\
   expect((await card()).slice(0, 3)).toEqual(['Tools', '1–5 of 7', 'Grep: flaky'])
 })
 
+test("the Tools card says about how much each main-loop call added to the context, once the next request is answered", SLOW, async ($, on) => {
+  const { steps, clock } = engine(on)
+  // A request answered over `context` tokens: 1,000 uncached, the rest cached.
+  const request = (context: number, turnId = 't1') =>
+    runStep($, steps, turnId, [stopWith(requestUsage(1_000, context - 1_000, 200))])
+  const call = async (text: string, agentId?: string) => {
+    await clock.advance(1_000)
+    await $.tool.call({ tool: 'Read', file_path: `/work/${text}.ts`, ...(agentId ? { agentId } : {}) } as never)
+  }
+  // The card's rows, without their times.
+  const card = async () => {
+    const { texts } = await desk($, WIDE_FROM)
+    const from = texts.lastIndexOf('Tools')
+    const to = texts.findIndex((text, index) => index > from && (text === 'Thinking' || text.startsWith('Turn at ')))
+
+    return texts.slice(from, to).filter(text => !/^\d+s$/.test(text))
+  }
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+
+  // The first request sets where the growth counts from; its call, and a
+  // subagent's, are answered by the second, which added 42k: all of it the
+  // main loop's call's.
+  await request(21_000)
+  await call('f1')
+  await call('docs', 'a1')
+  expect(await card()).toEqual(['Tools', 'Read: docs.ts', 'Subagent', 'Read: f1.ts'])
+  await request(63_000)
+  expect(await card()).toEqual(['Tools', 'Read: docs.ts', 'Subagent', 'Read: f1.ts', '+42k'])
+
+  // Two calls of one request share its growth evenly, marked so.
+  await call('f2')
+  await call('f3')
+  await request(91_000)
+  expect((await card()).slice(1, 5)).toEqual(['Read: f3.ts', '~+14k', 'Read: f2.ts', '~+14k'])
+
+  // Four would read alike whatever each did: they get none. Nor does the
+  // turn's last call, which no request answers.
+  for (const name of ['f4', 'f5', 'f6', 'f7']) await call(name)
+  await request(120_000)
+  await call('f8')
+  await $.turn.complete(turnDone({ durationMs: 9_000 }) as never)
+  await clock.settle()
+  await pressDesk($, 'turn-t1', WIDE_FROM)
+  expect((await card()).slice(2, 7)).toEqual(['Read: f8.ts', 'Read: f7.ts', 'Read: f6.ts', 'Read: f5.ts', 'Read: f4.ts'])
+
+  // A request over a smaller context than the last, as after a compaction,
+  // puts nothing anywhere and is where the next counts from.
+  await $.turn.start({ text: 'next', turnId: 't2' })
+  await call('g1')
+  await request(30_000, 't2')
+  expect(await card()).toEqual(['Tools', 'Read: g1.ts'])
+  await call('g2')
+  await request(40_000, 't2')
+  expect(await card()).toEqual(['Tools', 'Read: g2.ts', '+10k', 'Read: g1.ts'])
+})
+
 test('a recent turn keeps its newest 100 tool calls, counting those let go, and a saved session gets them back', SLOW, async ($, on) => {
   const { files, clock } = engine(on)
 

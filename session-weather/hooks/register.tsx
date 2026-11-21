@@ -8,6 +8,7 @@ import { DEBUG_FOLDER } from './debug'
 import { waitingFor } from './entries'
 import { messageOf, sessionFile } from './files'
 import { clip, forecast, formatCost, formatDelta, formatDuration, formatTime, formatTokens, MINUTE, plural, SECOND } from './format'
+import { called, contextRestarted, requestAnswered, requestStarted, turnEnded } from './growth'
 import { bar, barParts, barRuns, BLOCK_HEADER, formatLeft, formatPart, levelOf, liveWindows, MINE, paceOf, STORED_CLOSED, STORED_LIMITS, storedLimits } from './limits'
 import { LOG_TOOL_NAME, logToolSpec, previousTurn, readLog, setPreviousTurn } from './log'
 import { restore, SAVE_TOGGLE, STORED_DEBUG_ON, TOGGLE } from './prefs'
@@ -18,7 +19,7 @@ import { figureParts, figuresTimer, forgetEnded, inSubagentOrder, lookedFor, loo
 import { formatSummaryCost, HAIKU_NAME, inputTokens, MAX_REQUEST_CHARS, SAID_CHARS, useSettings } from './summary/prompt'
 import { actionOf, askedAt, asking, drainedAt, ended, endLive, endTurn, goOn, isOwed, isResumedBy, isTurnOf, keepMark, liveBlock, MAX_SUBMISSIONS, newTurn, owedRecap, setAskedAt, setDrainedAt, setIsOwed, setLiveBlock, setOwedRecap, setSubmissions, setSummary, startTicker, statusOf, stopTicker, submissions, updateTurn } from './summary/run'
 import type { Submission } from './summary/run'
-import { AT_WORK, countTool, keepTurn, maxRecent, measureRecord, openRecord, recordSubagents, recordTurn, restoreTurns, saveTurns, setSaving } from './turns'
+import { AT_WORK, chargeCalls, countTool, keepTurn, maxRecent, measureRecord, openRecord, recordSubagents, recordTurn, restoreTurns, saveTurns, setSaving } from './turns'
 import { TERMINAL_TURN_ROWS } from './ui/cards'
 import { isPickingDrawn, isRoomyDrawn, setIsPickingDrawn, setIsRoomyDrawn } from './ui/drawn'
 import type { DesktopUi } from './ui/look'
@@ -315,6 +316,8 @@ export const register: Register = (on, options) => {
       return result
     }
 
+    // The calls this request answers: those made since the last one.
+    const answered = requestStarted()
     const stream = next(e)
     let index: number | null = null
     let shown: { index: number; text: string } | null = null
@@ -359,7 +362,13 @@ export const register: Register = (on, options) => {
 
     await keepShown()
 
-    return await stream.result
+    const result = await stream.result
+    // What those calls added to the context goes on their rows.
+    const charge = requestAnswered(answered, result.usage === null ? undefined : inputTokens(result.usage))
+
+    if (charge !== null) await chargeCalls($, charge).catch(() => {})
+
+    return result
   })
 
   // Every call counts toward the turn; the main loop's are kept in a few
@@ -368,13 +377,15 @@ export const register: Register = (on, options) => {
   on('tool.call', async ($, e, next) => {
     await update($, turnTools, n => n + 1)
     const action = actionOf(e.tool, e as unknown as Readonly<Record<string, unknown>>)
+    const at = await $.clock.now()
     await countTool($, {
-      at: await $.clock.now(),
+      at,
       text: action,
       ...(e.agentId === undefined ? {} : { agentId: e.agentId }),
     })
 
     if (e.agentId === undefined) {
+      called({ at, text: action })
       await keepMark($, 'actions', action)
     } else {
       noteFigures($, e.agentId, { action })
@@ -385,6 +396,7 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
+      turnEnded()
       const usage = e.usage
       const input = usage ? inputTokens(usage) : 0
       const tools = await read($, turnTools)
@@ -567,6 +579,7 @@ export const register: Register = (on, options) => {
   // pane's values too, the person's choices among them.
   on('session.end', async ($, e, next) => {
     if (e.reason === 'clear' || e.reason === 'resume') {
+      contextRestarted()
       stopTicker()
       asking?.abort()
       setLiveBlock(null)
@@ -647,6 +660,8 @@ export const register: Register = (on, options) => {
     // The compaction stands whatever this bookkeeping does. It counts toward
     // the session's (one loaded mid-session counts from there), and what
     // filled the context is read again with the next measurement.
+    contextRestarted()
+
     try {
       await update($, compactions, one => ({ count: (one?.count ?? 0) + 1, isWhole: one?.isWhole ?? false }))
       await saveTurns($)

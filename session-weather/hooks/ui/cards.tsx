@@ -6,7 +6,7 @@ import type { EngineInterface } from 'claude-code'
 import type { RecentTurn, Subagent, SubagentFigures, Thinking } from '../../types'
 import { RECENT_TURNS_SHAPE } from '../atoms'
 import { waitingFor } from '../entries'
-import { formatDuration, formatTime, formatTokens, plural, tokensOf } from '../format'
+import { formatDuration, formatGrowth, formatTime, formatTokens, plural, tokensOf } from '../format'
 import { formatLeft } from '../limits'
 import { SAVE_TOGGLE, TOGGLE } from '../prefs'
 import type { Folding } from '../prefs'
@@ -143,6 +143,13 @@ export function toolsCardOf(
             <Text size="caption" dimColor tabular>
               {formatDuration(Math.max(0, call.at - row.startedAt))}
             </Text>
+          )}
+          {call.tokens !== undefined && (
+            <Box flexShrink={0}>
+              <Text size="caption" dimColor tabular>
+                {formatGrowth(call.tokens, call.isShared === true)}
+              </Text>
+            </Box>
           )}
         </Box>
       ))}
