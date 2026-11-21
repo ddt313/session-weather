@@ -15,7 +15,7 @@ import { formatSummaryCost, HAIKU_NAME } from '../summary/prompt'
 import { setSummary, statusOf } from '../summary/run'
 import { AT_WORK, maxRecent, setSaving, subagentsOfRecord, workingOf } from '../turns'
 import { isPickingDrawn } from './drawn'
-import { barSvg, CARD_GAP_ROWS, CARD_TOP_ROWS, cardLook, cardTitleOf, chipOf, clamp01, DESK, figureMeta, foldButtonOf, GROWS, iconSvg, INK, LINE_PX, lineIconSvg, MARK_LOOKS, OPEN, kindOf, ROW_INDENT, RULE_SVG, shownActionOf, STATE_TILES, swatchSvg, tileSvg, toolIconOf } from './look'
+import { barSvg, CARD_GAP_ROWS, CARD_TOP_ROWS, cardLook, cardTitleOf, chipOf, clamp01, DESK, figureMeta, foldButtonOf, GROWS, iconSvg, INK, kindOf, LINE_PX, lineIconSvg, MARK_LOOKS, OPEN, ROW_INDENT, RULE_SVG, shownActionOf, STATE_TILES, swatchSvg, tileSvg, toolIconOf } from './look'
 import type { CardFold, DesktopUi } from './look'
 import { MIN_PINNED_ROWS, moveUpdates, pageStep, pickTurn, toNewest, widthOf, windowOf } from './updates'
 
@@ -454,7 +454,7 @@ export function thinkingCardOf($: EngineInterface, ui: DesktopUi, view: Thinking
   // width, standing a line high as the updates' lines do. A row of ─ in the
   // app's font came out a little wider than the card and was cut with "…".
   const rule = (
-    <Box flexGrow={1} minWidth={0}>
+    <Box flexShrink={0} minWidth={0}>
       <Svg source={RULE_SVG} alt="Between updates" height={LINE_PX} />
     </Box>
   )
@@ -558,7 +558,7 @@ export function thinkingCardOf($: EngineInterface, ui: DesktopUi, view: Thinking
       {isPinned && <Box flexGrow={1} minHeight={0} />}
       {!isFolded && (
         <Box flexDirection="column" gap="xs" flexShrink={0}>
-          <Box flexGrow={1} minWidth={0}>
+          <Box flexShrink={0} minWidth={0}>
             <Svg source={RULE_SVG} alt="Above the summary's cost" height={LINE_PX} />
           </Box>
           <Box flexDirection="row" alignItems="center" justifyContent="space-between" gap={1}>
