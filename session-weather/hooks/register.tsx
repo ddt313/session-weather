@@ -56,8 +56,9 @@ const toolTop = atom({ plugin: 'session-weather', key: 'toolTop' } as const, 0)
 const turnTop = atom({ plugin: 'session-weather', key: 'turnTop' } as const, 0)
 const isDebugOn = atom({ plugin: 'session-weather', key: 'isDebugOn' } as const, false)
 
-// The rows a pinned desktop layout leaves free at the body's foot.
-const DESK_FOOT_ROWS = 1
+// The rows a pinned desktop layout leaves free at the body's foot: half a
+// row, enough for a smaller or scaled screen, little gap on a large one.
+const DESK_FOOT_ROWS = 0.5
 
 export const register: Register = (on, options) => {
   // A change in `/config` reloads the mod, and this runs again with it.
