@@ -510,7 +510,7 @@ export function thinkingCardOf($: EngineInterface, ui: DesktopUi, view: Thinking
         <Box
           flexDirection="column"
           gap="xs"
-          {...(isPinned ? { flexGrow: 1, flexShrink: 1, minHeight: 0, overflow: 'hidden' as const } : {})}
+          {...(isPinned ? { flexShrink: 1, minHeight: 0, overflow: 'hidden' as const } : {})}
         >
           {groups.flatMap((group, at) => [
             ...(at === 0 ? [] : [rule]),
@@ -553,6 +553,9 @@ export function thinkingCardOf($: EngineInterface, ui: DesktopUi, view: Thinking
           ])}
         </Box>
       )}
+      {/* Pinned, the space the updates leave stands over the last line, which
+          keeps to the card's foot however few they are. */}
+      {isPinned && <Box flexGrow={1} minHeight={0} />}
       {!isFolded && (
         <Box flexDirection="column" gap="xs" flexShrink={0}>
           <Box flexGrow={1} minWidth={0}>
