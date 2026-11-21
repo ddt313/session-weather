@@ -253,9 +253,10 @@ Each row is cut to the column, never wrapped.
   `~/.claude/session-weather/turns/`, written again as each turn ends or gets
   an update. When the session starts again, after a restart or resumed, they
   come back, the box still ticked; a turn the restart cut short reads
-  `interrupted`, and a subagent at work then, `Stopped`. Unticked, the file is deleted at once, and the turns stay
-  in memory only, until Claude Code closes. A session never ticked writes no
-  such file.
+  `interrupted`, and a subagent at work then, `Stopped`. Unticked, the file is
+  deleted at once, and the turns stay in memory only, until Claude Code
+  closes. Each press brings a toast naming the file: where the turns are
+  saved, or that it is deleted. A session never ticked writes no such file.
 
 **Status line**
 

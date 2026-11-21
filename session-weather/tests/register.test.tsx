@@ -2400,7 +2400,7 @@ type Saved = {
 const savedIn = (files: Map<string, string>) => JSON.parse(files.get(SAVED) ?? 'null') as Saved | null
 
 test("saving is off until pressed: then the session's turns and compactions go to a file of its own; pressed again, it goes", async ($, on) => {
-  const { files, runs, steps, clock } = engine(on)
+  const { files, runs, steps, clock, toasts } = engine(on)
   on('session.compact', () => ({ messages: SUMMARY, tokensBefore: 180_000, tokensAfter: 20_000 }))
 
   await $.session.start(start)
@@ -2410,7 +2410,9 @@ test("saving is off until pressed: then the session's turns and compactions go t
   expect(await buttons($, { bodyColumns: WIDE_FROM })).toContain('☐ Persist')
   expect(files.has(SAVED)).toBe(false)
 
+  // Pressed, a toast says where the turns go.
   await press($, 'save-turns', WIDE_FROM)
+  expect(toasts).toEqual([`Persist on: this session's recent turns are saved to ${SAVED} and come back when it starts again`])
   expect(await buttons($, { bodyColumns: WIDE_FROM })).toContain('☑ Persist')
   expect(savedIn(files)?.shape).toBe('recent-turns-1')
   expect(savedIn(files)?.turns.map(one => [one.turnId, one.durationMs, one.entries.map(entry => entry.gist)])).toEqual([
@@ -2427,6 +2429,7 @@ test("saving is off until pressed: then the session's turns and compactions go t
   // Unticked: the file goes, by a command of the host's, and the turns stay
   // in memory, for as long as Claude Code runs.
   await press($, 'save-turns', WIDE_FROM)
+  expect(toasts.at(-1)).toBe(`Persist off: ${SAVED} is deleted; the recent turns stay until Claude Code closes`)
   expect(runs.at(-1)?.argv).toEqual(['rm', '-f', '--', SAVED])
   expect(files.has(SAVED)).toBe(false)
   expect(await buttons($, { bodyColumns: WIDE_FROM })).toContain('☐ Persist')

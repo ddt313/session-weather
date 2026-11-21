@@ -2030,13 +2030,27 @@ const saveTurns = ($: EngineInterface) => {
 const setSaving = async ($: EngineInterface, isOn: boolean) => {
   await update($, isSaving, () => isOn)
 
+  const path = await sessionFile($, TURNS_FOLDER, await $.session.id(), 'json')
+
+  // A toast says where the turns go, or that they no longer do.
+  try {
+    $.ui.toast(
+      path === null
+        ? `Persist ${isOn ? 'on' : 'off'}: no folder to save to was found`
+        : isOn
+          ? `Persist on: this session's recent turns are saved to ${path} and come back when it starts again`
+          : `Persist off: ${path} is deleted; the recent turns stay until Claude Code closes`,
+      { timeoutMs: 10_000 },
+    )
+  } catch {
+    // A host that toasts nothing: the box still shows the switch.
+  }
+
   if (isOn) {
     await saveTurns($)
 
     return
   }
-
-  const path = await sessionFile($, TURNS_FOLDER, await $.session.id(), 'json')
 
   saving = saving.then(async () => {
     if (path === null || !(await $.fs.exists(path))) return
