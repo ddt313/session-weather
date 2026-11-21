@@ -36,12 +36,14 @@ their kinds over its legend (`Files 31 · ~+4.9k`, `Shell 5 · ~+1k`,
 `Agents 4`, …) and the newest three, one with what it added to the context
 (`+1.2k`); the recent turns folded (`30 turns`); and the thinking summary of
 the current turn, taking the height they leave, what it cost and its switch
-on its last line (see **On the desktop**). The terminal draws no images and
-keeps rows of text at that width: the weather on top (the sky, the context's
-fill and where auto-compact runs, the last turn, the 5-hour and weekly
-limits with this session's part of each in yellow, the session's cost), then
-Haiku's updates on Claude's thinking, newest first, each with its gist, a
-decision (★), what Claude takes as true unchecked (?) and its next step (→).
+on its last line (see **On the desktop**). The terminal draws the same in
+cards with a round border, its bars as rows of colored cells (see **In the
+terminal**): the weather on top (the sky, the context's fill and where
+auto-compact runs, the last turn, the 5-hour and weekly limits with this
+session's part of each in yellow, the session's cost), the turn's tool calls,
+then Haiku's updates on Claude's thinking, newest first, each with its gist,
+a decision (★), what Claude takes as true unchecked (?) and its next step
+(→).
 
 ![The Session Weather pane on the desktop from 90 columns: the context, the limits and the recent turns as cards on the left, the subagents at work, the tools with their bar of kinds and the thinking summary on the right, the warning and the cost across the top](session-weather/screenshot-wide.png)
 
@@ -75,13 +77,43 @@ summary beside it (see **Layout** and **Wide layout**).
   glance, with no buttons: `☁ Cloudy · 42%`, `5h 30% · Week 74% · $1.23`, and
   the summary's newest update.
 
+**In the terminal**
+
+The terminal draws no images. Its blocks stand in cards with a round
+border, and its bars are rows of colored cells across their card: the
+context's in the sky's color, a mark where auto-compact runs; each limit's
+what other sessions used in grey, this session's part in yellow, where the
+pace takes it by the reset dashed in red and, from 90 columns, a mark where
+the window's time stands.
+
+- The weather's card: the sky, the context, the last turn, the limits and
+  the session's cost.
+- The Tools card, once the turn made a call: how many, a bar of their kinds
+  over its legend (`■ Files 4  ■ Shell 2`), then the newest three (five
+  from 90 columns), each cut to the card with its time into the turn and
+  what it added to the context; ▲ and ▼ on its title line scroll the rest.
+- From 90 columns, the subagents' card and the recent turns' card join the
+  weather's column on the left, the thinking summary's card on the right.
+- The thinking summary's card, with what it cost and its switch on its last
+  line.
+
+▾ before a card's title folds it to that line, ▸ opens it again: the
+subagents', the tools', the recent turns' and the thinking summary's. What
+you fold stays folded, in the next session too, and on the desktop as well,
+which keeps the same choice.
+
+In the terminal the pane holds the keyboard after ctrl+x then Tab, or a
+click; then a key presses each of its buttons: `s` the summary's switch, `k`
+and `j` its arrows, `n` the newest update, `p` Persist, and `1` to `9` and
+`0` a recent turn. ctrl+x then ← widens the pane, ctrl+x then → narrows it,
+to 45% of the terminal at most; the pane asks for 90 columns as it opens.
+
 **On the desktop**
 
 The desktop app draws the pane as the design "Session Weather layouts" lays
 it out: cards on a fill of their own, the bars and icons drawn as images.
-The terminal, which draws no images, keeps the rows of text that **Weather**,
-**Wide layout** and **Thinking summary** tell. Under 90 columns, from the
-top:
+The terminal, which draws no images, draws its own cards (see **In the
+terminal**). Under 90 columns, from the top:
 
 - The sky: its icon on a tile of its color, its name (`Showers`), the
   session's line under it (`Opus 5.5 · since 19:59 · 8 turns`), and the

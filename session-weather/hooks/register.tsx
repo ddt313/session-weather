@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { Register } from 'claude-code'
+import type { ElementTable, Register } from 'claude-code'
 import type { Reading, RecentTurn, SubagentFigures } from '../types'
 import { RECENT_TURNS_SHAPE, THINKING_SHAPE } from './atoms'
 import { cleanUp } from './cleanup'
@@ -12,6 +12,7 @@ import { called, contextRestarted, requestAnswered, requestStarted, turnEnded } 
 import { bar, BLOCK_HEADER, formatLeft, formatPart, levelOf, liveWindows, MINE, paceOf, STORED_CLOSED, STORED_LIMITS, storedLimits } from './limits'
 import { LOG_TOOL_NAME, logToolSpec, previousTurn, readLog, setPreviousTurn } from './log'
 import { restore, SAVE_TOGGLE, STORED_DEBUG_ON, TOGGLE } from './prefs'
+import type { Folding } from './prefs'
 import { COMMAND, DEBUG_COMMAND, heldValue, PANE, settingFieldOf, settings } from './settings'
 import { addSpend, costCarried, costCounted, recountShares, setCostCarried, setCostCounted } from './spend'
 import { glanceOf, hideStatus, openPane, recount, setStartedOn, showStatus } from './status'
@@ -27,6 +28,7 @@ import type { DesktopUi } from './ui/look'
 import { drawNarrowDesktop } from './ui/narrow'
 import { COLUMN_GAP, MIN_PINNED_ROWS, moveUpdates, pageStep, PANE_OVERHEAD, pickTurn, recentLine, shownTurnOf, toNewest, WEATHER_CHARS, weatherColumns, WIDE_FROM, WIDE_OVERHEAD, widthOf, windowOf } from './ui/updates'
 import { barRasterOf, barWidthOf, CARD_INSET, CARD_ROWS, cellRunsOf, skyInkOf, TERMINAL_CARD } from './ui/terminal'
+import { foldSwitchOf, TERMINAL_TOOL_ROWS, toolsCardOf, WIDE_TOOL_ROWS } from './ui/terminal'
 import type { CellRun } from './ui/terminal'
 import { drawWideDesktop } from './ui/wide'
 
@@ -55,6 +57,10 @@ const subagentTop = atom({ plugin: 'session-weather', key: 'subagentTop' } as co
 const toolTop = atom({ plugin: 'session-weather', key: 'toolTop' } as const, 0)
 const turnTop = atom({ plugin: 'session-weather', key: 'turnTop' } as const, 0)
 const isDebugOn = atom({ plugin: 'session-weather', key: 'isDebugOn' } as const, false)
+const foldedCards = atom({ plugin: 'session-weather', key: 'foldedCards' } as const, [])
+
+// The terminal's elements, as its cards are drawn with them.
+type TerminalUi = ElementTable<'terminal'>
 
 // The rows a pinned desktop layout leaves free at the body's foot: half a
 // row, enough for a smaller or scaled screen, little gap on a large one.
@@ -794,17 +800,20 @@ export const register: Register = (on, options) => {
     // in one line how many work and finished; what each did, only a roomy one.
     const isRoomy = e.props.bodyColumns >= WIDE_FROM
     const isWide = isOn && isRoomy
-    const [filled, known, counted, figured, recent, picked, isSaved] = isRoomy
+    const [filled, known, counted, figured, picked, isSaved] = isRoomy
       ? await Promise.all([
           read($, fills),
           read($, facts),
           read($, compactions),
           read($, subagentFigures),
-          read($, recentTurns),
           read($, pickedTurn),
           read($, isSaving),
         ])
-      : ([null, null, null, [] as SubagentFigures[], [] as RecentTurn[], null, false] as const)
+      : ([null, null, null, [] as SubagentFigures[], null, false] as const)
+    // At any width: the recent turns, whose newest holds the Tools card's
+    // calls, where its window stands, and the cards the person folded.
+    const [recent, toolAt, folded] = await Promise.all([read($, recentTurns), read($, toolTop), read($, foldedCards)])
+    const isFolded = (name: Folding) => folded.includes(name)
     setIsRoomyDrawn(isRoomy)
     setIsPickingDrawn(isWide)
     // The characters a row of the weather holds, what it adds cut to them
@@ -887,6 +896,22 @@ export const register: Register = (on, options) => {
     // recent turns, the current one unless the person pressed another.
     const view = isWide ? shownTurnOf(turnNow, picked, recent) : { turn: turnNow, isPast: false }
     const turnShown = view.turn
+    const isThinkingFolded = isOn && isFolded('thinking')
+
+    // The Tools card: the calls of the turn shown, the newest unless one was
+    // picked, fewer at once in one column; drawn once the turn made one, as
+    // the terminal's rows are few.
+    const callsRow = (view.isPast ? recent.find(one => one.turnId === turnShown?.turnId) : undefined) ?? recent.at(-1)
+    const toolRows = isWide ? WIDE_TOOL_ROWS : TERMINAL_TOOL_ROWS
+    const hasCalls = (callsRow?.tools ?? 0) > 0 || (callsRow?.calls?.length ?? 0) > 0
+    const toolsCard = hasCalls && toolsCardOf($, { ...(ui as TerminalUi), bar: (key, cells, runs) => barOf(key, cells, runs, [], <Text dimColor>{bar(0)}</Text>) }, {
+      row: callsRow,
+      top: toolAt,
+      rows: toolRows,
+      isFolded: isFolded('tools'),
+      chars: weatherChars,
+      cells: barCells,
+    })
 
     // "🧭 Thinking · 1m 46s", the turn's whole length once it ended; "·
     // waiting for 2 subagents" while their results are still to come. A turn
@@ -949,11 +974,17 @@ export const register: Register = (on, options) => {
       </Text>
     )
 
+    // Folded, the summary's card is its title line and its footer: it takes
+    // no more of a pinned pane than they need.
+    const isGrowing = isPinned && !isThinkingFolded
     const thoughts = (
-      <Box flexDirection="column" {...(isPinned ? { flexGrow: 1, flexShrink: 1, overflow: 'hidden' as const } : {})}>
-        <Text bold>{header}</Text>
-        {status !== null && <Text dimColor>{status}</Text>}
-        {newer > 0 && (
+      <Box flexDirection="column" {...(isGrowing ? { flexGrow: 1, flexShrink: 1, overflow: 'hidden' as const } : {})}>
+        <Box flexDirection="row" gap={1}>
+          {foldSwitchOf($, ui as TerminalUi, 'thinking', isThinkingFolded)}
+          <Text bold>{header}</Text>
+        </Box>
+        {!isThinkingFolded && status !== null && <Text dimColor>{status}</Text>}
+        {!isThinkingFolded && newer > 0 && (
           <Button
             key="newest"
             hotkey="n"
@@ -963,7 +994,7 @@ export const register: Register = (on, options) => {
             onPress={() => toNewest($).catch(() => {})}
           />
         )}
-        {shown.length > 0 && (
+        {!isThinkingFolded && shown.length > 0 && (
           <Box flexDirection="column">
             {shown.flatMap((group, at) => [
               ...(at === 0 ? [] : [rule]),
@@ -990,8 +1021,10 @@ export const register: Register = (on, options) => {
     // itself, which, pinned, has nothing to scroll; and its keys do not
     // reach the pane.
     // The cards' borders take rows of their own: the summary's card, and in
-    // one column the weather's above it.
-    const step = pageStep(rows, (isWide ? WIDE_OVERHEAD : PANE_OVERHEAD + CARD_ROWS) + CARD_ROWS)
+    // one column the weather's and the Tools card above it, with its rows
+    // (its title, its bar and legend, its calls) where it is open.
+    const toolsHigh = !hasCalls ? 0 : CARD_ROWS + 1 + (isFolded('tools') ? 0 : 2 + toolRows)
+    const step = pageStep(rows, (isWide ? WIDE_OVERHEAD : PANE_OVERHEAD + CARD_ROWS + toolsHigh) + CARD_ROWS)
 
     // The recent turns' header, and beside it the person's switch for
     // keeping this session's turns past a restart of Claude Code, a box to
@@ -999,7 +1032,10 @@ export const register: Register = (on, options) => {
     // a file; unticked again, the file goes and the turns stay in memory.
     const recentHeader = (
       <Box flexDirection="row" gap={2}>
-        <Text {...BLOCK_HEADER}>Recent turns</Text>
+        <Box flexDirection="row" gap={1}>
+          {foldSwitchOf($, ui as TerminalUi, 'turns', isFolded('turns'))}
+          <Text {...BLOCK_HEADER}>Recent turns</Text>
+        </Box>
         <Button
           key={SAVE_TOGGLE}
           hotkey="p"
@@ -1083,8 +1119,11 @@ export const register: Register = (on, options) => {
         </Box>
         {listed.length > 0 && isRoomy && (
           <Box {...TERMINAL_CARD}>
-            <Text {...BLOCK_HEADER}>{subagentsHeaderOf(listed)}</Text>
-            {subagentOrder(listed)
+            <Box flexDirection="row" gap={1}>
+              {foldSwitchOf($, ui as TerminalUi, 'subagents', isFolded('subagents'))}
+              <Text {...BLOCK_HEADER}>{subagentsHeaderOf(listed)}</Text>
+            </Box>
+            {!isFolded('subagents') && subagentOrder(listed)
               .slice(0, MAX_SUBAGENT_ROWS)
               .map(agent => {
                 // Its row, then under it, at work, what it is at, and its
@@ -1119,13 +1158,16 @@ export const register: Register = (on, options) => {
                   </Box>
                 )
               })}
-            {listed.length > MAX_SUBAGENT_ROWS && <Text dimColor>and {listed.length - MAX_SUBAGENT_ROWS} more</Text>}
+            {!isFolded('subagents') && listed.length > MAX_SUBAGENT_ROWS && (
+              <Text dimColor>and {listed.length - MAX_SUBAGENT_ROWS} more</Text>
+            )}
           </Box>
         )}
-        {recent.length > 0 && (
+        {toolsCard}
+        {isRoomy && recent.length > 0 && (
           <Box {...TERMINAL_CARD}>
             {recentHeader}
-            {recent.slice(-Math.min(maxRecent(), TERMINAL_TURN_ROWS)).reverse().map((one, index) => {
+            {(isFolded('turns') ? [] : recent.slice(-Math.min(maxRecent(), TERMINAL_TURN_ROWS)).reverse()).map((one, index) => {
               // Newest first, so that a column too short for them all cuts
               // the oldest. Beside the summary each is pressed to show its
               // updates there, the one shown marked ▸; with the summary off
@@ -1178,7 +1220,7 @@ export const register: Register = (on, options) => {
             dimColor
             onPress={() => setSummary($, !isOn).catch(() => {})}
           />
-          {canScroll && (
+          {canScroll && !isThinkingFolded && (
             <Button
               key="newer"
               hotkey="k"
@@ -1188,7 +1230,7 @@ export const register: Register = (on, options) => {
               onPress={() => moveUpdates($, -step, width, isWide).catch(() => {})}
             />
           )}
-          {canScroll && (
+          {canScroll && !isThinkingFolded && (
             <Button
               key="older"
               hotkey="j"
@@ -1230,7 +1272,7 @@ export const register: Register = (on, options) => {
           key="thinking"
           {...TERMINAL_CARD}
           gap={1}
-          {...(isPinned ? { flexGrow: 1, flexShrink: 1, minHeight: 0, overflow: 'hidden' as const } : {})}
+          {...(isGrowing ? { flexGrow: 1, flexShrink: 1, minHeight: 0, overflow: 'hidden' as const } : {})}
         >
           {isOn && thoughts}
           {footer}

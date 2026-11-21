@@ -17,7 +17,7 @@ test('the thinking summary sits last, under the session cost, waiting for a turn
     'Waiting for the next turn.',
     'Summary cost $0.000 - Haiku 5.5',
   ])
-  expect(await buttons($)).toEqual(['Turn summary off'])
+  expect(await buttons($)).toEqual(['▾', 'Turn summary off'])
 })
 
 test("Haiku reads the main loop's thinking notes, and the pane shows what it says", VIETNAMESE, async ($, on) => {
@@ -330,13 +330,13 @@ test('the arrows move the updates in their own window, half of it a click; the w
   await press($, 'older')
   expect(await pane($)).toContain('Session cost $1.23')
   expect(await thoughts($)).toEqual(['🧭 Thinking · 16s', '★ Chỉ sửa file A', 'Summary cost $0.004 - Haiku 5.5'])
-  expect(await buttons($)).toEqual(['↑ 2 newer updates', 'Turn summary off', '▲', '▼'])
+  expect(await buttons($)).toEqual(['▾', '↑ 2 newer updates', 'Turn summary off', '▲', '▼'])
 
   // A new update lands on top, and the window keeps showing the same row.
   await runStep($, steps, 't1', [thought(0, 'Third note.'), stop])
   await clock.advance(15 * SECOND)
   expect((await thoughts($))[1]).toBe('★ Chỉ sửa file A')
-  expect(await buttons($)).toEqual(['↑ 3 newer updates', 'Turn summary off', '▲', '▼'])
+  expect(await buttons($)).toEqual(['▾', '↑ 3 newer updates', 'Turn summary off', '▲', '▼'])
 
   // ▲ goes back as far; ↑ goes straight to the newest.
   await press($, 'newer')
@@ -349,7 +349,7 @@ test('the arrows move the updates in their own window, half of it a click; the w
   // A new prompt starts at the top, with nothing to scroll.
   await press($, 'older')
   await $.turn.start({ text: 'next', turnId: 't2' })
-  expect(await buttons($)).toEqual(['Turn summary off'])
+  expect(await buttons($)).toEqual(['▾', 'Turn summary off'])
 })
 
 test('in a narrow pane the lines wrap as the surface wraps them, and a click on ▼ passes a long line', async ($, on) => {
@@ -884,7 +884,7 @@ test("each prompt's turn reads the person's choices from the store again: a /cle
   const { asks, store, steps, clock, files } = engine(on)
 
   await $.session.start(start)
-  expect(await buttons($)).toEqual(['Turn summary off'])
+  expect(await buttons($)).toEqual(['▾', 'Turn summary off'])
 
   // What a /clear leaves: the pane's values gone (the summary on, the debug
   // log off, no limits), the store as the person left it.

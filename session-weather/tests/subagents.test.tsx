@@ -6,12 +6,13 @@ import type { Test$ } from './helpers'
 
 // What the weather shows of the subagents, in a pane `columns` wide: from
 // WIDE_FROM, the block's header and its rows (each subagent's own, then what
-// it is at and its figures), up to the recent turns; narrower, the one line.
+// it is at and its figures), up to the Tools card or the recent turns;
+// narrower, the one line.
 // None where it shows nothing of them.
 const subagentsShown = async ($: Test$, surface: 'desktop' | 'terminal', columns: number) => {
   const texts = await pane($, surface, columns)
   const top = texts.findIndex(text => text.startsWith('Subagents'))
-  const end = texts.indexOf('Recent turns', top)
+  const end = texts.findIndex((text, at) => at > top && (text === 'Tools' || text === 'Recent turns'))
 
   // Each row's own Text, not the dim part inside it.
   return top === -1 ? [] : texts.slice(top, end === -1 ? undefined : end).filter(text => !text.startsWith(' · '))

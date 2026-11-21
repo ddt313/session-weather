@@ -138,10 +138,10 @@ test('in the terminal each block stands in a card with a round border: one colum
 
   // One column: the weather (the sky, the fill, the limits, the session) and
   // the summary.
-  expect(await cardsOf(WIDE_FROM - 1)).toEqual(['☁ Cloudy45% ', '🧭 Thinking '])
+  expect(await cardsOf(WIDE_FROM - 1)).toEqual(['☁ Cloudy45% ', '▾🧭 Thinking'])
   // Beside the summary the weather adds a card for its subagents and one for
   // the recent turns.
-  expect(await cardsOf(WIDE_FROM)).toEqual(['☁ Cloudy45% ', 'Subagents · ', 'Recent turns', '🧭 Thinking '])
+  expect(await cardsOf(WIDE_FROM)).toEqual(['☁ Cloudy45% ', '▾Subagents ·', '▾Recent turn', '▾🧭 Thinking'])
 })
 
 test("in the terminal a letter presses each of the pane's buttons once it holds the keyboard; a digit, a recent turn", SLOW, async ($, on) => {
@@ -167,16 +167,94 @@ test("in the terminal a letter presses each of the pane's buttons once it holds 
   }
 
   await press($, 'older', 120)
+  // The cards' fold switches have no key of their own.
   expect(await keysOf(120)).toEqual([
+    ['▾', undefined],
     ['☐ Persist', 'p'],
     // The recent turns newest first, the current one shown.
     ['▸ 08:00', '1'],
     ['08:00', '2'],
+    ['▾', undefined],
     ['↑ 3 newer updates', 'n'],
     ['Turn summary off', 's'],
     ['▲', 'k'],
     ['▼', 'j'],
   ])
+})
+
+test("in the terminal the Tools card lists the turn's calls newest first, three at once in one column, under a bar of their kinds", SLOW, async ($, on) => {
+  const { clock } = engine(on)
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  for (let n = 1; n <= 4; n += 1) {
+    await clock.advance(1_000)
+    await $.tool.call({ tool: 'Read', file_path: `/work/f${n}.ts` } as never)
+  }
+
+  // The card's texts, from its title to the summary's.
+  const card = async (columns = WIDE_FROM - 1) => {
+    const texts = await allTexts($, 'terminal', columns)
+
+    return texts.slice(texts.indexOf('Tools'), texts.findIndex(text => text.startsWith('🧭')))
+  }
+
+  // Its title and how many calls, where its window stands, the kinds' legend
+  // (each swatch and words a Text of their own inside its line), then each
+  // call cut to the card, its time into the turn dim after it.
+  expect(await card()).toEqual([
+    'Tools',
+    '· 4 calls',
+    '1–3 of 4',
+    '■ Files 4',
+    '■',
+    ' Files 4',
+    'Read: f4.ts 4s',
+    ' 4s',
+    'Read: f3.ts 3s',
+    ' 3s',
+    'Read: f2.ts 2s',
+    ' 2s',
+  ])
+  // The bar, all Files, across the card.
+  expect((await barsShown($))['bar-tools']).toBe('f47920━85')
+
+  // ▼ to the last three, no further.
+  await press($, 'tools-down')
+  await press($, 'tools-down')
+  expect((await card()).slice(0, 4)).toEqual(['Tools', '· 4 calls', '2–4 of 4', '■ Files 4'])
+})
+
+test('in the terminal a card folds to its title line and opens again, kept in the store as the desktop keeps it', SLOW, async ($, on) => {
+  const { replies, steps, clock, writes } = engine(on)
+  replies.push(answer('GIST: Một.\nNEXT: Tiếp 1'))
+
+  await $.session.start(start)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await $.tool.call({ tool: 'Read', file_path: '/work/f1.ts' } as never)
+  await runStep($, steps, 't1', [thought(0, 'A note.'), stop])
+  await clock.advance(SECOND)
+
+  // Folded, the Tools card is its title and how many calls; the summary its
+  // title and its footer.
+  await press($, 'fold-tools')
+  await press($, 'fold-thinking')
+  expect(writes.at(-1)).toEqual({ key: 'foldedCards', value: ['tools', 'thinking'] })
+  expect(await allTexts($, 'terminal')).toEqual([
+    'Context: waiting for the first response.',
+    'Tools',
+    '· 1 call',
+    '🧭 Thinking · 1s',
+    'Summary cost $0.002 - Haiku 5.5',
+  ])
+  // Folded, nothing to scroll: the switches, and the summary's own.
+  expect(await buttons($)).toEqual(['▸', '▸', 'Turn summary off'])
+
+  // Opened again, both show what they hold.
+  await press($, 'fold-tools')
+  await press($, 'fold-thinking')
+  expect(writes.at(-1)).toEqual({ key: 'foldedCards', value: [] })
+  expect(await thoughts($)).toContain('→ Tiếp 1')
 })
 
 test('with the summary off the weather keeps one column at any width', async ($, on) => {

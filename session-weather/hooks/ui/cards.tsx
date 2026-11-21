@@ -68,7 +68,7 @@ export const NARROW_TOOL_ROWS = 3
 
 // Moves the Tools card's window over the shown turn's calls `by` rows
 // (negative toward the newest), as `moveSubagents` does.
-async function moveTools ($: EngineInterface, by: number, rows: number) {
+export async function moveTools ($: EngineInterface, by: number, rows: number) {
   const [recent, top, picked] = await Promise.all([read($, recentTurns), read($, toolTop), pickedRecordOf($)])
   const count = (picked ?? recent.at(-1))?.calls?.length ?? 0
   const last = Math.max(0, count - rows)
@@ -81,7 +81,7 @@ async function moveTools ($: EngineInterface, by: number, rows: number) {
 // those of the main loop added to the context (`~` where a share, or a call
 // with no figure, is in it). The bar stands by what they added once any has
 // a figure, else by how many.
-const kindsOf = (calls: readonly TurnCall[]) => {
+export const kindsOf = (calls: readonly TurnCall[]) => {
   const kinds = new Map<string, { name: string; ink: string; count: number; tokens: number; isRough: boolean }>()
 
   for (const call of calls) {
