@@ -30,6 +30,7 @@ import type {
   Thinking,
   ThinkingEntry,
   TurnMark,
+  TurnSubagent,
 } from '../types'
 
 const reading = atom({ plugin: 'session-weather', key: 'reading' } as const, null)
@@ -57,6 +58,7 @@ const isSaving = atom({ plugin: 'session-weather', key: 'isSaving' } as const, f
 const isSummaryOn = atom({ plugin: 'session-weather', key: 'isSummaryOn' } as const, true)
 const summaryCost = atom({ plugin: 'session-weather', key: 'summaryCost' } as const, 0)
 const summaryPlace = atom({ plugin: 'session-weather', key: 'summaryPlace' } as const, { line: 0, row: 0 })
+const subagentTop = atom({ plugin: 'session-weather', key: 'subagentTop' } as const, 0)
 const isDebugOn = atom({ plugin: 'session-weather', key: 'isDebugOn' } as const, false)
 
 const COMMAND = 'session-weather'
@@ -1687,6 +1689,8 @@ const recordTurn = ($: EngineInterface, turn: Thinking) =>
       ...(before?.toTokens === undefined ? {} : { toTokens: before.toTokens }),
       tools: before?.tools ?? 0,
       entries: turn.entries.slice(-MAX_ENTRIES),
+      ...(before?.subagents === undefined ? {} : { subagents: before.subagents }),
+      ...(before?.moreSubagents === undefined ? {} : { moreSubagents: before.moreSubagents }),
     }
 
     return before === undefined
@@ -1736,8 +1740,110 @@ const measureRecord = ($: EngineInterface, tokens: number) =>
     return last === undefined || last.toTokens === tokens ? list : [...list.slice(0, -1), { ...last, toTokens: tokens }]
   })
 
+// The subagents a recent turn keeps at most; past them it counts how many.
+const MAX_TURN_SUBAGENTS = 30
+
+// The row of `recent` (oldest first) a subagent spawned at `startedAt` goes
+// with: the last turn begun by then, the newest for one whose spawn the mod
+// did not see; -1 for one older than every row kept.
+const recordIndexOf = (recent: readonly RecentTurn[], startedAt: number | undefined) => {
+  if (startedAt === undefined) return recent.length - 1
+
+  for (let at = recent.length - 1; at >= 0; at -= 1) {
+    if ((recent[at]?.startedAt ?? Infinity) <= startedAt) return at
+  }
+
+  return -1
+}
+
+// A recent turn's subagents with `listed` (those it started, with their
+// `figured`) as they now stand: each kept where it was, its model, effort and
+// tokens as last seen, the first MAX_TURN_SUBAGENTS by when they began, the
+// rest counted.
+const withSubagents = (
+  row: RecentTurn,
+  listed: readonly Subagent[],
+  figured: readonly SubagentFigures[],
+): RecentTurn => {
+  const kept = new Map((row.subagents ?? []).map(one => [one.id, one]))
+
+  for (const one of listed) {
+    const was = kept.get(one.id)
+    const figure = figured.find(item => item.id === one.id)
+    const model = figure?.model ?? was?.model
+    const effort = figure?.effort ?? was?.effort
+    kept.set(one.id, {
+      ...one,
+      ...(model === undefined ? {} : { model }),
+      ...(effort === undefined ? {} : { effort }),
+      tokens: Math.max(was?.tokens ?? 0, tokensOf(figure)),
+    })
+  }
+
+  const all = [...kept.values()].sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0))
+  const more = Math.max(row.moreSubagents ?? 0, all.length - MAX_TURN_SUBAGENTS)
+  const { subagents: _, moreSubagents: __, ...rest } = row
+
+  return { ...rest, subagents: all.slice(0, MAX_TURN_SUBAGENTS), ...(more > 0 ? { moreSubagents: more } : {}) }
+}
+
+// The subagents listed, as they now stand, into the rows of the turns that
+// started them, and the saved file where the person saves: as one starts or
+// ends, as one's last figures come in, and before a prompt lets go of those
+// that ended. Written only where a row changed.
+const recordSubagents = async ($: EngineInterface) => {
+  const [listed, figured, recent] = await Promise.all([read($, subagents), read($, subagentFigures), read($, recentTurns)])
+
+  if (listed.length === 0 || recent.length === 0) return
+
+  // One a row keeps stays with it; any other goes with the turn begun before
+  // it started.
+  const withListed = (list: readonly RecentTurn[]) =>
+    list.map((row, index) => {
+      const mine = listed.filter(one => {
+        const keeper = list.findIndex(item => item.subagents?.some(kept => kept.id === one.id) === true)
+
+        return (keeper === -1 ? recordIndexOf(list, one.startedAt) : keeper) === index
+      })
+
+      return mine.length === 0 ? row : withSubagents(row, mine, figured)
+    })
+
+  if (JSON.stringify(withListed(recent)) === JSON.stringify(recent)) return
+
+  await update($, recentTurns, withListed)
+  await saveTurns($)
+}
+
+// What the subagents' card shows for a turn picked from the list: the
+// subagents it kept, each still at work drawn from the live list and its
+// figures, the others as their rows last stood; and how many it did not keep.
+const subagentsOfRecord = (row: RecentTurn, live: readonly Subagent[], liveFigures: readonly SubagentFigures[]) => {
+  const kept = row.subagents ?? []
+  const listed = kept.map(one => {
+    const now = live.find(item => item.id === one.id)
+
+    if (now !== undefined) return now
+
+    const { model: _, effort: __, tokens: ___, ...agent } = one
+
+    return agent
+  })
+  const figured = kept.map(
+    (one): SubagentFigures =>
+      liveFigures.find(item => item.id === one.id && live.some(agent => agent.id === one.id)) ?? {
+        id: one.id,
+        ...(one.model === undefined ? {} : { model: one.model }),
+        ...(one.effort === undefined ? {} : { effort: one.effort }),
+        tokens: one.tokens,
+      },
+  )
+
+  return { listed, figured, more: row.moreSubagents ?? 0 }
+}
+
 // "14:32", the host's time.
-const formatTime = (ms: number) => `${pad(new Date(ms).getHours())}:${pad(new Date(ms).getMinutes())}`
+const formatTime =(ms: number) => `${pad(new Date(ms).getHours())}:${pad(new Date(ms).getMinutes())}`
 
 // "14:32 · 2m 14s · ▲ +9.7k · 18 tools": a recent turn's row. When it began,
 // how long it ran (the newest: that it runs, or waits on its subagents), the
@@ -1789,6 +1895,7 @@ const shownTurnOf = (current: Thinking | null, picked: string | null, recent: re
 // The current one is picked as null, so that the next prompt's follows.
 const pickTurn = async ($: EngineInterface, turnId: string | null) => {
   await update($, pickedTurn, () => turnId)
+  await update($, subagentTop, () => 0)
   await toNewest($)
 }
 
@@ -1824,6 +1931,26 @@ const isEntry = (value: unknown): value is ThinkingEntry => {
   )
 }
 
+const isStringOrNone = (value: unknown) => value === undefined || typeof value === 'string'
+
+// A turn's subagent as a saved file holds it.
+const isTurnSubagent = (value: unknown): value is TurnSubagent => {
+  const one = value as Partial<TurnSubagent> | null
+
+  return (
+    typeof one === 'object' &&
+    one !== null &&
+    typeof one.id === 'string' &&
+    typeof one.label === 'string' &&
+    typeof one.status === 'string' &&
+    typeof one.tokens === 'number' &&
+    isNumberOrNone(one.startedAt) &&
+    isNumberOrNone(one.endedAt) &&
+    isStringOrNone(one.model) &&
+    isStringOrNone(one.effort)
+  )
+}
+
 // A turn's row as a saved file holds it.
 const isRecentTurn = (value: unknown): value is RecentTurn => {
   const one = value as Partial<RecentTurn> | null
@@ -1840,7 +1967,9 @@ const isRecentTurn = (value: unknown): value is RecentTurn => {
     (one.isAborted === undefined || one.isAborted === true) &&
     (one.isWaiting === undefined || one.isWaiting === true) &&
     Array.isArray(one.entries) &&
-    one.entries.every(isEntry)
+    one.entries.every(isEntry) &&
+    (one.subagents === undefined || (Array.isArray(one.subagents) && one.subagents.every(isTurnSubagent))) &&
+    isNumberOrNone(one.moreSubagents)
   )
 }
 
@@ -1935,8 +2064,14 @@ const restoreTurns = async ($: EngineInterface) => {
   if (saved === null) return
 
   // A turn under way as Claude Code closed ran no further: interrupted,
-  // its length not known, no longer running or waiting.
-  const turns = saved.turns.map(one => {
+  // its length not known, no longer running or waiting. So with a subagent
+  // at work then: stopped.
+  const turns = saved.turns.map(saved => {
+    const one =
+      saved.subagents === undefined
+        ? saved
+        : { ...saved, subagents: saved.subagents.map(agent => (AT_WORK.has(agent.status) ? { ...agent, status: 'killed' } : agent)) }
+
     if (one.durationMs !== undefined) return one
 
     const { isWaiting: _, ...rest } = one
@@ -2372,6 +2507,7 @@ const keepSubagents = async ($: EngineInterface, agents: readonly AgentInfo[]) =
   }
 
   await keepFigures($, kept)
+  await recordSubagents($).catch(() => {})
   await showStatus($).catch(() => {})
 }
 
@@ -2516,7 +2652,7 @@ const settleFigures = ($: EngineInterface, agentId: string, usage: TurnUsage | u
 
       return [...figures.filter(one => one.id !== agentId), { ...was, id: agentId, tokens }]
     })
-  })
+  }).then(() => recordSubagents($).catch(() => {}))
 
 // Whether the pane was last drawn with room for the subagents' rows, and
 // with the summary beside the weather, where a turn may be picked from the
@@ -3682,7 +3818,7 @@ const drawNarrowDesktop = async ($: EngineInterface, ui: DesktopUi, columns: num
     </Box>
   )
 
-  const subagentsCard = listed.length > 0 && subagentsCardOf(ui, listed, figured, at, columns)
+  const subagentsCard = subagentsCardOf($, ui, listed, figured, at, columns, await read($, subagentTop))
   // Under WIDE_FROM columns the card shows the current turn, as the
   // terminal's one column does; its text stands a cell in from each side.
   const thinkingCard =
@@ -3718,24 +3854,46 @@ const drawNarrowDesktop = async ($: EngineInterface, ui: DesktopUi, columns: num
   )
 }
 
-// The subagents' card: how many work and finished (with `showTotal`, the
-// tokens of them all), then a row for each, five at most and the rest said
-// in one: its state, its task, how long it has run (once ended, how long it
-// ran), its model, effort and context, what it is at, and its tokens, with a
-// bar of its share of all the subagents' tokens.
+// The subagents the desktop's card shows at once; ▲ and ▼ scroll the rest.
+const DESK_SUBAGENT_ROWS = 2
+
+// Moves the desktop card's window over the subagents `by` rows (negative
+// toward the top), within those listed. A top kept from a longer list is
+// read as the last place the list has.
+const moveSubagents = async ($: EngineInterface, by: number) => {
+  const [listed, top] = await Promise.all([read($, subagents), read($, subagentTop)])
+  const last = Math.max(0, listed.length - DESK_SUBAGENT_ROWS)
+  const to = Math.max(0, Math.min(last, Math.min(top, last) + by))
+
+  // At either end a press has nothing to write, nothing to draw.
+  if (to !== top) await update($, subagentTop, () => to)
+}
+
+// The subagents' card, drawn for a turn that started none too, which it says:
+// how many work and finished (with `showTotal`, the
+// tokens of them all), then a row for each of DESK_SUBAGENT_ROWS from `top`,
+// ▲ and ▼ scrolling the rest: its state, its task, how long it has run (once
+// ended, how long it ran), its model, effort and context, what it is at, and
+// its tokens, with a bar of its share of all the subagents' tokens.
 const subagentsCardOf = (
+  $: EngineInterface,
   ui: DesktopUi,
   listed: readonly Subagent[],
   figured: readonly SubagentFigures[],
   at: number,
   columns: number,
+  top: number,
   showTotal = false,
+  more = 0,
 ) => {
-  const { Box, Svg, Text } = ui
+  const { Box, Button, Svg, Text } = ui
   const working = workingOf(listed)
   const finished = listed.length - working
   const total = listed.reduce((sum, one) => sum + tokensOf(figured.find(figure => figure.id === one.id)), 0)
   const barCells = Math.max(10, columns - ROW_INDENT - 18)
+  const canScroll = listed.length > DESK_SUBAGENT_ROWS
+  const first = Math.max(0, Math.min(top, listed.length - DESK_SUBAGENT_ROWS))
+  const shown = subagentOrder(listed).slice(first, first + DESK_SUBAGENT_ROWS)
 
   return (
     <Box flexDirection="column" gap="xs" paddingX={1} paddingY="sm" {...cardLook(DESK.card)}>
@@ -3752,16 +3910,30 @@ const subagentsCardOf = (
             {` ${finished} finished `}
           </Text>
         )}
-        {showTotal && total > 0 && <Box flexGrow={1} />}
+        {((showTotal && total > 0) || canScroll) && <Box flexGrow={1} />}
         {showTotal && total > 0 && (
           <Text size="caption" dimColor tabular>
             {`${formatTokens(total)} tokens`}
           </Text>
         )}
+        {canScroll && (
+          <Text size="caption" dimColor tabular>
+            {`${first + 1}–${first + shown.length} of ${listed.length}`}
+          </Text>
+        )}
+        {canScroll && (
+          <Button key="subagents-up" plain dimColor label="▲" onPress={() => moveSubagents($, -1).catch(() => {})} />
+        )}
+        {canScroll && (
+          <Button key="subagents-down" plain dimColor label="▼" onPress={() => moveSubagents($, 1).catch(() => {})} />
+        )}
       </Box>
-      {subagentOrder(listed)
-        .slice(0, MAX_SUBAGENT_ROWS)
-        .map(agent => {
+      {listed.length === 0 && (
+        <Text size="caption" dimColor>
+          No subagents ran in this turn
+        </Text>
+      )}
+      {shown.map(agent => {
           const isWorking = AT_WORK.has(agent.status)
           const figure = figured.find(one => one.id === agent.id)
           const look = STATE_TILES[agent.status] ?? { icon: 'loader' as const, ink: INK.mine }
@@ -3821,9 +3993,9 @@ const subagentsCardOf = (
             </Box>
           )
         })}
-      {listed.length > MAX_SUBAGENT_ROWS && (
+      {more > 0 && (
         <Text size="caption" dimColor>
-          and {listed.length - MAX_SUBAGENT_ROWS} more
+          {`and ${more} more not kept`}
         </Text>
       )}
     </Box>
@@ -4035,10 +4207,11 @@ const grownOf = (one: RecentTurn) =>
 // The pane on the desktop from WIDE_FROM columns, as the design's wide
 // layout draws it: across the top the sky with the session's line, a
 // warning where a window would run out, and the session's cost; on the left
-// the context with what fills it, the limits with their pace, and the recent
-// turns, one pressed to show its updates; on the right the subagents and the
-// thinking summary, its arrows scrolling the turn shown. With the summary
-// off, the cards stand in one column. Each read subscribes the drawing.
+// the limits with their pace (on top, as the person looks at them most), the
+// context with what fills it, and the recent turns, one pressed to show its
+// updates; on the right the subagents and the thinking summary, its arrows
+// scrolling the turn shown. With the summary off, the cards stand in one
+// column. Each read subscribes the drawing.
 const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: number, rows: number) => {
   const { Box, Button, Svg, Text } = ui
   const [at, now, added, readings, parts, compactAt, turn, spent, listed, figured, known, counted, filled, recent, isSaved, isOn] =
@@ -4371,7 +4544,21 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
     </Box>
   )
 
-  const subagentsCard = listed.length > 0 && subagentsCardOf(ui, listed, figured, at, isOn ? rightCells : columns, true)
+  // A turn picked from the list shows the subagents it started; the current
+  // one, those listed now.
+  const pastRow = view.isPast ? recent.find(one => one.turnId === view.turn?.turnId) : undefined
+  const cardOf = pastRow === undefined ? { listed, figured, more: 0 } : subagentsOfRecord(pastRow, listed, figured)
+  const subagentsCard = subagentsCardOf(
+    $,
+    ui,
+    cardOf.listed,
+    cardOf.figured,
+    at,
+    isOn ? rightCells : columns,
+    await read($, subagentTop),
+    true,
+    cardOf.more,
+  )
   const footer = footerOf($, ui, isOn, summarySpent, isDebugging)
 
   // With the summary off there is nothing to stand beside: one column.
@@ -4379,8 +4566,8 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
     return (
       <Box flexDirection="column" gap="sm">
         {head}
-        {contextCard}
         {limitsCard}
+        {contextCard}
         {subagentsCard}
         {turnsCard}
         {footer}
@@ -4409,8 +4596,8 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
       {head}
       <Box flexDirection="row" gap={COLUMN_GAP} {...(isPinned ? { flexGrow: 1, flexShrink: 1, minHeight: 0 } : {})}>
         <Box flexDirection="column" gap="sm" width={LEFT_CELLS} flexShrink={0} {...(isPinned ? { overflow: 'hidden' as const } : {})}>
-          {contextCard}
           {limitsCard}
+          {contextCard}
           {turnsCard}
         </Box>
         <Box flexDirection="column" gap="sm" flexGrow={1} flexShrink={1} minWidth={0}>
@@ -4630,6 +4817,9 @@ export const register: Register = (on, options) => {
           void keepTurn($, previousTurn)
         }
 
+        // The subagents listed, as they last stood, into the rows of the turns
+        // that started them, before this prompt's row opens.
+        await recordSubagents($).catch(() => {})
         const startedAt = await $.clock.now()
         await update($, thinking, () => newTurn(e.turnId, clip(e.text.trim(), MAX_REQUEST_CHARS), startedAt))
         // It heads the recent turns, picked: beside the weather its updates
@@ -4638,6 +4828,8 @@ export const register: Register = (on, options) => {
         await update($, pickedTurn, () => null)
         // The subagents the prompt before saw end go; those at work stay.
         await forgetEnded($)
+        // The desktop's card lists them again from the top.
+        await update($, subagentTop, () => 0)
       }
 
       if (isOn) {
@@ -4954,6 +5146,7 @@ export const register: Register = (on, options) => {
       figuresTimer = null
       await update($, recentTurns, () => [])
       await update($, pickedTurn, () => null)
+      await update($, subagentTop, () => 0)
       await update($, isSaving, () => false)
       await showStatus($).catch(() => {})
       await toNewest($)

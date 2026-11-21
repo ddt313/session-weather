@@ -136,7 +136,18 @@ export type RecentTurn = {
   toTokens?: number
   tools: number
   entries: ThinkingEntry[]
+  // The subagents the turn started, as their rows last stood, the first
+  // MAX_TURN_SUBAGENTS by when they began; `moreSubagents` counts those past
+  // them. Absent for a turn that started none, or kept by an earlier version.
+  subagents?: TurnSubagent[]
+  moreSubagents?: number
 }
+
+// A subagent a recent turn started, as its row last stood: where it stood,
+// since when it ran and until when, the model and effort of its latest
+// request, and the tokens its requests (its own subagents' with them) read
+// and wrote.
+export type TurnSubagent = Subagent & { model?: string; effort?: string; tokens: number }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -200,6 +211,9 @@ declare module 'claude-code' {
       // Where the updates' window stands, the newest at 0: the line on top
       // (lines scrolled past), and how many rows of it are above the window.
       summaryPlace: { line: number; row: number }
+      // The first of the subagents the desktop's card shows, in the order it
+      // lists them, the top at 0; ▲ and ▼ move it.
+      subagentTop: number
       // Whether each Haiku request of the summary, and its reply, goes to the
       // debug log; the person turns it on and off.
       isDebugOn: boolean
