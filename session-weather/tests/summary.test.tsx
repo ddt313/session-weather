@@ -325,8 +325,8 @@ test('the arrows move the updates in their own window, half of it a click; the w
   await clock.advance(15 * SECOND)
 
   // Newest first, a row each: "16s · Hai.", "→ Chạy test", "1s · Một.",
-  // "★ Chỉ sửa file A". A click moves half the window, five rows in a body
-  // of thirty, and stops at the last row.
+  // "★ Chỉ sửa file A". A click moves half the window, three rows in a body
+  // of thirty under the weather's card, to the last row.
   await press($, 'older')
   expect(await pane($)).toContain('Session cost $1.23')
   expect(await thoughts($)).toEqual(['🧭 Thinking · 16s', '★ Chỉ sửa file A', 'Summary cost $0.004 - Haiku 5.5'])
@@ -338,9 +338,9 @@ test('the arrows move the updates in their own window, half of it a click; the w
   expect((await thoughts($))[1]).toBe('★ Chỉ sửa file A')
   expect(await buttons($)).toEqual(['↑ 3 newer updates', 'Turn summary off', '▲', '▼'])
 
-  // ▲ goes back as far, stopping at the newest; ↑ goes straight there.
+  // ▲ goes back as far; ↑ goes straight to the newest.
   await press($, 'newer')
-  expect((await thoughts($))[1]).toBe('31s · Ba.')
+  expect((await thoughts($))[1]).toBe('16s · Hai.')
   await press($, 'older')
   expect((await thoughts($))[1]).toBe('★ Chỉ sửa file A')
   await press($, 'newest')
@@ -361,20 +361,23 @@ test('in a narrow pane the lines wrap as the surface wraps them, and a click on 
   await runStep($, steps, 't1', [thought(0, 'A note.'), stop])
   await clock.advance(SECOND)
 
-  // One Text a line, for the surface to wrap at its full width. At 21
-  // columns a terminal row holds 20 characters: the long line is four rows,
-  // the next step a fifth.
-  expect(await thoughts($, 'terminal', 21)).toEqual([
+  // One Text a line, for the surface to wrap at its full width. At 25
+  // columns a terminal row holds 20 characters inside the card: the long
+  // line is four rows, the next step a fifth.
+  expect(await thoughts($, 'terminal', 25)).toEqual([
     '🧭 Thinking · 1s',
     '1s · Claude đang đọc file cấu hình rồi chạy lại toàn bộ test',
     '→ Chạy lại test',
     'Summary cost $0.002 - Haiku 5.5',
   ])
 
-  await press($, 'older', 21)
-  expect((await thoughts($, 'terminal', 21)).slice(1, -1)).toEqual(['→ Chạy lại test'])
-  await press($, 'newer', 21)
-  expect((await thoughts($, 'terminal', 21))[1]).toBe('1s · Claude đang đọc file cấu hình rồi chạy lại toàn bộ test')
+  // A click passes three rows, two the whole line.
+  await press($, 'older', 25)
+  await press($, 'older', 25)
+  expect((await thoughts($, 'terminal', 25)).slice(1, -1)).toEqual(['→ Chạy lại test'])
+  await press($, 'newer', 25)
+  await press($, 'newer', 25)
+  expect((await thoughts($, 'terminal', 25))[1]).toBe('1s · Claude đang đọc file cấu hình rồi chạy lại toàn bộ test')
 })
 
 test('a click on ▼ shows a long line from part-way, marked, and a new update keeps that place', async ($, on) => {
@@ -387,22 +390,23 @@ test('a click on ▼ shows a long line from part-way, marked, and a new update k
   await runStep($, steps, 't1', [thought(0, 'A note.'), stop])
   await clock.advance(SECOND)
 
-  // 20 characters a terminal row at 21 columns: the line is a score of rows,
-  // and a click passes five of them, about a hundred characters.
-  await press($, 'older', 21)
-  const moved = (await thoughts($, 'terminal', 21))[1] ?? ''
+  // 20 characters a terminal row at 25 columns, inside the card: the line is
+  // a score of rows, and a click passes three of them, about sixty
+  // characters.
+  await press($, 'older', 25)
+  const moved = (await thoughts($, 'terminal', 25))[1] ?? ''
   expect(moved.startsWith('… ')).toBe(true)
-  expect(moved.length).toBeLessThan(`1s · ${words}`.length - 90)
-  expect(moved.length).toBeGreaterThan(`1s · ${words}`.length - 110)
+  expect(moved.length).toBeLessThan(`1s · ${words}`.length - 50)
+  expect(moved.length).toBeGreaterThan(`1s · ${words}`.length - 70)
 
   // An update lands on top: the line still shows from the same word.
   await runStep($, steps, 't1', [thought(0, 'Another note.'), stop])
   await clock.advance(15 * SECOND)
-  expect((await thoughts($, 'terminal', 21))[1]).toBe(moved)
+  expect((await thoughts($, 'terminal', 25))[1]).toBe(moved)
 
-  // ▲ goes back five rows, to the start of the long line, under the new one.
-  await press($, 'newer', 21)
-  expect((await thoughts($, 'terminal', 21))[1]).toBe(`1s · ${words}`)
+  // ▲ goes back three rows, to the start of the long line, under the new one.
+  await press($, 'newer', 25)
+  expect((await thoughts($, 'terminal', 25))[1]).toBe(`1s · ${words}`)
 })
 
 test('a long stretch of thinking is summarized a part at a time while it streams', async ($, on) => {

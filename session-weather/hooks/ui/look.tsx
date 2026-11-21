@@ -11,8 +11,8 @@ import type { Folding } from '../prefs'
 // ---------------------------------------------------------------------------
 // The desktop pane, laid out as the design "Session Weather layouts" draws
 // it: cards on a fill of their own, its bars and icons drawn as Svg. The
-// terminal draws no Svg and keeps the rows of text the hook draws below; so,
-// for now, does a desktop pane WIDE_FROM columns wide.
+// terminal draws no Svg: its cards have a round border and its bars are a
+// Raster (`terminal.tsx`).
 
 // Fills the desktop draws cards with: neutral greys with alpha over the
 // pane's ground, which read on a dark theme and a light one alike, and the

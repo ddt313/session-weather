@@ -7,6 +7,7 @@ import { stampOf } from './entries'
 import { forecast, formatCost, plural } from './format'
 import { formatLeft, levelOf, liveWindows } from './limits'
 import { PANE, PANE_ROWS, TITLE } from './settings'
+import { WIDE_FROM } from './ui/updates'
 import { workingOf } from './turns'
 
 const reading = atom({ plugin: 'session-weather', key: 'reading' } as const, null)
@@ -30,8 +31,19 @@ export async function recount ($: EngineInterface) {
   }
 }
 
+// The surface the session started on, for the pane's open.
+let startedOn: string | null | undefined
+
+export const setStartedOn = (surface: string | null | undefined) => {
+  startedOn = surface
+}
+
+// In the terminal, docked beside the transcript, the pane asks to open
+// WIDE_FROM columns wide, for the weather and the summary side by side; the
+// terminal holds a dock to 45% of its width, and a width the person set wins.
+// Elsewhere it asks for no width: the desktop lays its pane out itself.
 export function openPane($: EngineInterface) {
-  return $.ui.open({ id: PANE, title: TITLE, rows: PANE_ROWS })
+  return $.ui.open({ id: PANE, title: TITLE, rows: PANE_ROWS, ...(startedOn === 'terminal' ? { columns: WIDE_FROM } : {}) })
 }
 
 // "☁ 42% · 5h 30% (4h 38m) · $1.23 · 2 subagents": the weather's key figures

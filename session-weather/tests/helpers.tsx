@@ -54,6 +54,57 @@ const PANE = {
 
 export const bar = (filled: number) => '█'.repeat(filled) + '░'.repeat(20 - filled)
 
+// The terminal's bars, drawn as a Raster: the inks by name, as the mod packs
+// them.
+const INKS: Readonly<Record<number, string>> = {
+  0x4a4a4a: 'track',
+  0x9a9a9a: 'others',
+  0xf5b731: 'amber',
+  0xe5484d: 'red',
+  0xd8d8d8: 'mark',
+  0x8a8a8a: 'grey',
+  0x00aeef: 'sky',
+}
+
+const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
+const bytesOf = (text: string) => {
+  const bits = [...text.replace(/=+$/, '')].map(ch => BASE64.indexOf(ch))
+  const out: number[] = []
+
+  for (let at = 0; at + 1 < bits.length; at += 4) {
+    const n = ((bits[at] ?? 0) << 18) | ((bits[at + 1] ?? 0) << 12) | ((bits[at + 2] ?? 0) << 6) | (bits[at + 3] ?? 0)
+    out.push((n >> 16) & 255)
+    if (at + 2 < bits.length) out.push((n >> 8) & 255)
+    if (at + 3 < bits.length) out.push(n & 255)
+  }
+
+  return out
+}
+
+// A Raster's cells read back, its runs of one glyph in one ink together:
+// "amber━2 track━18", a mark "mark┃1".
+export const cellsShown = (cells: string) => {
+  const bytes = bytesOf(cells)
+  const words: number[] = []
+
+  for (let at = 0; at + 3 < bytes.length; at += 4) {
+    words.push(((bytes[at] ?? 0) | ((bytes[at + 1] ?? 0) << 8) | ((bytes[at + 2] ?? 0) << 16) | ((bytes[at + 3] ?? 0) << 24)) >>> 0)
+  }
+
+  const runs: { name: string; count: number }[] = []
+
+  for (let at = 0; at + 2 < words.length; at += 3) {
+    const name = `${INKS[words[at + 1] ?? 0] ?? (words[at + 1] ?? 0).toString(16)}${String.fromCodePoint(words[at] ?? 0x20)}`
+    const last = runs.at(-1)
+
+    if (last?.name === name) last.count += 1
+    else runs.push({ name, count: 1 })
+  }
+
+  return runs.map(run => `${run.name}${run.count}`).join(' ')
+}
+
 // The summary in Vietnamese, as a setting: the tests whose replies and pane
 // read in it. The default is English.
 export const VIETNAMESE = { options: { summaryLanguage: 'Vietnamese' } }
@@ -202,6 +253,13 @@ export const engine = (
     }
   })
   on('ui.panes', () => ({ value: panes.map(pane => ({ ...pane })) }))
+  // The mod closing its pane: it goes from the engine's record.
+  on('ui.close', ($, e) => {
+    const open = panes.filter(pane => pane.id !== e.id)
+    panes.splice(0, panes.length, ...open)
+
+    return { value: undefined }
+  })
   on('ui.status', ($, e) => {
     statuses.push(e.text)
 
@@ -439,7 +497,8 @@ export const RATE_LIMITED = {
 export const NO_WAIT = 'WAIT is not allowed this time.'
 
 // The rule the pane draws between two updates: box drawing across the body.
-export const RULE = '─'.repeat(PANE.props.bodyColumns - 1)
+// Inside the thinking card's border and padding, 4 columns of the body's.
+export const RULE = '─'.repeat(PANE.props.bodyColumns - 4 - 1)
 
 // A prompt with each note's time taken out, for the tests that read what the
 // notes say rather than when they came.
@@ -507,6 +566,17 @@ export const runStep = async (
 
 export const SECOND = 1000
 
+// The terminal pane's bars, by their Raster's key ("bar-context",
+// "bar-five_hour"), each its cells read back; in a pane `columns` wide when
+// given.
+export const barsShown = async ($: Test$, columns?: number) => {
+  const ui = await mount($, 'terminal', columns)
+  const rasters = (await ui.findAll({ type: 'Raster' })) as unknown as { props: { key?: string; columns: number; cells: string } }[]
+  await ui.unmount()
+
+  return Object.fromEntries(rasters.map(one => [one.props.key ?? '', cellsShown(one.props.cells)]))
+}
+
 // The pane's limits under "Usage limits": each Text's shown text, with its
 // color where it has one, or [dim]; in a pane `columns` wide when given.
 export const limitsShown = async ($: Test$, surface: 'desktop' | 'terminal' = 'terminal', columns?: number) => {
@@ -516,7 +586,7 @@ export const limitsShown = async ($: Test$, surface: 'desktop' | 'terminal' = 't
   const top = texts.findIndex(one => one.text === 'Usage limits')
   // A window's line, its part, its bar and the bar's runs, until what comes
   // after the limits.
-  const isLimit = (text: string) => /^(?:5h |Week |this session|[█░│]| [~>])/.test(text)
+  const isLimit = (text: string) => /^(?:5h |Week |this session|[█░│]| ?[~>])/.test(text)
   const end = texts.findIndex((one, at) => at > top && !isLimit(one.text))
 
   return texts

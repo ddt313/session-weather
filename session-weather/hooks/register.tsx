@@ -9,12 +9,12 @@ import { waitingFor } from './entries'
 import { messageOf, sessionFile } from './files'
 import { clip, forecast, formatCost, formatDelta, formatDuration, formatTime, formatTokens, MINUTE, plural, SECOND } from './format'
 import { called, contextRestarted, requestAnswered, requestStarted, turnEnded } from './growth'
-import { bar, barParts, barRuns, BLOCK_HEADER, formatLeft, formatPart, levelOf, liveWindows, MINE, paceOf, STORED_CLOSED, STORED_LIMITS, storedLimits } from './limits'
+import { bar, BLOCK_HEADER, formatLeft, formatPart, levelOf, liveWindows, MINE, paceOf, STORED_CLOSED, STORED_LIMITS, storedLimits } from './limits'
 import { LOG_TOOL_NAME, logToolSpec, previousTurn, readLog, setPreviousTurn } from './log'
 import { restore, SAVE_TOGGLE, STORED_DEBUG_ON, TOGGLE } from './prefs'
 import { COMMAND, DEBUG_COMMAND, heldValue, PANE, settingFieldOf, settings } from './settings'
 import { addSpend, costCarried, costCounted, recountShares, setCostCarried, setCostCounted } from './spend'
-import { glanceOf, hideStatus, openPane, recount, showStatus } from './status'
+import { glanceOf, hideStatus, openPane, recount, setStartedOn, showStatus } from './status'
 import { figureParts, figuresTimer, forgetEnded, inSubagentOrder, lookedFor, lookFor, MAX_SUBAGENT_ROWS, minuteSubagents, noted, noteFigures, parentOf, relistSubagents, runningSubagents, setFiguresTimer, settleFigures, spawnedAt, SUBAGENT_INDENT, subagentLine, subagentOrder, subagentsHeaderOf } from './subagents'
 import { formatSummaryCost, HAIKU_NAME, inputTokens, MAX_REQUEST_CHARS, SAID_CHARS, useSettings } from './summary/prompt'
 import { actionOf, askedAt, asking, drainedAt, ended, endLive, endTurn, goOn, isOwed, isResumedBy, isTurnOf, keepMark, liveBlock, MAX_SUBMISSIONS, newTurn, owedRecap, setAskedAt, setDrainedAt, setIsOwed, setLiveBlock, setOwedRecap, setSubmissions, setSummary, startTicker, statusOf, stopTicker, submissions, updateTurn } from './summary/run'
@@ -22,9 +22,12 @@ import type { Submission } from './summary/run'
 import { AT_WORK, chargeCalls, countTool, keepTurn, maxRecent, measureRecord, openRecord, recordSubagents, recordTurn, restoreTurns, saveTurns, setSaving } from './turns'
 import { TERMINAL_TURN_ROWS } from './ui/cards'
 import { isPickingDrawn, isRoomyDrawn, setIsPickingDrawn, setIsRoomyDrawn } from './ui/drawn'
+import { clamp01, limitStretches } from './ui/look'
 import type { DesktopUi } from './ui/look'
 import { drawNarrowDesktop } from './ui/narrow'
 import { COLUMN_GAP, MIN_PINNED_ROWS, moveUpdates, pageStep, PANE_OVERHEAD, pickTurn, recentLine, shownTurnOf, toNewest, WEATHER_CHARS, weatherColumns, WIDE_FROM, WIDE_OVERHEAD, widthOf, windowOf } from './ui/updates'
+import { barRasterOf, barWidthOf, CARD_INSET, CARD_ROWS, cellRunsOf, skyInkOf, TERMINAL_CARD } from './ui/terminal'
+import type { CellRun } from './ui/terminal'
 import { drawWideDesktop } from './ui/wide'
 
 const reading = atom({ plugin: 'session-weather', key: 'reading' } as const, null)
@@ -53,6 +56,9 @@ const toolTop = atom({ plugin: 'session-weather', key: 'toolTop' } as const, 0)
 const turnTop = atom({ plugin: 'session-weather', key: 'turnTop' } as const, 0)
 const isDebugOn = atom({ plugin: 'session-weather', key: 'isDebugOn' } as const, false)
 
+// The rows a pinned desktop layout leaves free at the body's foot.
+const DESK_FOOT_ROWS = 1
+
 export const register: Register = (on, options) => {
   // A change in `/config` reloads the mod, and this runs again with it.
   useSettings(options)
@@ -67,6 +73,7 @@ export const register: Register = (on, options) => {
   })
 
   on('session.start', async ($, e, next) => {
+    setStartedOn(e.surface)
     // Also runs on every hot reload: seed the reading, but leave the samples
     // alone. A mod loaded mid-session counts the next turn's growth from this
     // reading, not from zero. A session the person saved gets its turns and
@@ -131,7 +138,7 @@ export const register: Register = (on, options) => {
     void cleanUp($).catch(() => {})
     await $.command.register({
       name: COMMAND,
-      description: 'Open the Session Weather pane',
+      description: 'Open or close the Session Weather pane',
       immediate: true,
     })
     await $.command.register({
@@ -154,9 +161,20 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // Opened by the person, the pane is placed at any width, and the status
-  // line goes.
+  // The person's switch for the pane. Drawn, it closes, as the person's own
+  // close does: it stays closed in later sessions, and the status line takes
+  // its place. Closed, or waiting undrawn, it opens, placed at any width, and
+  // the status line goes.
   on('command.run', { command: COMMAND }, async $ => {
+    const isUp = (await $.ui.panes()).some(pane => pane.id === PANE && pane.isPlaced)
+
+    if (isUp) {
+      await $.store.set(STORED_CLOSED, true)
+      await $.ui.close({ id: PANE })
+
+      return {}
+    }
+
     await $.store.set(STORED_CLOSED, false)
     await openPane($)
     await showStatus($).catch(() => {})
@@ -733,12 +751,23 @@ export const register: Register = (on, options) => {
 
     // On the desktop, the design's layouts: under WIDE_FROM columns the
     // narrow one, from it the wide one. The terminal draws no Svg (its table
-    // has one that draws nothing), and keeps the rows of text below.
+    // has one that draws nothing): it draws its blocks below in cards with a
+    // round border, and its bars as a Raster, a row of colored cells.
+    // A pinned layout stands a row short of the body: the desktop turns rows
+    // into pixels by its own measure, which on a smaller or scaled screen came
+    // to a few pixels more than the body shows, and the pane scrolled.
     if (e.surface !== 'terminal' && 'Svg' in ui) {
+      const rows = Math.max(1, e.props.scroll.bodyRows - DESK_FOOT_ROWS)
+
       return e.props.bodyColumns < WIDE_FROM
-        ? drawNarrowDesktop($, ui as DesktopUi, e.props.bodyColumns, e.props.scroll.bodyRows)
-        : drawWideDesktop($, ui as DesktopUi, e.props.bodyColumns, e.props.scroll.bodyRows)
+        ? drawNarrowDesktop($, ui as DesktopUi, e.props.bodyColumns, rows)
+        : drawWideDesktop($, ui as DesktopUi, e.props.bodyColumns, rows)
     }
+
+    // A bar: a Raster where the surface has one, else its rows of text.
+    const Raster = 'Raster' in ui ? ui.Raster : undefined
+    const barOf = (key: string, cells: number, runs: readonly CellRun[], marks: readonly number[], text: JSX.Element) =>
+      Raster === undefined ? text : <Raster {...barRasterOf(key, cells, runs, marks)} />
 
     // Each read subscribes the drawing to its value; they go all at once.
     const [at, now, added, lastSamples, readings, parts, compactAt, turn, spent, listed, isOn] = await Promise.all([
@@ -777,8 +806,11 @@ export const register: Register = (on, options) => {
     setIsRoomyDrawn(isRoomy)
     setIsPickingDrawn(isWide)
     // The characters a row of the weather holds, what it adds cut to them
-    // rather than wrapped: its column's beside the summary, else the body's.
-    const weatherChars = isWide ? WEATHER_CHARS : widthOf(e.props.bodyColumns, e.surface)
+    // rather than wrapped: its column's beside the summary, else the body's;
+    // inside its cards' borders either way.
+    const weatherChars = isWide ? WEATHER_CHARS : widthOf(e.props.bodyColumns - CARD_INSET, e.surface)
+    // The bars span their card inside its border and padding.
+    const barCells = barWidthOf((isWide ? weatherColumns(e.surface) : e.props.bodyColumns) - (isWide ? 0 : CARD_INSET))
     const hasTurns = lastSamples.length > 0
     // Each window, with this session's part of its share in points.
     const windows = liveWindows(readings, at).map(window => ({
@@ -815,7 +847,15 @@ export const register: Register = (on, options) => {
           <Text>
             {percent}% of context · {formatTokens(tokens)} / {formatTokens(now.window)}
           </Text>
-          <Text color={sky.color}>{bar(percent)}</Text>
+          {barOf(
+            'bar-context',
+            barCells,
+            [{ from: 0, to: clamp01(percent / 100), ink: skyInkOf(sky.label) }],
+            compactAt?.isEnabled === true && compactAt.threshold !== undefined && now.window > 0
+              ? [compactAt.threshold / now.window]
+              : [],
+            <Text color={sky.color}>{bar(percent)}</Text>,
+          )}
           {compactLine !== null && <Text dimColor>{compactLine}</Text>}
           {filled?.map((fill, index) => (
             <Text dimColor wrap="truncate">
@@ -884,10 +924,10 @@ export const register: Register = (on, options) => {
     // has the summary's whole column but its header and footer.
     const rows = e.props.scroll.bodyRows
     const isPinned = isOn && rows >= MIN_PINNED_ROWS
-    const weatherWidth = weatherColumns(e.surface)
+    const weatherWidth = weatherColumns(e.surface) + CARD_INSET
     // The summary's columns: the body's, less the weather's column and the
-    // gap beside it where the two stand side by side.
-    const summaryColumns = isWide ? e.props.bodyColumns - weatherWidth - COLUMN_GAP : e.props.bodyColumns
+    // gap beside it where the two stand side by side, inside its card.
+    const summaryColumns = (isWide ? e.props.bodyColumns - weatherWidth - COLUMN_GAP : e.props.bodyColumns) - CARD_INSET
     // The lines measured in rows at the summary's width, the measure the
     // arrows then step through.
     const width = widthOf(summaryColumns, e.surface)
@@ -914,6 +954,7 @@ export const register: Register = (on, options) => {
         {newer > 0 && (
           <Button
             key="newest"
+            hotkey="n"
             plain
             dimColor
             label={`↑ ${plural(newer, 'newer update')}`}
@@ -946,7 +987,9 @@ export const register: Register = (on, options) => {
     // the pane again only when the press ends; its wheel scrolls the pane
     // itself, which, pinned, has nothing to scroll; and its keys do not
     // reach the pane.
-    const step = pageStep(rows, isWide ? WIDE_OVERHEAD : PANE_OVERHEAD)
+    // The cards' borders take rows of their own: the summary's card, and in
+    // one column the weather's above it.
+    const step = pageStep(rows, (isWide ? WIDE_OVERHEAD : PANE_OVERHEAD + CARD_ROWS) + CARD_ROWS)
 
     // The recent turns' header, and beside it the person's switch for
     // keeping this session's turns past a restart of Claude Code, a box to
@@ -957,6 +1000,7 @@ export const register: Register = (on, options) => {
         <Text {...BLOCK_HEADER}>Recent turns</Text>
         <Button
           key={SAVE_TOGGLE}
+          hotkey="p"
           plain
           dimColor={!isSaved}
           label={isSaved ? '☑ Persist' : '☐ Persist'}
@@ -975,72 +1019,68 @@ export const register: Register = (on, options) => {
       <Box
         key="weather"
         flexDirection="column"
-        gap={1}
         flexShrink={0}
         {...(isWide ? { width: weatherWidth } : {})}
         {...(isWide && isPinned ? { overflow: 'hidden' as const } : {})}
       >
-        {context}
-        {windows.length > 0 && (
-          <Box flexDirection="column">
-            <Text {...BLOCK_HEADER}>Usage limits</Text>
-            {windows.map(window => {
-              // "5h 30% · this session 8% · reset in 4h 38m", the part in
-              // yellow, as its cells are: the last of the bar's filled ones.
-              const cells = barParts(window.used, window.mine)
-              // Roomy, the bar marks how much of the window's time has gone,
-              // and says where the share used would stand at the reset.
-              const pace = isRoomy ? paceOf(window.percent, window.elapsed) : null
+        {/* The weather's card: the sky and the fill, the limits, the session. */}
+        <Box {...TERMINAL_CARD} gap={1}>
+          {context}
+          {windows.length > 0 && (
+            <Box flexDirection="column">
+              <Text {...BLOCK_HEADER}>Usage limits</Text>
+              {windows.map(window => {
+                // "5h 30% · this session 8% · reset in 4h 38m", the part in
+                // yellow, as its cells are: the last of the bar's filled ones,
+                // and, where the pace says more by the reset, that much hatched.
+                // Roomy, the bar marks how much of the window's time has gone,
+                // and says where the share used would stand at the reset.
+                const pace = isRoomy ? paceOf(window.percent, window.elapsed) : null
+                const marks = isRoomy && window.elapsed !== undefined ? [window.elapsed] : []
+                const cells = pace === null ? barCells : Math.max(10, barCells - pace.length - 1)
 
-              return (
-                <Box flexDirection="column">
-                  <Text>
-                    {window.name} {window.used}%
-                    {window.mine > 0 && ' · '}
-                    {window.mine > 0 && <Text color={MINE}>this session {formatPart(window.mine)}</Text>}
-                    {window.left === undefined ? '' : ` · reset in ${formatLeft(window.left)}`}
-                  </Text>
-                  {isRoomy && window.elapsed !== undefined ? (
-                    <Text wrap="truncate">
-                      {barRuns(window.used, window.mine, window.elapsed).map(run =>
-                        run.kind === 'mark' ? (
-                          <Text>{run.text}</Text>
-                        ) : run.kind === 'own' ? (
-                          <Text color={MINE}>{run.text}</Text>
-                        ) : (
-                          <Text dimColor>{run.text}</Text>
-                        ),
-                      )}
-                      {pace !== null && <Text dimColor>{` ${pace}`}</Text>}
-                    </Text>
-                  ) : cells.own === '' ? (
-                    <Text dimColor>{bar(window.used)}</Text>
-                  ) : (
+                return (
+                  <Box flexDirection="column">
                     <Text>
-                      {cells.others !== '' && <Text dimColor>{cells.others}</Text>}
-                      <Text color={MINE}>{cells.own}</Text>
-                      {cells.free !== '' && <Text dimColor>{cells.free}</Text>}
+                      {window.name} {window.used}%
+                      {window.mine > 0 && ' · '}
+                      {window.mine > 0 && <Text color={MINE}>this session {formatPart(window.mine)}</Text>}
+                      {window.left === undefined ? '' : ` · reset in ${formatLeft(window.left)}`}
                     </Text>
-                  )}
+                    <Box flexDirection="row" gap={1}>
+                      {barOf(
+                        `bar-${window.kind}`,
+                        cells,
+                        cellRunsOf(limitStretches(window)),
+                        marks,
+                        <Text dimColor>{bar(window.used)}</Text>,
+                      )}
+                      {pace !== null && <Text dimColor>{pace}</Text>}
+                    </Box>
+                  </Box>
+                )
+              })}
+            </Box>
+          )}
+          {isRoomy
+            ? sessionRows.length > 0 && (
+                <Box flexDirection="column">
+                  {sessionRows.map(row => (
+                    <Text dimColor wrap="truncate">
+                      {row}
+                    </Text>
+                  ))}
                 </Box>
               )
-            })}
-          </Box>
-        )}
-        {isRoomy
-          ? sessionRows.length > 0 && (
-              <Box flexDirection="column">
-                {sessionRows.map(row => (
-                  <Text dimColor wrap="truncate">
-                    {row}
-                  </Text>
-                ))}
-              </Box>
-            )
-          : spent !== null && <Text dimColor>Session cost {formatCost(spent)}</Text>}
-        {listed.length > 0 && !isRoomy && <Text dimColor>{subagentsHeaderOf(listed)}</Text>}
+            : (spent !== null || listed.length > 0) && (
+                <Box flexDirection="column">
+                  {spent !== null && <Text dimColor>Session cost {formatCost(spent)}</Text>}
+                  {listed.length > 0 && <Text dimColor>{subagentsHeaderOf(listed)}</Text>}
+                </Box>
+              )}
+        </Box>
         {listed.length > 0 && isRoomy && (
-          <Box flexDirection="column">
+          <Box {...TERMINAL_CARD}>
             <Text {...BLOCK_HEADER}>{subagentsHeaderOf(listed)}</Text>
             {subagentOrder(listed)
               .slice(0, MAX_SUBAGENT_ROWS)
@@ -1081,7 +1121,7 @@ export const register: Register = (on, options) => {
           </Box>
         )}
         {recent.length > 0 && (
-          <Box flexDirection="column">
+          <Box {...TERMINAL_CARD}>
             {recentHeader}
             {recent.slice(-Math.min(maxRecent(), TERMINAL_TURN_ROWS)).reverse().map((one, index) => {
               // Newest first, so that a column too short for them all cuts
@@ -1103,6 +1143,8 @@ export const register: Register = (on, options) => {
               return (
                 <Button
                   key={`turn-${one.turnId}`}
+                  // 1 the newest, on down, and 0 the tenth (TERMINAL_TURN_ROWS).
+                  hotkey={index < 9 ? String(index + 1) : '0'}
                   plain
                   dimColor={!isShown}
                   label={clip(`${isShown ? '▸ ' : ''}${text}`, weatherChars)}
@@ -1115,7 +1157,10 @@ export const register: Register = (on, options) => {
       </Box>
     )
 
-    // The summary's footer: what it cost, its switch, and the arrows.
+    // The summary's footer: what it cost, its switch, and the arrows. Once
+    // the pane holds the keyboard (ctrl+x tab, or a click), a letter presses
+    // each of the pane's buttons: s the switch, k and j the arrows, n the
+    // newest update, p Persist, and 1 to 9 a recent turn.
     const footer = (
       <Box flexDirection="column" flexShrink={0}>
         <Text dimColor>
@@ -1126,6 +1171,7 @@ export const register: Register = (on, options) => {
         <Box flexDirection="row" gap={1}>
           <Button
             key={TOGGLE}
+            hotkey="s"
             label={isOn ? 'Turn summary off' : 'Turn summary on'}
             dimColor
             onPress={() => setSummary($, !isOn).catch(() => {})}
@@ -1133,6 +1179,7 @@ export const register: Register = (on, options) => {
           {canScroll && (
             <Button
               key="newer"
+              hotkey="k"
               plain
               dimColor
               label="▲"
@@ -1142,6 +1189,7 @@ export const register: Register = (on, options) => {
           {canScroll && (
             <Button
               key="older"
+              hotkey="j"
               plain
               dimColor
               label="▼"
@@ -1160,11 +1208,11 @@ export const register: Register = (on, options) => {
           {weather}
           <Box
             key="summary"
-            flexDirection="column"
+            {...TERMINAL_CARD}
             gap={1}
             flexGrow={1}
             flexShrink={1}
-            {...(isPinned ? { height: rows } : {})}
+            {...(isPinned ? { height: rows, overflow: 'hidden' as const } : {})}
           >
             {thoughts}
             {footer}
@@ -1174,10 +1222,17 @@ export const register: Register = (on, options) => {
     }
 
     return (
-      <Box flexDirection="column" gap={1} {...(isPinned ? { height: rows } : {})}>
+      <Box flexDirection="column" {...(isPinned ? { height: rows } : {})}>
         {weather}
-        {isOn && thoughts}
-        {footer}
+        <Box
+          key="thinking"
+          {...TERMINAL_CARD}
+          gap={1}
+          {...(isPinned ? { flexGrow: 1, flexShrink: 1, minHeight: 0, overflow: 'hidden' as const } : {})}
+        >
+          {isOn && thoughts}
+          {footer}
+        </Box>
       </Box>
     )
   })

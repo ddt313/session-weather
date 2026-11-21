@@ -1,7 +1,7 @@
 // The status line, and the pane the person closed.
 
 import { expect, test } from 'claude-code/testing'
-import { at, DAY, engine, HOUR, measure, measureLimits, MINUTE, mount, SECOND, SLOW, start, SUMMARY } from './helpers'
+import { at, DAY, engine, HOUR, measure, measureLimits, MINUTE, mount, SECOND, SLOW, start, SUMMARY, WIDE_FROM } from './helpers'
 
 test('a pane the person closed stays closed in later sessions until /session-weather', SLOW, async ($, on) => {
   const { opens, writes } = engine(on, { stored: { isClosed: true } })
@@ -15,12 +15,41 @@ test('a pane the person closed stays closed in later sessions until /session-wea
   expect(writes.at(-1)).toEqual({ key: 'isClosed', value: false })
 })
 
+test('/session-weather is a switch: it closes the pane drawn, kept closed in later sessions, and opens it again', SLOW, async ($, on) => {
+  const { opens, panes, writes } = engine(on)
+
+  await $.session.start(start)
+  expect(panes.map(pane => pane.id)).toEqual(['session-weather'])
+
+  // Drawn: the command closes it, as the person's own close does.
+  await $.command.run({ command: 'session-weather' } as never)
+  expect(panes).toEqual([])
+  expect(writes.at(-1)).toEqual({ key: 'isClosed', value: true })
+  expect(opens.length).toBe(1)
+
+  // Closed: it opens again.
+  await $.command.run({ command: 'session-weather' } as never)
+  expect(panes.map(pane => pane.id)).toEqual(['session-weather'])
+  expect(writes.at(-1)).toEqual({ key: 'isClosed', value: false })
+  expect(opens.length).toBe(2)
+})
+
 // The 5-hour window at 30%, resetting in 4h 38m.
 const FIVE_HOUR = [{ kind: 'five_hour', percentUsed: 30.2, resetsAt: at(4 * HOUR + 38 * MINUTE) }]
 
 // The person's /session-weather.
 const command = ($: { command: { run: (e: never) => Promise<unknown> } }) =>
   $.command.run({ command: 'session-weather' } as never)
+
+test('in the terminal the pane asks to open WIDE_FROM columns wide, the two columns side by side; on the desktop, no width', async ($, on) => {
+  const { opens } = engine(on)
+
+  await $.session.start({ ...start, surface: 'terminal' as never })
+  expect(opens).toEqual([{ id: 'session-weather', title: 'Session Weather', rows: 12, columns: WIDE_FROM }])
+
+  await $.session.start(start)
+  expect(opens.at(-1)).toEqual({ id: 'session-weather', title: 'Session Weather', rows: 12 })
+})
 
 test('with the pane drawn there is no status line', async ($, on) => {
   const { clock, statuses } = engine(on, { rateLimits: FIVE_HOUR, cost: 1.234 })

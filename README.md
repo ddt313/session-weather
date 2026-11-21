@@ -11,9 +11,9 @@ so far.
 ## Session Weather
 
 The pane opens beside the conversation when a session starts.
-`/session-weather` opens it again after you closed it. While it is closed,
-or the terminal is too narrow to show it, a status line under the prompt
-keeps its key figures.
+`/session-weather` opens and closes it; closed, it stays closed in later
+sessions until you open it again. While it is closed, or the terminal is too
+narrow to show it, a status line under the prompt keeps its key figures.
 
 The thinking summary needs Claude's thinking, which Claude Code passes on
 only while the session's **Transcript view** is **Thinking** or **Verbose**.

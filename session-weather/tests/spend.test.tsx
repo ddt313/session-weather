@@ -1,7 +1,7 @@
 // The session's spend, and its share of each limit's window.
 
 import { expect, test } from 'claude-code/testing'
-import { bar, DAY, engine, HOUR, limitsShown, MINUTE, NOW, oneTurn, pane, SECOND, SLOW, start, thoughts } from './helpers'
+import { barsShown, DAY, engine, HOUR, limitsShown, MINUTE, NOW, oneTurn, pane, SECOND, SLOW, start, thoughts } from './helpers'
 
 // What each session spent, in a file of its own in the mod's folder: spans
 // of [from, to, dollars], and the session's total cost they count up to.
@@ -44,12 +44,11 @@ test("this session's part of each window shows in yellow, its cells the last of 
   await $.session.start(start)
   await clock.settle()
   // Yet to spend in either window: the limits as they were.
-  expect(await limitsShown($)).toEqual([
-    '5h 30% · reset in 3h 0m',
-    `${bar(6)} [dim]`,
-    'Week 12% · reset in 2d 0h',
-    `${bar(2)} [dim]`,
-  ])
+  expect(await limitsShown($)).toEqual(['5h 30% · reset in 3h 0m', 'Week 12% · reset in 2d 0h'])
+  expect(await barsShown($)).toEqual({
+    'bar-five_hour': 'others━25 red╍39 track━21',
+    'bar-seven_day': 'others━10 red╍4 track━71',
+  })
 
   // $1 now: a quarter of the 5-hour window's $4, 7.5 of its 30 points; a
   // twentieth of the week's $20, 0.6 of its 12.
@@ -59,15 +58,15 @@ test("this session's part of each window shows in yellow, its cells the last of 
   expect(await limitsShown($)).toEqual([
     '5h 30% · this session 8% · reset in 3h 0m',
     'this session 8% [warning]',
-    bar(6),
-    `${'█'.repeat(4)} [dim]`,
-    `${'█'.repeat(2)} [warning]`,
-    `${'░'.repeat(14)} [dim]`,
-    // Under half a cell: the part shows in words alone.
     'Week 12% · this session 1% · reset in 2d 0h',
     'this session 1% [warning]',
-    `${bar(2)} [dim]`,
   ])
+  expect(await barsShown($)).toEqual({
+    // This session's part the last of the filled cells; under half a cell, the
+    // week's shows in words alone.
+    'bar-five_hour': 'others━19 amber━6 red╍39 track━21',
+    'bar-seven_day': 'others━10 red╍4 track━71',
+  })
 })
 
 test('a session alone in the files takes the whole of each window: spend no file holds counts toward it', async ($, on) => {
@@ -79,15 +78,13 @@ test('a session alone in the files takes the whole of each window: spend no file
   expect(await limitsShown($)).toEqual([
     '5h 30% · this session 30% · reset in 3h 0m',
     'this session 30% [warning]',
-    bar(6),
-    `${'█'.repeat(6)} [warning]`,
-    `${'░'.repeat(14)} [dim]`,
     'Week 12% · this session 12% · reset in 2d 0h',
     'this session 12% [warning]',
-    bar(2),
-    `${'█'.repeat(2)} [warning]`,
-    `${'░'.repeat(18)} [dim]`,
   ])
+  expect(await barsShown($)).toEqual({
+    'bar-five_hour': 'amber━25 red╍39 track━21',
+    'bar-seven_day': 'amber━10 red╍4 track━71',
+  })
 })
 
 test("the session's spend goes to a file of its own by the minute; a total that went down started over", async ($, on) => {

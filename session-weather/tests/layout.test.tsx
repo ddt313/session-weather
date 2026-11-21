@@ -2,7 +2,7 @@
 // and headers.
 
 import { expect, test } from 'claude-code/testing'
-import { allTexts, answer, bar, BREAKDOWN, buttons, engine, limits, measure, MINUTE, mount, NOW, oneTurn, PACED, pane, press, runStep, SECOND, SLOW, start, stop, SUMMARY, thought, thoughts, turnRows, WIDE_FROM } from './helpers'
+import { allTexts, answer, barsShown, BREAKDOWN, buttons, engine, limits, measure, MINUTE, mount, NOW, oneTurn, PACED, pane, press, runStep, SECOND, SLOW, start, stop, SUMMARY, thought, thoughts, turnRows, WIDE_FROM } from './helpers'
 import type { Found, Test$ } from './helpers'
 
 // How the pane lays out `columns` wide on `surface`: which way its outer Box
@@ -61,10 +61,11 @@ test('from WIDE_FROM columns the weather stands in a column of its own, the summ
   })
 
   // From it: the weather on the left, wide enough for its longest line on
-  // one row (46 characters, 47 cells of the terminal), and the summary in the
-  // rest. (The desktop draws its own wide layout: see the desktop tests.)
+  // one row (46 characters, 47 cells of the terminal) inside its cards' border
+  // and padding (4 more), and the summary in the rest. (The desktop draws its
+  // own wide layout: see the desktop tests.)
   const wide = await layout($, 'terminal', WIDE_FROM)
-  expect([wide.direction, wide.weatherWidth]).toEqual(['row', 47])
+  expect([wide.direction, wide.weatherWidth]).toEqual(['row', 51])
   expect(wide.weather).toContain('45% of context · 90k / 200k')
   expect(wide.weather).toContain('Usage limits')
   expect(wide.weather).toContain('Week 25%')
@@ -73,9 +74,8 @@ test('from WIDE_FROM columns the weather stands in a column of its own, the summ
   expect(wide.summary).toContain('Summary cost $0.002 - Haiku 5.5')
 
   // Nothing is lost on the way: each line one column shows stands beside the
-  // weather in the same order, but the limits' bars, which gain their pace.
-  const isBar = (text: string) => /^[█░]/.test(text)
-  const narrow = (await allTexts($, 'terminal', WIDE_FROM - 1)).filter(text => !isBar(text))
+  // weather in the same order. (The bars are Rasters, not lines of text.)
+  const narrow = await allTexts($, 'terminal', WIDE_FROM - 1)
   expect(missingFrom(narrow, await allTexts($, 'terminal', WIDE_FROM))).toEqual([])
 })
 
@@ -98,22 +98,85 @@ test('beside the weather the rule spans the summary, and a click moves half its 
     await clock.advance(15 * SECOND)
   }
 
-  // At 120 columns the summary has the body's less the weather's (47 on the
-  // terminal) and the 2 between: the rule spans those.
-  expect(await thoughts($, 'terminal', 120)).toContain('─'.repeat(70))
+  // At 120 columns the summary has the body's less the weather's (51 on the
+  // terminal) and the 2 between, and inside its card's border and padding:
+  // the rule spans those.
+  expect(await thoughts($, 'terminal', 120)).toContain('─'.repeat(62))
 
   // Newest first, a row each: "46s · Bốn.", "→ Tiếp 4", and so on down to
-  // "→ Tiếp 1", the eighth. In one column a click passes five rows of a
-  // body of thirty...
+  // "→ Tiếp 1", the eighth. In one column a click passes three rows of a
+  // body of thirty, under the weather's card...
   await press($, 'older')
-  expect((await thoughts($))[1]).toBe('→ Tiếp 2')
+  expect((await thoughts($))[1]).toBe('→ Tiếp 3')
 
   // ...and beside the weather, where the window has the body's height but
-  // the summary's header and footer, twelve: past the last row, so it stops
-  // there.
+  // the summary's header, footer and card, eleven: past the last row, so it
+  // stops there.
   await press($, 'newest')
   await press($, 'older', 120)
   expect((await thoughts($, 'terminal', 120))[1]).toBe('→ Tiếp 1')
+})
+
+test('in the terminal each block stands in a card with a round border: one column, two; beside the summary, the weather and its own', SLOW, async ($, on) => {
+  const { agents, steps, clock } = engine(on, { rateLimits: limits(25) })
+  on('agent.spawn', () => ({ model: 'claude-haiku-5-5', agentId: 'a1' }))
+
+  await $.session.start(start)
+  await $.session.measure(measure(90_000, 45))
+  await oneTurn($, steps, clock, 't1', 'fix it')
+  agents.push({ id: 'a1', description: 'Find it', type: 'Explore', status: 'running' })
+  await $.agent.spawn({ prompt: 'Find it.', description: 'Find it' } as never)
+
+  // The cards' first lines, by the round borders that hold them.
+  const cardsOf = async (columns: number) => {
+    const ui = await mount($, 'terminal', columns)
+    const boxes = (await ui.findAll({ type: 'Box' })) as unknown as Found[]
+    await ui.unmount()
+
+    return boxes.filter(one => one.props.borderStyle === 'round').map(one => one.text.slice(0, 12))
+  }
+
+  // One column: the weather (the sky, the fill, the limits, the session) and
+  // the summary.
+  expect(await cardsOf(WIDE_FROM - 1)).toEqual(['☁ Cloudy45% ', '🧭 Thinking '])
+  // Beside the summary the weather adds a card for its subagents and one for
+  // the recent turns.
+  expect(await cardsOf(WIDE_FROM)).toEqual(['☁ Cloudy45% ', 'Subagents · ', 'Recent turns', '🧭 Thinking '])
+})
+
+test("in the terminal a letter presses each of the pane's buttons once it holds the keyboard; a digit, a recent turn", SLOW, async ($, on) => {
+  const { replies, steps, clock } = engine(on)
+  replies.push(answer('GIST: Một.\nNEXT: Tiếp 1'), answer('GIST: Hai.\nNEXT: Tiếp 2'), answer('GIST: Ba.\nNEXT: Tiếp 3'))
+
+  await $.session.start(start)
+  await oneTurn($, steps, clock, 't0', 'first')
+  await $.turn.start({ text: 'fix it', turnId: 't1' })
+
+  for (const text of ['First note.', 'Second note.', 'Third note.']) {
+    await runStep($, steps, 't1', [thought(0, text), stop])
+    await clock.advance(15 * SECOND)
+  }
+
+  // Each Button's label and hotkey, in a pane `columns` wide.
+  const keysOf = async (columns: number) => {
+    const ui = await mount($, 'terminal', columns)
+    const found = (await ui.findAll({ type: 'Button' })) as unknown as Found[]
+    await ui.unmount()
+
+    return found.map(one => [one.text.replace(/ · .*/, ''), one.props.hotkey])
+  }
+
+  await press($, 'older', 120)
+  expect(await keysOf(120)).toEqual([
+    ['☐ Persist', 'p'],
+    // The recent turns newest first, the current one shown.
+    ['▸ 08:00', '1'],
+    ['08:00', '2'],
+    ['↑ 3 newer updates', 'n'],
+    ['Turn summary off', 's'],
+    ['▲', 'k'],
+    ['▼', 'j'],
+  ])
 })
 
 test('with the summary off the weather keeps one column at any width', async ($, on) => {
@@ -185,24 +248,22 @@ test('under WIDE_FROM columns, in a widget and on the status line, nothing of th
   expect(await pane($, 'terminal', WIDE_FROM - 1)).toEqual([
     '☁ Cloudy',
     '45% of context · 90k / 200k',
-    bar(9),
     'auto-compact at 92% · 184k',
     'Last turn ▼ -160k · 2s · 0 tools · cache 96%',
     'Usage limits',
     // Alone in the spend files, the session takes the whole of each.
     '5h 11% · this session 11% · reset in 2h 22m',
     'this session 11%',
-    bar(2),
-    '██',
-    '░'.repeat(18),
     'Week 75% · this session 75% · reset in 18h 52m',
     'this session 75%',
-    bar(15),
-    '█'.repeat(15),
-    '░'.repeat(5),
     'Session cost $1.23',
     'Subagents · 1 at work',
   ])
+  expect(await barsShown($, WIDE_FROM - 1)).toEqual({
+    'bar-context': 'grey━38 track━40 mark┃1 track━6',
+    'bar-five_hour': 'amber━9 red╍9 track━67',
+    'bar-seven_day': 'amber━64 red╍8 track━13',
+  })
   expect(await turnRows($, 'terminal', WIDE_FROM - 1)).toEqual([])
 
   expect(await allTexts($, 'desktop', undefined, WIDGET)).toEqual(['☁ Cloudy · 45%', '5h 11% · Week 75% · $1.23'])

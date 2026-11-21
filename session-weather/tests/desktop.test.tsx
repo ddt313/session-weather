@@ -404,7 +404,8 @@ test("on the desktop ▲ and ▼ scroll the turn's updates about half the window
   await pressDesk($, 'older')
   expect(await card()).toEqual(end)
 
-  // ▲ goes back up; so does the newer updates' button, at once.
+  // ▲ goes back up, a press at a time; the newer updates' button at once.
+  await pressDesk($, 'newer')
   await pressDesk($, 'newer')
   expect((await card()).lines[0]).toBe('31s · Ba.')
   await pressDesk($, 'older')
@@ -551,22 +552,23 @@ test('on the desktop from WIDE_FROM columns a recent turn pressed shows beside t
     labels: [...LEFT_FOLDS, `${second}  2s`, `▸ ${first}  31s`, '☐ Persist', ...FOLDS, 'Turn summary off'],
   })
 
-  // In a body of 24 rows they do not: ▼ goes down until the oldest line
-  // stands at the card's foot, and no further; ▲ goes back up.
+  // In a body of 25 rows, 24 laid out and one left free at its foot, they do
+  // not: ▼ goes down until the oldest line stands at the card's foot, and no
+  // further; ▲ goes back up.
   const short = async () => {
-    const { texts, labels } = await desk($, WIDE_FROM, 24)
+    const { texts, labels } = await desk($, WIDE_FROM, 25)
     const top = texts.findIndex(text => text === 'Thinking' || text.startsWith('Turn at '))
 
     return { lines: texts.slice(top + 2, -1), labels }
   }
   expect((await short()).labels).toContain('▼')
-  for (let press = 0; press < 3; press += 1) await pressDesk($, 'older', WIDE_FROM, 24)
+  for (let press = 0; press < 3; press += 1) await pressDesk($, 'older', WIDE_FROM, 25)
   const end = await short()
   expect(end.lines.at(-1)).toBe('Chỉ sửa file A')
   expect(end.lines[0]).not.toBe('Recap. Claude đang sửa lỗi.')
-  await pressDesk($, 'older', WIDE_FROM, 24)
+  await pressDesk($, 'older', WIDE_FROM, 25)
   expect(await short()).toEqual(end)
-  for (let press = 0; press < 3; press += 1) await pressDesk($, 'newer', WIDE_FROM, 24)
+  for (let press = 0; press < 3; press += 1) await pressDesk($, 'newer', WIDE_FROM, 25)
   expect((await short()).lines[0]).toBe('Recap. Claude đang sửa lỗi.')
 
   // The current turn pressed again: back to it.

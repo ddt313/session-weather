@@ -2,7 +2,7 @@
 // compactions and the session's line.
 
 import { expect, test } from 'claude-code/testing'
-import { at, bar, BREAKDOWN, category, clockOf, DAY, endSession, engine, HOUR, limits, limitsShown, measure, measureLimits, MINUTE, NOW, PACED, pane, SECOND, sessionShown, SLOW, start, SUMMARY, turnDone, WIDE_FROM } from './helpers'
+import { at, barsShown, BREAKDOWN, category, clockOf, DAY, endSession, engine, HOUR, limits, limitsShown, measure, measureLimits, MINUTE, NOW, PACED, pane, SECOND, sessionShown, SLOW, start, SUMMARY, turnDone, WIDE_FROM } from './helpers'
 
 const compacted = {
   context: { window: 200_000 },
@@ -22,14 +22,16 @@ test('the pane opens as the session starts, with the weather, its fill, the grow
   expect(await pane($, 'terminal')).toEqual([
     '☁ Cloudy',
     '45% of context · 90k / 200k',
-    bar(9),
     'Last turn ▲ +90k',
     'Usage limits',
     '5h 3% · reset in 3h 26m',
-    bar(1),
     'Week 25% · reset in 2d 5h',
-    bar(5),
   ])
+  expect(await barsShown($)).toEqual({
+    'bar-context': 'grey━38 track━47',
+    'bar-five_hour': 'others━3 red╍6 track━76',
+    'bar-seven_day': 'others━21 red╍10 track━54',
+  })
 })
 
 test('the forecast follows the table, edge by edge', async ($, on) => {
@@ -256,33 +258,27 @@ test('from WIDE_FROM columns each limit bar marks the share of its time gone, an
   await $.session.start(start)
 
   // A column short of it: the bars as they were, no mark, no pace.
-  expect(await limitsShown($, 'terminal', WIDE_FROM - 1)).toEqual([
-    '5h 11% · reset in 2h 22m',
-    `${bar(2)} [dim]`,
-    'Week 75% · reset in 18h 52m',
-    `${bar(15)} [dim]`,
-  ])
+  expect(await limitsShown($, 'terminal', WIDE_FROM - 1)).toEqual(['5h 11% · reset in 2h 22m', 'Week 75% · reset in 18h 52m'])
+  expect(await barsShown($, WIDE_FROM - 1)).toEqual({
+    'bar-five_hour': 'others━9 red╍9 track━67',
+    'bar-seven_day': 'others━64 red╍8 track━13',
+  })
 
   for (const surface of ['terminal'] as const) {
-    // From it: the cell where the time gone falls is │ (the 11th of the 5-hour
-    // bar, the 18th of the week's), and 11% over 53% of the time reads 21% at
-    // the reset, 75% over 89% of it 84%.
+    // From it: the bar marks where the time gone falls, and 11% over 53% of
+    // the time reads 21% at the reset, 75% over 89% of it 84%.
     expect(await limitsShown($, surface, WIDE_FROM)).toEqual([
       '5h 11% · reset in 2h 22m',
-      `██${'░'.repeat(8)}│${'░'.repeat(9)} ~21% at reset`,
-      '██ [dim]',
-      `${'░'.repeat(8)} [dim]`,
-      '│',
-      `${'░'.repeat(9)} [dim]`,
-      ' ~21% at reset [dim]',
+      '~21% at reset [dim]',
       'Week 75% · reset in 18h 52m',
-      `${'█'.repeat(15)}░░│░░ ~84% at reset`,
-      `${'█'.repeat(15)} [dim]`,
-      '░░ [dim]',
-      '│',
-      '░░ [dim]',
-      ' ~84% at reset [dim]',
+      '~84% at reset [dim]',
     ])
+    expect(await barsShown($, WIDE_FROM)).toEqual({
+      // The bars shorter by the pace beside them, 33 cells: the mark where the
+      // time gone falls (the 18th of the 5-hour bar, the 30th of the week's).
+      'bar-five_hour': 'others━4 red╍3 track━10 mark┃1 track━15',
+      'bar-seven_day': 'others━25 red╍3 track━1 mark┃1 track━3',
+    })
   }
 })
 
@@ -299,19 +295,15 @@ test('early in a window the bar has its mark and no pace; a share on its way pas
   await $.session.start(start)
   expect(await limitsShown($, 'terminal', WIDE_FROM)).toEqual([
     '5h 9% · reset in 4h 30m',
-    `█│${'░'.repeat(18)}`,
-    '█ [dim]',
-    '│',
-    `${'░'.repeat(18)} [dim]`,
     'Week 60% · reset in 3d 12h',
-    // The fill runs past the mark: ahead of the window's time.
-    `${'█'.repeat(9)}│██${'░'.repeat(8)} >100% at reset`,
-    `${'█'.repeat(9)} [dim]`,
-    '│',
-    '██ [dim]',
-    `${'░'.repeat(8)} [dim]`,
-    ' >100% at reset [dim]',
+    '>100% at reset [dim]',
   ])
+  expect(await barsShown($, WIDE_FROM)).toEqual({
+    'bar-five_hour': 'others━4 mark┃1 track━42',
+    // The fill runs past the mark, ahead of the window's time, and its pace
+    // hatched to the end; the bar shorter by the words beside it.
+    'bar-seven_day': 'others━15 mark┃1 others━3 red╍13',
+  })
 })
 
 test('from WIDE_FROM columns what fills the context stands under the auto-compact line, largest first, the rest in one', async ($, on) => {
@@ -326,10 +318,10 @@ test('from WIDE_FROM columns what fills the context stands under the auto-compac
   expect(await pane($, 'terminal', WIDE_FROM - 1)).toEqual([
     '☁ Cloudy',
     '45% of context · 90k / 200k',
-    bar(9),
     'auto-compact at 92% · 184k',
     'Last turn ▲ +90k',
   ])
+  expect((await barsShown($, WIDE_FROM - 1))['bar-context']).toBe('grey━38 track━40 mark┃1 track━6')
 
   for (const surface of ['terminal'] as const) {
     // From it: the rows in use, never the free space, the buffer or the tools
@@ -488,12 +480,12 @@ test("the forecast follows a change of the auto-compact setting from the next tu
 
   await $.session.start(start)
   await $.session.measure(measure(152_000, 76))
-  expect((await pane($)).slice(0, 4)).toEqual([
+  expect((await pane($)).slice(0, 3)).toEqual([
     'ϟ Compact soon',
     '76% of context · 152k / 200k',
-    bar(15),
     'auto-compact at 84% · 167k',
   ])
+  expect((await barsShown($))['bar-context']).toBe('red━65 track━5 mark┃1 track━14')
 
   config.breakdown = { isAutoCompactEnabled: false }
   await $.session.measure(measure(154_000, 77))
