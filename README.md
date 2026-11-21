@@ -6,7 +6,7 @@ so far.
 
 | Mod | What it does |
 | --- | --- |
-| [session-weather](session-weather) | A pane with the session's weather: how full the context is, the last turn, the 5-hour and weekly limits and this session's part of each, the cost, how many subagents work, and a running Haiku summary of what Claude is thinking. A wide pane adds the limits' pace, what fills the context, a row for each subagent (what it is at, its model, the tokens it read and wrote) and the recent turns. While the pane is not on screen, a status line under the prompt keeps its key figures. |
+| [session-weather](session-weather) | A pane with the session's weather: how full the context is, the last turn, the 5-hour and weekly limits and this session's part of each, the cost, how many subagents work, and a running Haiku summary of what Claude is thinking. On the desktop, cards that fold add a row for each subagent (what it is at, its model, the tokens it read and wrote), the turn's tool calls and the recent turns, any of them to look back at; a wide pane adds the limits' pace and what fills the context. While the pane is not on screen, a status line under the prompt keeps its key figures. |
 
 ## Session Weather
 
@@ -15,16 +15,25 @@ The pane opens beside the conversation when a session starts.
 or the terminal is too narrow to show it, a status line under the prompt
 keeps its key figures.
 
+The thinking summary needs Claude's thinking, which Claude Code passes on
+only while the session's **Transcript view** is **Thinking** or **Verbose**.
+In the Normal view it has little or nothing to summarize: the card reads
+`No thinking notes yet: they come only with the Thinking or Verbose
+transcript view.` once the turn has done something. Switch the view and the
+next prompt's thinking comes through.
+
 The pane lays itself out by its width, and changes over as you drag it wider
 or narrower.
 
-![The Session Weather pane on the desktop under 90 columns: the sky and the session's cost, a tile each for the context and the two limits, a warning, the subagents and the thinking summary, all in cards](session-weather/screenshot.png)
+![The Session Weather pane on the desktop under 90 columns: the sky and the session's cost, a tile each for the context and the two limits, a warning, the last turn, the subagents, the tools and the recent turns folded to their top line, and the thinking summary of a turn picked from the list, all in cards](session-weather/screenshot.png)
 
-Under 90 columns on the desktop, here while a turn runs and two of its four
-subagents are at work: the sky, the session's line and its cost across the
+Under 90 columns on the desktop, here with a turn of three subagents picked
+from the recent turns: the sky, the session's line and its cost across the
 top; a tile each for the context, the 5-hour limit and the weekly one; the
-warning that the week is on pace to run out; the subagents, a row each; and
-the thinking summary under them, newest update first (see **On the
+warning that the week is on pace to run out; the last turn; the subagents,
+the tools and the recent turns, each folded to its top line and its gist
+(`3 finished`, `27 calls`, `15 turns`); and the thinking summary of the turn
+picked, its recap on top, taking the height they leave (see **On the
 desktop**). The terminal draws no images and keeps rows of text at that
 width: the weather on top (the sky, the context's fill and where
 auto-compact runs, the last turn, the 5-hour and weekly limits with this
@@ -32,16 +41,18 @@ session's part of each in yellow, the session's cost), then Haiku's updates
 on Claude's thinking, newest first, each with its gist, a decision (★), what
 Claude takes as true unchecked (?) and its next step (→).
 
-![The Session Weather pane on the desktop from 90 columns: the limits, the context and the recent turns as cards on the left, the subagents and the thinking summary on the right, the warning and the cost across the top](session-weather/screenshot-wide.png)
+![The Session Weather pane on the desktop from 90 columns: the context, the limits and the recent turns as cards on the left, the subagents, the tools and the thinking summary of the turn picked on the right, the warning and the cost across the top](session-weather/screenshot-wide.png)
 
-From 90 columns, here while a turn runs and three of its four subagents are
-at work: the sky, the session's line, the warning and the cost across the
-top; on the left, the limits (each with the pace it is on, `~16% at reset`
-or `>100% at reset`), what fills the context and the recent turns, with the
-box that persists them and the running turn marked ▸; on the right, the
-subagents, with all their tokens on the card's top line, the thinking
-summary of the marked turn, and under it what the summary cost and its
-switch. The terminal puts the weather in a column of its own on the left
+From 90 columns, here with the same turn picked: the sky, the session's
+line, the warning and the cost across the top; on the left, what fills the
+context, the limits (each with the pace it is on, `~47% at reset` or
+`>100% at reset`) and the recent turns, thirteen of fifteen with ▲ and ▼ to
+scroll the rest, the turn picked marked ▸ with its three subagents and 27
+tool calls, and the box that persists them under the table; on the right,
+the turn's subagents, two of three with all their tokens on the card's top
+line, its tool calls newest first, each with the subagent that made it, its
+thinking summary, and under it what the summary cost and its switch. Each
+card folds by ▾ on its top line. The terminal puts the weather in a column of its own on the left
 and the summary beside it (see **Layout** and **Wide layout**).
 
 **Layout**
@@ -50,8 +61,8 @@ and the summary beside it (see **Layout** and **Wide layout**).
   font) the pane lays out in two, as a web page does on a wide screen: the
   weather in a column of its own on the left, the thinking summary beside it
   with the rest of the width and, in a pane 24 rows tall or more, its whole
-  height (on the desktop the subagents' card stands over the summary), as in
-  the wide picture. Narrower, the weather stands above the summary, as in the
+  height (on the desktop the subagents' and the tools' cards stand over the
+  summary), as in the wide picture. Narrower, the weather stands above the summary, as in the
   narrow one. With the summary off the pane keeps one column at any width.
   Drag the pane wider or narrower and it changes over.
 - From 90 columns the weather also says more, in the room its column has:
@@ -97,12 +108,14 @@ top:
   layout lists them (see the tools card below), three at a time here.
 - The recent turns, folded here to their top line (`Recent turns 30 turns`
   and **☐ Persist**) until you open them with ▸: then the wide layout's
-  table (see below), five turns at a time, ▲ and ▼ scrolling the rest. Press a turn, with the summary on, and the subagents,
-  the tools and the thinking summary show it, as from 90 columns; the next
-  prompt shows its own again. Opened or folded here, it stays so, apart from
-  the wide layout's.
-- The thinking summary, as a card: the current turn's updates as the
-  terminal lists them (see **Thinking summary**), newest first, a rule
+  table (see below), five turns at a time, ▲ and ▼ scrolling the rest.
+  Press a turn, with the summary on, and the subagents, the tools and the
+  thinking summary show it, as from 90 columns; the next prompt shows its
+  own again. Opened or folded here, it stays so, apart from the wide
+  layout's.
+- The thinking summary, as a card: the updates of the turn shown (the
+  current one, or one picked from the recent turns, titled `Turn at 10:32`)
+  as the terminal lists them (see **Thinking summary**), newest first, a rule
   between two; each gist led by its time into the turn (or `Recap.`) in a
   heavier face, and what Claude decided, takes as true unchecked and does
   next each by its icon (a star, a question mark, an arrow), in orange, blue
@@ -129,7 +142,8 @@ From 90 columns, with the summary on:
     it added to the context as a bar beside the others' with its tokens
     after it, how many subagents it started (blank for none), and its tool
     calls, these two headed by the icons of their cards on the right; with
-    **☐ Persist** above. In a pane 24 rows tall or more it shows as many
+    **☐ Persist** under the table (on the top line while the card is
+    folded). In a pane 24 rows tall or more it shows as many
     turns as fit, ▲ and ▼ on its top line scrolling the rest a turn a press
     beside where the rows stand (`1–12 of 30`); your next prompt brings the
     newest back to the top. Press a turn to show its updates on the right,
@@ -150,8 +164,8 @@ From 90 columns, with the summary on:
   made none reads `No tools called in this turn`.
 - With the summary off, the cards stand in one column (the context, the
   limits, the subagents, the tools, the recent turns): the thinking card is
-  gone, the turns are figures alone, and the footer reads `Thinking summary is off`
-  beside **Turn summary on**.
+  gone, the turns are figures alone, and the footer reads `Thinking summary
+  is off` beside **Turn summary on**.
 
 The subagents', the tools' and the thinking card each fold to their top
 line, and from 90 columns so do the context's, the limits' and the recent
@@ -277,7 +291,8 @@ Each row is cut to the column, never wrapped.
   figures and its newest 100 updates: reloading the mod keeps them, and a
   `/clear` starts the list over with the new conversation. Closing Claude
   Code loses them, unless you persist the session: **☐ Persist**, a box
-  beside the header, unticked until you press it, and for this session
+  with the list (in the terminal beside its header; on the desktop under the
+  table, or on the card's top line folded), unticked until you press it, and for this session
   alone. Ticked, **☑ Persist**, the session's turns (as many as the list
   keeps, no more, each with the subagents it started and its tool calls)
   and its count of compactions go to a file named after the session's id in
@@ -343,8 +358,8 @@ Each row is cut to the column, never wrapped.
 - The prompt's earlier updates stay, newest first, in their own window under
   the weather, or beside it in a wide pane. A recap closes a turn that had two updates or more since the
   last recap, or that ended with notes no update read. A new prompt of yours
-  starts the list over; in a wide pane the recent turns bring an earlier
-  one's back.
+  starts the list over; the recent turns bring an earlier one's back (on
+  the desktop at any width, in the terminal from 90 columns).
 - A turn that a subagent's result begins (its hand-back, which the engine
   delivers as another Claude session's message) or a background task's
   notification is no new prompt: its updates join the list of the prompt
@@ -362,10 +377,13 @@ Each row is cut to the column, never wrapped.
   The mouse wheel does not reach the updates (the desktop scrolls the pane
   itself with it), nor do the keys, and holding an arrow down does not scroll
   (the desktop draws the pane again only when the press ends).
-- Claude Code receives summaries of Claude's reasoning only while the
-  session's **Transcript view** is **Thinking** (or Verbose), from the next
-  prompt on. In the Normal view only the short notes Claude writes between
-  tool calls arrive, so there is less to summarize.
+- The summary needs the session's **Transcript view** set to **Thinking**
+  (or Verbose): only then does Claude Code pass on Claude's reasoning, from
+  the next prompt on. In the Normal view at most the short notes Claude
+  writes between tool calls arrive, often none, and the card stays all but
+  empty. A turn that called tools, wrote to you or ended with no thinking
+  note says so: `No thinking notes yet: they come only with the Thinking or
+  Verbose transcript view.` (`No thinking notes this turn: …` once ended).
 - Each turn's updates also go to a log of the session's own, a Markdown
   file named after the session's id in `~/.claude/session-weather/thinking/`
   (under `CLAUDE_CONFIG_DIR` when that is set). A turn's section says when
