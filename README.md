@@ -119,7 +119,9 @@ From 90 columns, with the summary on:
     smallest fold together as `Other`.
   - The recent turns, as a table: when each began and how long it ran, what
     it added to the context as a bar beside the others' with its tokens
-    after it, and its tool calls; with **☐ Persist** above. Press a turn to
+    after it, how many subagents it started (blank for none), and its tool
+    calls, these two headed by the icons of their cards on the right; with
+    **☐ Persist** above. Press a turn to
     show its updates on the right, marked ▸; the next prompt shows its own
     again.
 - On the right: the subagents, with all their tokens on the card's top line;

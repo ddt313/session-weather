@@ -4362,12 +4362,16 @@ const swatchSvg = (ink: string) =>
   `<rect width="12" height="8" rx="2" fill="${ink === HATCH ? 'url(#h)' : ink}"/></svg>`
 
 // The cells of the wide layout's left column, the design's 344 pixels; and,
-// in its table of recent turns, the cells of the time, the duration and the
-// tool calls.
+// in its table of recent turns, the cells of the time, the duration, the
+// tokens added, the subagents and the tool calls. Each column but the bar's
+// is held to its width (never shrunk), so every row's bar has the same track
+// and the figures stand under their headers.
 const LEFT_CELLS = 43
 const TIME_CELLS = 7
-const TOOK_CELLS = 9
-const TOOLS_CELLS = 5
+const TOOK_CELLS = 6
+const ADDED_CELLS = 6
+const AGENTS_CELLS = 4
+const TOOLS_CELLS = 4
 
 // The height of a row of the recent turns, the design's 32 pixels: the
 // row's bar stands in a drawing that tall, which holds the row to it.
@@ -4634,21 +4638,24 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
           onPress={() => setSaving($, !isSaved).catch(() => {})}
         />
       </Box>
-      <Box flexDirection="row" gap={1} paddingRight={1}>
-        <Box width={TIME_CELLS + 1 + TOOK_CELLS}>
-          <Text size="caption" dimColor>
+      {/* The header over the columns, the subagents and the tool calls by
+          the icons their cards on the right carry. */}
+      <Box flexDirection="row" alignItems="center" gap={1} paddingRight={1}>
+        <Box width={TIME_CELLS + 1 + TOOK_CELLS} flexShrink={0}>
+          <Text size="caption" dimColor wrap="truncate">
             Time · Duration
           </Text>
         </Box>
         <Box flexGrow={1} flexShrink={1} minWidth={0}>
-          <Text size="caption" dimColor>
+          <Text size="caption" dimColor wrap="truncate">
             Context added
           </Text>
         </Box>
-        <Box width={TOOLS_CELLS} justifyContent="flex-end">
-          <Text size="caption" dimColor>
-            Tools
-          </Text>
+        <Box width={AGENTS_CELLS} flexShrink={0} justifyContent="flex-end">
+          <Svg source={iconSvg('fork', INK.grey, 14)} alt="Agents" width={14} height={14} />
+        </Box>
+        <Box width={TOOLS_CELLS} flexShrink={0} justifyContent="flex-end">
+          <Svg source={iconSvg('tool', INK.grey, 14)} alt="Tools" width={14} height={14} />
         </Box>
       </Box>
       <Box flexDirection="column">
@@ -4665,6 +4672,9 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
                 : '—'
           const ran = `${took}${one.isAborted === true ? ' · interrupted' : ''}`
           const added = grownOf(one)
+          // The subagents it started, those past the ones kept with them;
+          // none leaves the cell blank, so the turns that ran some stand out.
+          const started = (one.subagents?.length ?? 0) + (one.moreSubagents ?? 0)
           const growth = barSvg(
             [{ from: 0, to: added === null ? 0 : clamp01(added / mostGrown), ink: isShown ? INK.mine : INK.grey }],
             12,
@@ -4680,7 +4690,7 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
           return (
             <Box position="relative" flexDirection="row" alignItems="center" gap={1} paddingRight={1}>
               {isShown && <Box position="absolute" top={0} bottom={0} left={0} right={0} {...cardLook(DESK.raised)} />}
-              <Box position="relative" width={TIME_CELLS + 1 + TOOK_CELLS}>
+              <Box position="relative" width={TIME_CELLS + 1 + TOOK_CELLS} flexShrink={0}>
                 {isOn ? (
                   <Button
                     key={`turn-${one.turnId}`}
@@ -4701,11 +4711,20 @@ const drawWideDesktop = async ($: EngineInterface, ui: DesktopUi, columns: numbe
                 <Box flexGrow={1} flexShrink={1} minWidth={0}>
                   <Svg source={growth.source} alt={added === null ? 'Context added not known' : `Added ${formatTokens(Math.abs(added))}`} height={growth.height} />
                 </Box>
-                <Text size="caption" dimColor={!isShown} tabular>
-                  {added === null ? '—' : added < 0 ? `-${formatTokens(-added)}` : `+${formatTokens(added)}`}
-                </Text>
+                <Box width={ADDED_CELLS} flexShrink={0} justifyContent="flex-end">
+                  <Text size="caption" dimColor={!isShown} tabular>
+                    {added === null ? '—' : added < 0 ? `-${formatTokens(-added)}` : `+${formatTokens(added)}`}
+                  </Text>
+                </Box>
               </Box>
-              <Box position="relative" width={TOOLS_CELLS} justifyContent="flex-end">
+              <Box position="relative" width={AGENTS_CELLS} flexShrink={0} justifyContent="flex-end">
+                {started > 0 && (
+                  <Text size="caption" dimColor={!isShown} tabular>
+                    {`${started}`}
+                  </Text>
+                )}
+              </Box>
+              <Box position="relative" width={TOOLS_CELLS} flexShrink={0} justifyContent="flex-end">
                 <Text size="caption" dimColor={!isShown} tabular>
                   {`${one.tools}`}
                 </Text>

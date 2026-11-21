@@ -4727,7 +4727,8 @@ test('on the desktop from WIDE_FROM columns: the sky, the cost across the top; t
     'Recent turns',
     'Time · Duration',
     'Context added',
-    'Tools',
+    // The subagents' and the tool calls' headers are icons; no subagents
+    // leaves the row's cell blank.
     '2s',
     '+90k',
     '0',
@@ -4834,6 +4835,13 @@ test('on the desktop from WIDE_FROM columns a recent turn pressed shows the suba
 
     return texts.slice(texts.indexOf('Subagents'), texts.findIndex(text => text === 'Thinking' || text.startsWith('Turn at ')))
   }
+
+  // The recent turns count each one's subagents, those past the 30 kept with
+  // them, before its tool calls.
+  const { texts, alts } = await desk($, WIDE_FROM)
+  const rows = texts.slice(texts.indexOf('Context added') + 1, texts.indexOf('Subagents'))
+  expect(rows.filter(text => /^\d+$/.test(text))).toEqual(['1', '0', '32', '0'])
+  expect(alts).toEqual(expect.arrayContaining(['Agents', 'Tools']))
 
   // The current turn: its own subagent alone.
   const now = await card()
